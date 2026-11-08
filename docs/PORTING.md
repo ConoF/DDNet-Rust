@@ -32,7 +32,9 @@ The Rust executable does not use any C++ code or FFI.
 | UDP 0.6 handshake probe (not game login) | Partial | Loopback UDP mock server; public server compatibility unverified |
 | Snapshot packet headers and multipart reassembly | Partial | Truncation, duplicate, out-of-order 900-byte pieces, 64-part cap |
 | Complete delta snapshot decoding and playable game state | Not implemented | None |
-| Map download, graphics, input devices, UI, audio | Not implemented | None |
+| Map downloads, snapshot-aware headless UDP session and NETMSG_INPUT | Partial | Mock server, CRC and input packet tests |
+| Pure Rust CPU debug framebuffer for map and tee snapshot overlays | Implemented as diagnostic module | Pixel-level tests, real upstream map PPM regression |
+| Textured GPU renderer, OS window, input devices, UI, audio | Not implemented | None |
 | Server browser, gameplay, editor and demos | Not implemented | None |
 
 Passing CI here **does not** mean the game itself is operational.
@@ -70,3 +72,5 @@ This is a limited differential test, not a full client simulation.
 Headless CLI: `cargo run --locked -- --connect-headless 127.0.0.1:8303` can test transport, map acquisition and wait for the first snapshot. This does not provide graphics or actual gameplay.
 
 Login order is checked against original `src/game/client/gameclient.cpp`: `CON_READY` -> `Cl_StartInfo` -> `Sv_ReadyToEnter` -> `ENTERGAME`. A mock protocol server tests this order; public-server compatibility is not yet established.
+
+Collision-only visualization: `cargo run --locked -- --render-debug-map upstream/ddnet/data/maps/ctf1.map target/ctf1-debug.ppm`. This PPM is not the vanilla DDNet graphical renderer.

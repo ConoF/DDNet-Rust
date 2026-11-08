@@ -1,5 +1,7 @@
 use ddnet_rust::datafile::Datafile;
 use ddnet_rust::map::GameMap;
+use ddnet_rust::graphics::{Framebuffer, Camera};
+use ddnet_rust::physics::Vec2;
 use ddnet_rust::layers::PhysicsLayers;
 use ddnet_rust::physics::{Character, Input, JumpEvent, Tuning};
 use ddnet_rust::protocol::{decode_int, write_int};
@@ -22,6 +24,7 @@ fn main() {
         [arg] if arg == "--huffman-vectors" => huffman_vectors(),
         [arg, path] if arg == "--inspect-map" => inspect_map(path),
         [arg, path] if arg == "--inspect-game-map" => inspect_game_map(path),
+        [arg, path, output] if arg == "--render-debug-map" => render_debug_map(path, output),
         [arg, path] if arg == "--inspect-layers" => inspect_layers(path),
         [arg, addr] if arg == "--probe-server" => probe(addr),
         [arg, addr] if arg == "--connect-headless" => connect_headless(addr),
@@ -276,4 +279,34 @@ fn connect_headless(endpoint: &str) {
 
     eprintln!("Timed out waiting for DDNet 0.6 map/READY handshake. Stage: {:?}", session.stage);
     std::process::exit(1);
+}
+
+fn render_debug_map(path: &str, output: &str) {
+    let bytes = std::fs::read(path).unwrap_or_else(|error| {
+        eprintln!("Unable to open map {path}: {error}");
+        std::process::exit(1);
+    });
+    let file = Datafile::parse(&bytes).unwrap_or_else(|error| {
+        eprintln!("Invalid map file {path}: {error:?}");
+        std::process::exit(1);
+    });
+    let map = GameMap::from_datafile(&file, 16_777_216).unwrap_or_else(|error| {
+        eprintln!("Unable to read collision tile layer {path}: {error:?}");
+        std::process::exit(1);
+    });
+    let mut frame = Framebuffer::new(960, 540).expect("fixed diagnostic resolution");
+    let world_width = map.width as f32 * 32.0;
+    let world_height = map.height as f32 * 32.0;
+    let scale = (960.0 / world_width)
+        .min(540.0 / world_height)
+        .clamp(0.05, 4.0);
+    frame.render_map(&map, Camera {
+        center: Vec2::new(world_width / 2.0, world_height / 2.0),
+        scale,
+    }).expect("bounded map camera");
+    std::fs::write(output, frame.ppm_bytes()).unwrap_or_else(|error| {
+        eprintln!("Unable to write debug frame {output}: {error}");
+        std::process::exit(1);
+    });
+    println!("Wrote debug frame {output}: {}x{} tiles", map.width, map.height);
 }
