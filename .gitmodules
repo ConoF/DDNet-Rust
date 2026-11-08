@@ -1,0 +1,3 @@
+[submodule "upstream/ddnet"]
+	path = upstream/ddnet
+	url = https://github.com/ddnet/ddnet.git
