@@ -58,33 +58,58 @@ pub struct OnlineHud {
     announcement: Option<Line>,
 }
 
-fn rect(frame: &mut Framebuffer, x: usize, y: usize, width: usize,
-    height: usize, color: u32)
-{
-    let max_x = (x + width).min(frame.width as usize);
-    let max_y = (y + height).min(frame.height as usize);
-    for row in y.min(max_y)..max_y {
-        let offset = row * frame.width as usize;
-        for col in x.min(max_x)..max_x {
-            frame.pixels[offset + col] = color;
-        }
-    }
+/// HUD drawing protocol shared by the old RGB framebuffer and the GPU
+/// rectangle/glyph batch generator. No full-screen rasterization on GPU.
+pub trait HudCanvas {
+    fn dimensions(&self) -> (usize, usize);
+    fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32);
+    fn write_text(&mut self, x: usize, y: usize, value: &str,
+        color: u32, max_chars: usize);
 }
 
-fn text(frame: &mut Framebuffer, x: usize, y: usize,
-    value: &str, color: u32, max_chars: usize)
-{
-    for (index, ch) in value.chars().take(max_chars).enumerate() {
-        let Some(glyph) = BASIC_FONTS.get(ch).or_else(|| BASIC_FONTS.get('?'))
-            else { continue; };
-        for (row, bits) in glyph.iter().enumerate() {
-            for bit in 0..8 {
-                if bits & (1 << bit) != 0 {
-                    rect(frame, x + index * 8 + bit, y + row, 1, 1, color);
+impl HudCanvas for Framebuffer {
+    fn dimensions(&self) -> (usize, usize) {
+        (self.width as usize, self.height as usize)
+    }
+
+    fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32) {
+        let max_x = x.saturating_add(w).min(self.width as usize);
+        let max_y = y.saturating_add(h).min(self.height as usize);
+        for row in y.min(max_y)..max_y {
+            let offset = row * self.width as usize;
+            for col in x.min(max_x)..max_x {
+                self.pixels[offset + col] = color;
+            }
+        }
+    }
+
+    fn write_text(&mut self, x: usize, y: usize, value: &str,
+        color: u32, max_chars: usize)
+    {
+        for (index, ch) in value.chars().take(max_chars).enumerate() {
+            let Some(glyph) = BASIC_FONTS.get(ch).or_else(|| BASIC_FONTS.get('?'))
+                else { continue; };
+            for (row, bits) in glyph.iter().enumerate() {
+                for bit in 0..8 {
+                    if bits & (1 << bit) != 0 {
+                        self.fill_rect(x + index * 8 + bit, y + row, 1, 1, color);
+                    }
                 }
             }
         }
     }
+}
+
+fn rect<C: HudCanvas>(canvas: &mut C, x: usize, y: usize, w: usize,
+    h: usize, color: u32)
+{
+    canvas.fill_rect(x, y, w, h, color);
+}
+
+fn text<C: HudCanvas>(canvas: &mut C, x: usize, y: usize,
+    value: &str, color: u32, max_chars: usize)
+{
+    canvas.write_text(x, y, value, color, max_chars);
 }
 
 impl OnlineHud {
@@ -142,11 +167,12 @@ impl OnlineHud {
     /// Names occupy screen space above the actual tee, rather than a
     /// permanent debugging toolbar. This follows the original DDNet
     /// draw order: after foreground map layers, before chat and menus.
-    pub fn draw_nameplates(
-        &self, frame: &mut Framebuffer, snapshot: &SnapshotState, camera: Camera,
+    pub fn draw_nameplates<C: HudCanvas>(
+        &self, frame: &mut C, snapshot: &SnapshotState, camera: Camera,
     ) {
-        let width = frame.width as f32;
-        let height = frame.height as f32;
+        let (frame_width, frame_height) = frame.dimensions();
+        let width = frame_width as f32;
+        let height = frame_height as f32;
         if !camera.scale.is_finite() || !camera.center.x.is_finite()
             || !camera.center.y.is_finite()
         {
@@ -174,9 +200,8 @@ impl OnlineHud {
         }
     }
 
-    fn draw_scoreboard(&self, frame: &mut Framebuffer, snapshot: &SnapshotState) {
-        let width = frame.width as usize;
-        let height = frame.height as usize;
+    fn draw_scoreboard<C: HudCanvas>(&self, frame: &mut C, snapshot: &SnapshotState) {
+        let (width, height) = frame.dimensions();
         if width < 320 || height < 200 { return; }
         let panel_width = width.min(820).saturating_sub(60);
         let panel_x = (width - panel_width) / 2;
@@ -217,13 +242,12 @@ impl OnlineHud {
         }
     }
 
-    pub fn render(
-        &self, frame: &mut Framebuffer, stage: &str,
+    pub fn render<C: HudCanvas>(
+        &self, frame: &mut C, stage: &str,
         _local_weapon: Option<i32>, _server_tick: Option<i32>,
         scoreboard: Option<&SnapshotState>,
     ) {
-        let width = frame.width as usize;
-        let height = frame.height as usize;
+        let (width, height) = frame.dimensions();
         if width < 240 || height < 120 { return; }
 
         // Official gameplay does not obscure the world with permanent
