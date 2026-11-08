@@ -13,8 +13,9 @@ A clean-room, **Rust-first port of the official DDNet client**, targeting gamepl
 ```sh
 git clone --recurse-submodules https://github.com/ConoF/DDNet-Rust.git
 cd DDNet-Rust
-cargo test
+cargo test --locked
 cargo run -- --self-test
+cargo run -- --inspect-game-map upstream/ddnet/data/maps/ctf1.map
 ```
 
 `upstream/ddnet` is a **pinned Git submodule** containing the unmodified official C++ source of DDNet 20.2.1. It is a reference and compatibility oracle, **not linked into the Rust executable**. Use `git submodule update --init` to fetch it after an existing clone.
@@ -28,3 +29,16 @@ cargo run -- --self-test
 - Preserve the attribution and licenses of all upstream sources and assets.
 
 The original project is [DDraceNetwork/DDNet](https://github.com/ddnet/ddnet), maintained by its respective contributors. This project is an independent, incomplete Rust port and is not an official DDNet release.
+
+## Ported components (not a playable client)
+
+- Bounded DATA v3/v4 map reader and zlib decompression, with real upstream
+  fixture checks.
+- Tilemap game layer extraction, vanilla solid/nohook detection, grounded
+  checks, collision stepping in `MoveBox` and `MovePoint`.
+- Teeworlds signed integer network codec, 0.6 packet/chunk header codecs,
+  and offline 10-bit vital sequence / ACK simulation.
+
+These isolated components pass unit and CI tests. **No server connection,
+graphics output, gameplay loop, or playable release exists yet.** Remaining
+work is tracked in [docs/PORTING.md](docs/PORTING.md).

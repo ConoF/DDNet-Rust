@@ -18,10 +18,12 @@ The Rust executable does not use any C++ code or FFI.
 | v4 zlib-compressed data blocks | Implemented, bounded | zlib round trips, corruption and size-limit tests |
 | Vanilla game layer tiles and basic solid/ground queries | Partial | synthetic simulations and real-map CI smoke tests |
 | 0.6 packet and chunk header packing/validation | Partial | Fixed vectors, roundtrips, rejected malformed inputs |
-| UDP connection, tokens, reliability, Huffman, 0.7 networking | Not implemented | None |
+| Offline 10-bit vital ACK/sequence window | Partial | Loss, duplication, reordering and wraparound simulations |
+| UDP socket, actual resend timers, tokens, Huffman, 0.7 networking | Not implemented | None |
 | Gravity, directional movement, ground/air jump | Partial | 50 Hz tick-state simulation tests |
 | Velocity ramp and projectile position | Math functions only | Unit tests |
-| Collision, tiles, freeze, switches, teleports | Not implemented | None |
+| Basic game tiles, ground tests, MovePoint / MoveBox | Partial | Synthetic collision, wall, ground, corner and bounded-motion simulations |
+| Front/switch/tune/teleport layers, full collision | Not implemented | None |
 | Hook, player interactions, full prediction | Not implemented | None |
 | Handshake, snapshot decoding, live server communication | Not implemented | None |
 | Map download, graphics, input devices, UI, audio | Not implemented | None |
@@ -48,7 +50,7 @@ Passing CI here **does not** mean the game itself is operational.
 git clone --recurse-submodules https://github.com/ConoF/DDNet-Rust.git
 cd DDNet-Rust
 git -C upstream/ddnet rev-parse HEAD
-cargo test
+cargo test --locked
 cargo run -- --self-test
 cargo run -- --inspect-map upstream/ddnet/data/maps/ctf1.map
 ```
