@@ -14,15 +14,15 @@ The Rust executable does not use any C++ code or FFI.
 | Rust crate/CLI | Initial scaffold | Build, smoke test in CI |
 | Signed Teeworlds variable integers | Implemented | Reference vectors, 165k+ round trips, C++ differential test |
 | UTF-8 NUL-terminated strings | Partial, strict | Invalid-input and bounds tests |
+| Teeworlds datafile v3/v4 metadata and item/block indexing | Partial | Synthetic fixtures, truncation tests, mutation simulations |
+| v4 zlib-compressed data blocks / map layer decoding | Not implemented | None |
 | Gravity, directional movement, ground/air jump | Partial | 50 Hz tick-state simulation tests |
 | Velocity ramp and projectile position | Math functions only | Unit tests |
 | Collision, tiles, freeze, switches, teleports | Not implemented | None |
 | Hook, player interactions, full prediction | Not implemented | None |
 | Network packets, handshake, snapshots | Not implemented | None |
-| Map files and map downloads | Not implemented | None |
-| Renderer, input devices, UI, audio | Not implemented | None |
-| Server browser and gameplay | Not implemented | None |
-| Map editor, demos, full vanilla feature set | Not implemented | None |
+| Map download, graphics, input devices, UI, audio | Not implemented | None |
+| Server browser, gameplay, editor and demos | Not implemented | None |
 
 Passing CI here **does not** mean the game itself is operational.
 
@@ -31,8 +31,8 @@ Passing CI here **does not** mean the game itself is operational.
 1. Keep stable C++ 20.2.1 as a reproducible source of truth.
 2. Port packet header, handshake, reliable UDP sequencing and generated net messages;
    test against real server traces and invalid packets.
-3. Implement DDNet datafile/map decoding, collision, movement restrictions,
-   freeze, tune zones and full deterministic character core (including hooks).
+3. Finish v4 zlib decompression and DDNet map/tile/layer decoding; then collision,
+   movement restrictions, freeze, tune zones and full deterministic character core.
 4. Implement an actual Rust game loop, asset manager, renderer, windowing and audio.
 5. Connect to vanilla DDNet servers and compare gameplay snapshot-by-snapshot.
 6. Port the remaining UI, server browser, demos, downloads, settings and editor.
