@@ -116,8 +116,8 @@ impl HudCanvas for Framebuffer {
         color: u32, max_chars: usize)
     {
         if crate::ui_font::draw_text_cpu(
-            &mut self.pixels, self.width as usize, self.height as usize,
-            x,y,value,color,max_chars,
+            &mut self.pixels, (self.width as usize, self.height as usize),
+            (x,y),value,color,max_chars,
         ) {
             return;
         }

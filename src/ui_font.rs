@@ -80,7 +80,7 @@ fn build_atlas(font: &Font) -> UiFontAtlas {
     UiFontAtlas { rgba, glyphs }
 }
 
-pub fn glyph_at<'a>(atlas: &'a UiFontAtlas, ch: char) -> Option<&'a Glyph> {
+pub fn glyph_at(atlas: &UiFontAtlas, ch: char) -> Option<&Glyph> {
     atlas.glyphs.get(&ch).or_else(||atlas.glyphs.get(&'?'))
 }
 
@@ -92,9 +92,11 @@ pub fn glyph_origin(glyph: &Glyph, pen_x: f32, baseline_y: f32) -> (i32, i32) {
 /// One-time TrueType glyph compositing for software mode, respecting original
 /// alpha coverage. UTF-8 source glyphs are retained, never rendered as '?'.
 pub fn draw_text_cpu(
-    pixels: &mut [u32], frame_width: usize, frame_height: usize,
-    x: usize, y: usize, text: &str, color: u32, max_chars: usize,
+    pixels: &mut [u32], frame_size: (usize,usize),
+    origin: (usize,usize), text: &str, color: u32, max_chars: usize,
 ) -> bool {
+    let (frame_width,frame_height) = frame_size;
+    let (x,y) = origin;
     let Some(atlas) = font_atlas() else { return false };
     let mut pen = x as f32;
     let baseline = y as f32 + 15.0;
@@ -141,7 +143,7 @@ mod tests {
                 assert!(glyph.width<=CELL && glyph.height<=CELL);
             }
             let mut pixels = vec![0u32; 120*25];
-            assert!(draw_text_cpu(&mut pixels,120,25,0,0,"Привет",0xffffff,8));
+            assert!(draw_text_cpu(&mut pixels,(120,25),(0,0),"Привет",0xffffff,8));
             assert!(pixels.iter().any(|&p|p!=0));
         }
     }
@@ -154,7 +156,7 @@ mod tests {
                 assert!(glyph.x+glyph.width<=WIDTH);
                 assert!(glyph.y+glyph.height<=HEIGHT);
                 let (_,y)=glyph_origin(glyph,12.0,15.0);
-                assert!(y >= -24 && y<=39);
+                assert!((-24..=39).contains(&y));
             }
         }
     }
