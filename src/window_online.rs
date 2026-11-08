@@ -434,7 +434,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             }
         }
         if let Some(map) = session.loaded_map.as_ref() {
-            assets.draw_map(&mut pixels, map, camera)?;
+            assets.draw_background(&mut pixels, map, camera)?;
         } else {
             pixels.clear(crate::graphics::BACKGROUND);
         }
@@ -442,6 +442,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             assets.draw_snapshot(&mut pixels, snapshot, camera,
                 current_snapshot.unwrap_or(0).max(0) as u64)?;
         }
+        assets.draw_foreground(&mut pixels, camera)?;
         let local_weapon = display.as_ref().and_then(|snapshot|
             local_character_id(snapshot).and_then(|id|
                 snapshot.find(CHARACTER_TYPE, id)

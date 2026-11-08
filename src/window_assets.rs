@@ -100,6 +100,30 @@ impl WindowAssets {
         frame.render_map(map, camera).map_err(|e| format!("collision map: {e:?}"))
     }
 
+    /// Render foreground map art after tees, matching upstream layer order.
+    /// Collision fallback has no separate foreground pass.
+    pub fn draw_foreground(
+        &self, frame: &mut Framebuffer, camera: Camera,
+    ) -> Result<(), String> {
+        if let Some(map) = self.visual_map.as_ref() {
+            map.render_foreground(frame, camera)
+                .map_err(|error| format!("foreground map: {error:?}"))?;
+        }
+        Ok(())
+    }
+
+    pub fn draw_background(
+        &self, frame: &mut Framebuffer, map: &GameMap, camera: Camera,
+    ) -> Result<(), String> {
+        if let Some(visual) = self.visual_map.as_ref() {
+            if visual.render_background(frame, camera).is_ok() {
+                return Ok(());
+            }
+        }
+        frame.render_map(map, camera)
+            .map_err(|error| format!("collision map: {error:?}"))
+    }
+
     pub fn draw_snapshot(
         &self, frame: &mut Framebuffer, snapshot: &SnapshotState,
         camera: Camera, tick: u64,

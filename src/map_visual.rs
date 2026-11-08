@@ -62,6 +62,8 @@ pub struct TexturedLayer {
     pub tint: [u8; 4],
     pub transform: GroupTransform,
     pub tiles: Vec<Tile>,
+    /// Layers after the game layer render in front of players, like upstream.
+    pub foreground: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -180,6 +182,11 @@ impl VisualMap {
         let groups = collect_groups(file, layer_items.len())?;
         let mut layers = Vec::new();
         let mut total = 0usize;
+        let game_layer_index = layer_items.iter().position(|item| {
+            field(item.payload, 4).ok() == Some(TILEMAP)
+                && field(item.payload, 24).ok()
+                    .is_some_and(|flags| flags & 1 != 0)
+        });
         for (ordinal, item) in layer_items.iter().enumerate() {
             if field(item.payload, 4)? != TILEMAP { continue; }
             if item.payload.len() < 60 { return Err(VisualError::InvalidMap); }
@@ -209,25 +216,46 @@ impl VisualMap {
             layers.push(TexturedLayer {
                 width, height, image: image_index,
                 tint, transform: groups[ordinal], tiles,
+                foreground: game_layer_index.is_some_and(|game_index| ordinal > game_index),
             });
         }
         Ok(Self { images, layers })
     }
 
-    /// Draw ordinary image-backed map tiles into an RGB CPU frame.
-    /// The image atlas is a 16x16 grid, with per-tile flip and rotation,
-    /// group parallax/offset, tint and straight-alpha blending.
+    /// Keep the legacy one-call map rendering API for previews and tests.
+    /// Interactive game windows use two passes so foreground tiles cover tees.
     pub fn render(
         &self, frame: &mut Framebuffer, camera: Camera,
+    ) -> Result<usize, VisualError> {
+        self.render_background(frame, camera)?;
+        self.render_foreground(frame, camera)
+    }
+
+    pub fn render_background(
+        &self, frame: &mut Framebuffer, camera: Camera,
+    ) -> Result<usize, VisualError> {
+        self.render_pass(frame, camera, false, true)
+    }
+
+    pub fn render_foreground(
+        &self, frame: &mut Framebuffer, camera: Camera,
+    ) -> Result<usize, VisualError> {
+        self.render_pass(frame, camera, true, false)
+    }
+
+    fn render_pass(
+        &self, frame: &mut Framebuffer, camera: Camera,
+        foreground: bool, clear: bool,
     ) -> Result<usize, VisualError> {
         if !(0.05..=16.0).contains(&camera.scale) || !camera.scale.is_finite()
             || !camera.center.x.is_finite() || !camera.center.y.is_finite()
         {
             return Err(VisualError::Render(RenderError::InvalidCamera));
         }
-        frame.clear(BACKGROUND);
+        if clear { frame.clear(BACKGROUND); }
         let mut drawn = 0usize;
         for layer in &self.layers {
+            if layer.foreground != foreground { continue; }
             let texture = self.images.get(layer.image).ok_or(VisualError::MissingImage)?;
             let cell_w = texture.width as usize / 16;
             let cell_h = texture.height as usize / 16;
@@ -302,6 +330,15 @@ fn blit_tile(
             let alpha = u32::from(texture.rgba[src + 3]) * u32::from(tint[3]) / 255;
             if alpha == 0 { continue; }
             let at = sy as usize * frame.width as usize + sx as usize;
+            // Opaque pixels never need a destination read or alpha blending.
+            // Most terrain tiles on ordinary DDNet maps take this path.
+            if alpha == 255 {
+                frame.pixels[at] =
+                    (u32::from(texture.rgba[src]) * u32::from(tint[0]) / 255 << 16)
+                    | (u32::from(texture.rgba[src + 1]) * u32::from(tint[1]) / 255 << 8)
+                    | (u32::from(texture.rgba[src + 2]) * u32::from(tint[2]) / 255);
+                continue;
+            }
             let dst = frame.pixels[at];
             let back = [
                 (dst >> 16) & 255,
@@ -369,6 +406,30 @@ mod tests {
         let blended = frame.pixel(48, 16).unwrap();
         assert_ne!(blended, BACKGROUND);
         assert!((blended >> 8 & 255) > (blended >> 16 & 255));
+    }
+
+    #[test]
+    fn game_layer_splits_background_and_foreground_renders() {
+        let atlas = vec![255u8; 16 * 16 * 4];
+        let image = Texture::from_rgba(16, 16, atlas).unwrap();
+        let layer = |foreground: bool| TexturedLayer {
+            width: 1, height: 1, image: 0,
+            tint: if foreground { [0, 0, 255, 255] } else { [255, 0, 0, 255] },
+            transform: GroupTransform::default(),
+            tiles: vec![Tile { index: 1, flags: 0, skip: 0, reserved: 0 }],
+            foreground,
+        };
+        let map = VisualMap { images: vec![image], layers: vec![layer(false), layer(true)] };
+        let camera = Camera { center: Vec2::new(16.0,16.0), scale: 1.0 };
+        let mut frame = Framebuffer::new(32, 32).unwrap();
+        assert_eq!(map.render_background(&mut frame, camera).unwrap(), 1);
+        assert_eq!(frame.pixel(16, 16), Some(0xff0000));
+        // A tee-like visual between passes is behind the foreground.
+        frame.pixels[16 * 32 + 16] = 0x00ff00;
+        assert_eq!(map.render_foreground(&mut frame, camera).unwrap(), 1);
+        assert_eq!(frame.pixel(16, 16), Some(0x0000ff));
+        assert_eq!(map.render(&mut frame, camera).unwrap(), 1);
+        assert_eq!(frame.pixel(16, 16), Some(0x0000ff));
     }
 
     #[test]

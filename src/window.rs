@@ -173,7 +173,7 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
         if let Some(out) = audio.as_ref() { out.listener(simulator.position); }
         camera.center.x += (simulator.position.x - camera.center.x) * 0.2;
         camera.center.y += (simulator.position.y - camera.center.y) * 0.2;
-        assets.draw_map(&mut pixels, &map, camera)?;
+        assets.draw_background(&mut pixels, &map, camera)?;
         let entity = &mut snapshot.items[0].words;
         entity[1] = simulator.position.x.round() as i32;
         entity[2] = simulator.position.y.round() as i32;
@@ -190,6 +190,7 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
         entity[11] = simulator.hook.position.x.round() as i32;
         entity[12] = simulator.hook.position.y.round() as i32;
         assets.draw_snapshot(&mut pixels, &snapshot, camera, simulator.tick)?;
+        assets.draw_foreground(&mut pixels, camera)?;
         window.update_with_buffer(&pixels.pixels, SCREEN_W, SCREEN_H)
             .map_err(|e| format!("present: {e}"))?;
         frames += 1;

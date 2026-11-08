@@ -502,3 +502,15 @@ weapons, team restrictions, cooldowns and join status still apply. There is
 no full DDNet chat UI, voting, console, scoreboard, tuning-zone or server
 integration acceptance test yet. This does not establish public-server
 compatibility or complete playability.
+
+
+## Visual rendering order (DDNet 20.2.1 comparison)
+
+Native map rendering now preserves the **Game layer boundary** in the
+original map's layer ordering: ordinary tile layers before the physics
+Game layer are rendered behind tees, and later tile layers in front of
+tees. The single-pass preview API still renders all tiles for screenshots
+and diagnostics. Opaque tile pixels use a direct RGB write instead of
+blending. This improves layer correctness and reduces work on typical
+opaque map art but still uses a CPU framebuffer. Quad/envelope rendering,
+full DDNet UI and GPU tile batching are not implemented yet.
