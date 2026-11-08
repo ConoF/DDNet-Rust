@@ -9,6 +9,8 @@ use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
 
 use crate::datafile::Datafile;
 use crate::graphics::{Camera, Framebuffer};
+#[cfg(feature = "gpu")]
+use crate::gpu_renderer::{GpuRenderer, OVERLAY_KEY};
 use crate::hook::HookState;
 use crate::map::GameMap;
 use crate::physics::Vec2;
@@ -57,22 +59,29 @@ pub fn offline_spawn(map: &GameMap) -> Option<Vec2> {
 /// A/D: run, W/Space: jump, right mouse/E: hook, wheel: zoom,
 /// R: respawn, Escape: close.
 pub fn play_offline(path: &str) -> Result<(), String> {
-    play_offline_impl(path, None)
+    play_offline_impl(path, None, false)
 }
 
 /// Opens the OS window inside a virtual display, advances scripted inputs and
 /// emits a real PNG screenshot; intended for GitHub Actions/Xvfb smoke tests.
 pub fn smoke_offline(path: &str, output: &str) -> Result<(), String> {
-    play_offline_impl(path, Some(output))
+    play_offline_impl(path, Some(output), false)
 }
 
-fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), String> {
+#[cfg(feature = "gpu")]
+pub fn smoke_gpu_offline(path: &str) -> Result<(), String> {
+    play_offline_impl(path, None, true)
+}
+
+fn play_offline_impl(
+    path: &str, smoke_output: Option<&str>, gpu_smoke: bool,
+) -> Result<(), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("map read: {e}"))?;
     let file = Datafile::parse(&bytes).map_err(|e| format!("datafile: {e:?}"))?;
     let map = GameMap::from_datafile(&file, 16_777_216)
         .map_err(|e| format!("game layer: {e:?}"))?;
     let assets = WindowAssets::from_datafile(&file, Some(Path::new(path)));
-    if smoke_output.is_some()
+    if (smoke_output.is_some() || gpu_smoke)
         && (assets.visual_map.is_none() || assets.default_skin.is_none()
             || assets.game_sprites.is_none())
     {
@@ -86,9 +95,35 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
     window.set_target_fps(60);
     let mut pixels = Framebuffer::new(SCREEN_W as u32, SCREEN_H as u32)
         .map_err(|e| format!("framebuffer: {e:?}"))?;
+    #[cfg(feature = "gpu")]
+    let mut gpu = if smoke_output.is_some()
+        || (!gpu_smoke && std::env::var("DDNET_RENDERER").as_deref() == Ok("software"))
+    {
+        None
+    } else {
+        match GpuRenderer::new(&window, SCREEN_W as u32, SCREEN_H as u32) {
+            Ok(mut renderer) => {
+                renderer.sync_map(assets.visual_map.as_ref());
+                Some(renderer)
+            }
+            Err(error) if !gpu_smoke => {
+                eprintln!("GPU unavailable in offline mode: {error}; falling back to CPU");
+                None
+            }
+            Err(error) => return Err(format!("GPU smoke requires working adapter: {error}")),
+        }
+    };
+    #[cfg(feature = "gpu")]
+    let mut gpu_tee = Framebuffer::new(SCREEN_W as u32, SCREEN_H as u32)
+        .map_err(|e| format!("GPU tee overlay: {e:?}"))?;
+    #[cfg(feature = "gpu")]
+    let mut gpu_hud = Framebuffer::new(SCREEN_W as u32, SCREEN_H as u32)
+        .map_err(|e| format!("GPU HUD overlay: {e:?}"))?;
+    #[cfg(feature = "gpu")]
+    gpu_hud.clear(OVERLAY_KEY);
     // Hardware-free Xvfb smoke remains deterministic. Real play opens the
     // default WASAPI/ALSA output and keeps decoding on the game thread.
-    let mut audio = if smoke_output.is_none() {
+    let mut audio = if smoke_output.is_none() && !gpu_smoke {
         try_start(&candidate_roots(Some(Path::new(path))))
     } else { None };
     let mut simulator = TeeSimulator::new(spawn);
@@ -153,7 +188,7 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
             ),
         };
         // Exercise both movement and hook in CI without synthetic keyboard events.
-        let controls = if smoke_output.is_some() {
+        let controls = if smoke_output.is_some() || gpu_smoke {
             SimInput {
                 direction: 1,
                 jump: frames == 2,
@@ -180,7 +215,21 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
         let animation_times = EnvelopeTimes::from_tick(
             simulator.tick as f64 + accumulator.as_secs_f64() * 50.0,
         );
-        assets.draw_background_at(&mut pixels, &map, camera, animation_times)?;
+        #[cfg(feature = "gpu")]
+        let using_gpu = gpu.is_some();
+        #[cfg(not(feature = "gpu"))]
+        let using_gpu = false;
+        if !using_gpu {
+            assets.draw_background_at(&mut pixels, &map, camera, animation_times)?;
+        }
+        #[cfg(feature = "gpu")]
+        if using_gpu {
+            gpu_tee.clear(OVERLAY_KEY);
+            if assets.visual_map.is_none() {
+                gpu_tee.render_map(&map, camera)
+                    .map_err(|e| format!("GPU collision map fallback: {e:?}"))?;
+            }
+        }
         let entity = &mut snapshot.items[0].words;
         entity[1] = simulator.position.x.round() as i32;
         entity[2] = simulator.position.y.round() as i32;
@@ -196,11 +245,31 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
         } else { 0 };
         entity[11] = simulator.hook.position.x.round() as i32;
         entity[12] = simulator.hook.position.y.round() as i32;
-        assets.draw_snapshot(&mut pixels, &snapshot, camera, simulator.tick)?;
-        assets.draw_foreground_at(&mut pixels, camera, animation_times)?;
+        #[cfg(feature = "gpu")]
+        let tee_frame = if using_gpu { &mut gpu_tee } else { &mut pixels };
+        #[cfg(not(feature = "gpu"))]
+        let tee_frame = &mut pixels;
+        assets.draw_snapshot(tee_frame, &snapshot, camera, simulator.tick)?;
+        if !using_gpu {
+            assets.draw_foreground_at(&mut pixels, camera, animation_times)?;
+        }
+        #[cfg(feature = "gpu")]
+        if let Some(renderer) = gpu.as_mut() {
+            renderer.render(assets.visual_map.as_ref(), camera, animation_times,
+                &gpu_tee, &gpu_hud)?;
+            window.update();
+        } else {
+            window.update_with_buffer(&pixels.pixels, SCREEN_W, SCREEN_H)
+                .map_err(|e| format!("present: {e}"))?;
+        }
+        #[cfg(not(feature = "gpu"))]
         window.update_with_buffer(&pixels.pixels, SCREEN_W, SCREEN_H)
             .map_err(|e| format!("present: {e}"))?;
         frames += 1;
+        if gpu_smoke && frames >= 30 {
+            println!("GPU DDNet X11 window smoke: 30 hardware-presented frames");
+            return Ok(());
+        }
         if let Some(output) = smoke_output {
             if frames >= 30 {
                 let png = pixels.png_bytes().map_err(|e| format!("png: {e:?}"))?;
@@ -210,7 +279,7 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
             }
         }
     }
-    if smoke_output.is_some() {
+    if smoke_output.is_some() || gpu_smoke {
         return Err("smoke test window closed before 30 frames".into());
     }
     Ok(())
