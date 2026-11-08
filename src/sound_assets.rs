@@ -16,12 +16,13 @@ use crate::physics::Vec2;
 pub const MAX_WAVPACK_FILE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_DECODED_SAMPLES: usize = 12_000_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SoundError {
     InvalidFile,
     Unsupported,
     TooLarge,
-    DecodeFailed,
+    DecodeFailed(wavicle::Error),
+    InconsistentPcm,
     Io,
     Audio(AudioError),
 }
@@ -86,7 +87,7 @@ pub fn decode_wavpack(bytes: &[u8], mixer_rate: u32) -> Result<Sample, SoundErro
     }
 
     let info = wavicle::StreamInfo::scan(bytes)
-        .map_err(|_| SoundError::DecodeFailed)?;
+        .map_err(SoundError::DecodeFailed)?;
     if info.channels == 0 || info.channels > 2
         || info.is_float || info.bits_per_sample != 16
         || !(8_000..=192_000).contains(&info.sample_rate)
@@ -96,7 +97,7 @@ pub fn decode_wavpack(bytes: &[u8], mixer_rate: u32) -> Result<Sample, SoundErro
     let channels = usize::try_from(info.channels).map_err(|_| SoundError::Unsupported)?;
     let mut total_frames = 0usize;
     for block in wavicle::Blocks::new(bytes) {
-        let block = block.map_err(|_| SoundError::DecodeFailed)?;
+        let block = block.map_err(SoundError::DecodeFailed)?;
         total_frames = total_frames.checked_add(block.header.block_samples as usize)
             .ok_or(SoundError::TooLarge)?;
         let count = total_frames.checked_mul(channels)
@@ -109,21 +110,21 @@ pub fn decode_wavpack(bytes: &[u8], mixer_rate: u32) -> Result<Sample, SoundErro
         return Err(SoundError::InvalidFile);
     }
     if info.total_samples.is_some_and(|declared| declared != total_frames as u64) {
-        return Err(SoundError::DecodeFailed);
+        return Err(SoundError::InconsistentPcm);
     }
 
-    let output = wavicle::decode_stream(bytes).map_err(|_| SoundError::DecodeFailed)?;
+    let output = wavicle::decode_stream(bytes).map_err(SoundError::DecodeFailed)?;
     if output.samples.len() != total_frames * channels
         || output.channels != info.channels
         || output.sample_rate != info.sample_rate
         || output.bits_per_sample != 16 || output.is_float
     {
-        return Err(SoundError::DecodeFailed);
+        return Err(SoundError::InconsistentPcm);
     }
     let mut pcm = Vec::new();
     pcm.try_reserve_exact(output.samples.len()).map_err(|_| SoundError::TooLarge)?;
     for value in output.samples {
-        let value = i16::try_from(value).map_err(|_| SoundError::DecodeFailed)?;
+        let value = i16::try_from(value).map_err(|_| SoundError::InconsistentPcm)?;
         pcm.push(value);
     }
     let sample = Sample::new(pcm, channels, info.sample_rate, 0)?;
