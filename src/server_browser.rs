@@ -250,6 +250,8 @@ pub struct ClientSettings {
     pub show_nameplates: bool,
     pub show_chat: bool,
     pub sound_enabled: bool,
+    /// Original DDNet audio mixer master level, 0-100.
+    pub sound_volume: u8,
     /// Native window FPS limiter, not a simulation-tick setting.
     pub fps_limit: u16,
     /// Camera scale * 100 (normal gameplay is 150).
@@ -271,6 +273,7 @@ impl Default for ClientSettings {
             show_nameplates: true,
             show_chat: true,
             sound_enabled: true,
+            sound_volume: 100,
             fps_limit: 60,
             zoom_percent: 150,
             bindings: KeyBindings::default(),
@@ -411,6 +414,9 @@ impl ClientSettings {
         if let Some(v) = obj.get("sound_enabled").and_then(Value::as_bool) {
             settings.sound_enabled = v;
         }
+        if let Some(v) = obj.get("sound_volume").and_then(Value::as_u64) {
+            if v <= 100 { settings.sound_volume = v as u8; }
+        }
         if let Some(v) = obj.get("fps_limit").and_then(Value::as_u64) {
             if [30, 60, 120, 144, 240].contains(&v) {
                 settings.fps_limit = v as u16;
@@ -454,6 +460,7 @@ impl ClientSettings {
             || !(50..=400).contains(&self.zoom_percent)
             || !self.zoom_percent.is_multiple_of(10)
             || !self.bindings.validate()
+            || self.sound_volume > 100
         {
             return Err(BrowserError::InvalidSchema);
         }
@@ -469,6 +476,7 @@ impl ClientSettings {
             "show_nameplates": self.show_nameplates,
             "show_chat": self.show_chat,
             "sound_enabled": self.sound_enabled,
+            "sound_volume": self.sound_volume,
             "fps_limit": self.fps_limit,
             "zoom_percent": self.zoom_percent,
             "bindings": self.bindings.slots,
@@ -626,6 +634,22 @@ mod tests {
         assert_eq!(ClientSettings::load(&path).unwrap().bindings,
             KeyBindings::default());
         let _=fs::remove_file(path);
+    }
+
+    #[test]
+    fn master_volume_is_validated_and_migrates_safely() {
+        let path = std::env::temp_dir().join(
+            format!("ddnet-rust-volume-{}.json",std::process::id()));
+        let prefs = ClientSettings {
+            sound_volume: 65, ..ClientSettings::default()
+        };
+        prefs.save(&path).unwrap();
+        assert_eq!(ClientSettings::load(&path).unwrap().sound_volume,65);
+        fs::write(&path,r#"{"sound_volume":999}"#).unwrap();
+        assert_eq!(ClientSettings::load(&path).unwrap().sound_volume,100);
+        let invalid = ClientSettings { sound_volume: 101, ..prefs };
+        assert_eq!(invalid.save(&path),Err(BrowserError::InvalidSchema));
+        let _ = fs::remove_file(path);
     }
 
     #[test]

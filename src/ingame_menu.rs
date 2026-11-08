@@ -74,7 +74,7 @@ impl SettingsTab {
     fn row_count(self) -> usize {
         match self {
             Self::General => 2, Self::Player => 1,
-            Self::Graphics => 2, Self::Sound => 1,
+            Self::Graphics => 2, Self::Sound => 2,
             Self::Controls => BIND_ACTIONS.len(),
             Self::Appearance | Self::Tee => 0,
         }
@@ -264,6 +264,14 @@ impl MenuState {
                         settings.sound_enabled = !settings.sound_enabled;
                         Some(MenuAction::SettingsChanged)
                     }
+                    (SettingsTab::Sound, 1) => {
+                        let delta = if direction < 0 { -5 } else { 5 };
+                        let next = (i32::from(settings.sound_volume) + delta)
+                            .clamp(0,100) as u8;
+                        if next == settings.sound_volume { return None; }
+                        settings.sound_volume = next;
+                        Some(MenuAction::SettingsChanged)
+                    }
                     (SettingsTab::Controls, row) if row < BIND_ACTIONS.len() => {
                         self.binding_edit = Some(row);
                         self.feedback("Press a key or mouse button; ESC cancels");
@@ -398,7 +406,8 @@ impl MenuState {
             if hit(x, y+row*row_height, w, row_height-4) {
                 self.selected = row;
                 let direction = if self.page == Page::Settings
-                    && self.settings_tab == SettingsTab::Graphics
+                    && matches!(self.settings_tab,
+                        SettingsTab::Graphics | SettingsTab::Sound)
                 {
                     if mx < (x+w/2) as f32 { -1 } else { 1 }
                 } else { 0 };
@@ -546,6 +555,7 @@ impl MenuState {
             ],
             SettingsTab::Sound => vec![
                 format!("ENABLE SOUND: {}",on_off(settings.sound_enabled)),
+                format!("MASTER VOLUME: {}%   < / >",settings.sound_volume),
             ],
             SettingsTab::Controls => BIND_ACTIONS.iter().enumerate().map(|(i, action)| {
                 let key = if self.binding_edit == Some(i) {
@@ -567,11 +577,18 @@ impl MenuState {
             canvas.write_text(x+12,yy+if row_height==BIND_ROW_HEIGHT { 6 } else { 12 },
                 label,WHITE,cw.saturating_sub(22)/8);
         }
+        if self.settings_tab == SettingsTab::Sound {
+            canvas.fill_rect(x+12,y+2*ROW_HEIGHT-10,
+                cw.saturating_sub(24),3,HEADER);
+            canvas.fill_rect(x+12,y+2*ROW_HEIGHT-10,
+                cw.saturating_sub(24)*usize::from(settings.sound_volume)/100,
+                3,ACCENT);
+        }
         let caption: &str = match self.settings_tab {
             SettingsTab::General => "ENTER OR CLICK TO TOGGLE",
             SettingsTab::Player => "ENTER EDITS; ENTER SAVES; ESC CANCELS",
             SettingsTab::Graphics => "LEFT/RIGHT CHANGES FPS AND ZOOM",
-            SettingsTab::Sound => "MUTE APPLIES IMMEDIATELY",
+            SettingsTab::Sound => "LEFT/RIGHT: MASTER VOLUME; ENTER: TOGGLE",
             SettingsTab::Tee => "DEFAULT TEE ATLAS; CUSTOM SKINS NOT YET PORTED",
             SettingsTab::Appearance => "NATIVE DDNET THEME / ASSETS IN PROGRESS",
             SettingsTab::Controls => "ENTER/CLICK TO BIND; ESC CANCELS",
@@ -640,6 +657,18 @@ mod tests {
         m.key(Key::Escape,&mut s);
         assert!(m.is_open());
         assert!(!m.is_editing());
+    }
+
+    #[test]
+    fn sound_master_level_adjusts_without_overflow() {
+        let mut m=MenuState::new();m.toggle();m.page_select(Page::Settings);
+        m.select_tab(SettingsTab::Sound);
+        m.selected=1;
+        let mut s=ClientSettings::default();
+        for _ in 0..30 {m.key(Key::Left,&mut s);}
+        assert_eq!(s.sound_volume,0);
+        for _ in 0..30 {m.key(Key::Right,&mut s);}
+        assert_eq!(s.sound_volume,100);
     }
 
     #[test]

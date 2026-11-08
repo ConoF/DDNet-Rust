@@ -72,6 +72,11 @@ impl GameAudio {
         }
     }
 
+    /// Uses the same 0-100 master mixer volume as official DDNet.
+    pub fn set_volume(&self, volume: u8) -> Result<(), DeviceAudioError> {
+        self.device.set_master_volume(volume)
+    }
+
     pub fn listener(&self, position: Vec2) {
         let _ = self.device.set_listener(position);
     }

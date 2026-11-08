@@ -172,6 +172,10 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     };
     let mut assets = WindowAssets::default();
     let mut audio = try_start(&candidate_roots(None));
+    if let Some(device) = audio.as_mut() {
+        device.set_volume(connection.sound_volume)
+            .map_err(|e| format!("initial volume: {e:?}"))?;
+    }
     let reconnect_limit = connection.reconnect_attempts;
     let receive_timeout = Duration::from_secs(connection.connect_timeout_secs);
     let mut session = GameSession06::new(String::new(), 64 * 1024 * 1024, 16_777_216);
@@ -326,6 +330,11 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                 MenuAction::SettingsChanged => {
                     window.set_target_fps(usize::from(connection.fps_limit));
                     camera.scale = f32::from(connection.zoom_percent) / 100.0;
+                    if let Some(device) = audio.as_mut() {
+                        if let Err(error) = device.set_volume(connection.sound_volume) {
+                            menu.feedback(format!("Audio volume update: {error:?}"));
+                        }
+                    }
                     if let Err(error) = connection.save(&settings_path) {
                         menu.feedback(format!("Settings save failed: {error:?}"));
                     }

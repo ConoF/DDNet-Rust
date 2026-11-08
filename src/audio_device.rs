@@ -128,6 +128,13 @@ impl AudioDevice {
         self.sample_rate
     }
 
+    pub fn set_master_volume(&self, volume: u8) -> Result<(), DeviceAudioError> {
+        if volume > 100 { return Err(DeviceAudioError::InvalidMixer); }
+        self.mixer.lock().map_err(|_| DeviceAudioError::InvalidMixer)?
+            .set_master_volume(volume);
+        Ok(())
+    }
+
     pub fn play(&self, sample: Arc<Sample>, location: Option<Vec2>)
         -> Result<(), DeviceAudioError>
     {
