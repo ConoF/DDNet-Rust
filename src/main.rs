@@ -32,6 +32,7 @@ fn main() {
         [arg, addr] if arg == "--connect-headless" => connect_headless(addr, None),
         [arg, addr, out] if arg == "--capture-headless" => connect_headless(addr, Some(out)),
         [arg, map] if arg == "--play-offline" => play_offline(map),
+        [arg, host] if arg == "--play-online" => play_online(host),
         _ => {
             eprintln!("Unknown arguments. Run ddnet-rust --help.");
             std::process::exit(2);
@@ -51,6 +52,7 @@ fn print_help() {
     println!("  --connect-headless HOST[:PORT]  Test DDNet 0.6 login and map download");
     println!("  --capture-headless HOST[:PORT] OUT.png  Capture first decoded snapshot");
     println!("  --play-offline MAP   Offline window: cargo run --features window -- --play-offline MAP");
+    println!("  --play-online HOST   Experimental 0.6 UDP snapshot window (feature: window)");
     println!("  --version           Print project and upstream versions");
 }
 
@@ -366,6 +368,20 @@ fn play_offline(path: &str) {
 
 #[cfg(not(feature = "window"))]
 fn play_offline(_path: &str) {
+    eprintln!("This command requires --features window");
+    std::process::exit(2);
+}
+
+#[cfg(feature = "window")]
+fn play_online(endpoint: &str) {
+    if let Err(error) = ddnet_rust::window_online::play_online(endpoint) {
+        eprintln!("Online prototype failed: {error}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(not(feature = "window"))]
+fn play_online(_endpoint: &str) {
     eprintln!("This command requires --features window");
     std::process::exit(2);
 }

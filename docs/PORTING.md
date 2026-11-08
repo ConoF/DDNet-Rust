@@ -78,3 +78,7 @@ Collision-only visualization: `cargo run --locked -- --render-debug-map upstream
 ## Optional offline desktop window
 
 Use `cargo run --features window -- --play-offline upstream/ddnet/data/maps/ctf1.map`. Keys: A/D/arrows move, W/Space jump, E/right mouse hook, wheel zoom, R respawn, Escape exit. This is only a collision-map movement prototype: it does not show vanilla DDNet graphics, support live gameplay, editor, audio or networking.
+
+## Experimental online snapshot window
+
+Run `cargo run --features window -- --play-online HOST:8303` for a DDNet 0.6 server. The window uses Rust UDP handshake, map transfer, snapshot deltas and sends neutral/keyboard input at 50Hz. This is experimental and has not been verified against a public server; it is **not** a feature-complete or stable DDNet client. Key bindings match the offline viewer. Only collision tiles and abstract tee markers are rendered.
