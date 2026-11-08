@@ -227,8 +227,9 @@ impl VisualMap {
     pub fn render(
         &self, frame: &mut Framebuffer, camera: Camera,
     ) -> Result<usize, VisualError> {
-        self.render_background(frame, camera)?;
-        self.render_foreground(frame, camera)
+        let background_count = self.render_background(frame, camera)?;
+        let foreground_count = self.render_foreground(frame, camera)?;
+        Ok(background_count + foreground_count)
     }
 
     pub fn render_background(
