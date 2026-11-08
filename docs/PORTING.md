@@ -103,3 +103,14 @@ and headless CLI poll this retransmission timer. ACKed chunks are removed
 from the queue without duplicate inserts; sequence wraparound is covered
 by deterministic simulated-clock tests. Full reconnection, ACK recovery
 and packet timing parity with upstream are not yet complete.
+
+### Connection recovery policy
+
+The online diagnostic window now starts a **new** 0.6 handshake after a
+15-second unacknowledged vital timeout or 20 seconds without a **valid**
+packet. The recovery clears pending ACKs, map transfer and decoded snapshot
+history, preserving login settings; input tick/ACK counters also reset.
+Up to three consecutive reconnect attempts are allowed, with the counter
+reset after a decoded snapshot. Explicit server disconnect/kick messages do
+not trigger automatic reconnect. This remains prototype recovery, not
+full DDNet failover or timeout protection.

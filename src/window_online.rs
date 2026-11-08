@@ -2,8 +2,8 @@
 //!
 //! This uses the native Rust transport, map downloader and snapshot decoder,
 //! not an embedded DDNet C++ client. It is NOT a full DDNet player client:
-//! missing rendering assets, complete prediction, resend timers, editor,
-//! skins, sound and some 0.6/0.7 protocol extensions.
+//! missing rendering assets, complete prediction, editor, skins, sound
+//! and some 0.6/0.7 protocol extensions.
 
 use std::io::ErrorKind;
 use std::net::{ToSocketAddrs, UdpSocket};
@@ -68,7 +68,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         .map_err(|e| format!("framebuffer: {e:?}"))?;
     let mut camera = Camera { center: Vec2::default(), scale: 1.5 };
     let mut session = GameSession06::new(String::new(), 64 * 1024 * 1024, 16_777_216);
-    let hello = session.connect().map_err(|e| format!("handshake: {e:?}"))?;
+    let mut hello = session.connect().map_err(|e| format!("handshake: {e:?}"))?;
     socket.send(&hello).map_err(|e| format!("CONNECT: {e}"))?;
 
     let mut packet = [0u8; 1400];
@@ -83,6 +83,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     let mut previous_snapshot: Option<i32> = None;
     let mut last_snapshot_at = Instant::now();
     let mut last_title = Instant::now();
+    let mut reconnect_attempts = 0u8;
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let now = Instant::now();
@@ -95,7 +96,6 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                 Err(e) if e.kind() == ErrorKind::WouldBlock => break,
                 Err(e) => return Err(format!("UDP receive: {e}")),
             };
-            last_receive = Instant::now();
             let events = match session.receive(&packet[..count]) {
                 Ok(events) => events,
                 Err(error) => {
@@ -103,12 +103,14 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                     continue;
                 }
             };
+            last_receive = Instant::now();
             for event in events {
                 match event {
                     GameAction::Outgoing(wire) => {
                         socket.send(&wire).map_err(|e| format!("UDP send: {e}"))?;
                     }
                     GameAction::SnapshotDecoded { tick, .. } => {
+                        reconnect_attempts = 0;
                         last_ack_snapshot = tick;
                         previous_snapshot = current_snapshot;
                         current_snapshot = Some(tick);
@@ -126,23 +128,44 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             }
         }
 
-        if last_receive.elapsed() > Duration::from_secs(20) {
-            return Err("No server packets received for 20 seconds".into());
-        }
-        if session.stage == Stage::Connecting &&
-            last_hello.elapsed() >= Duration::from_millis(500)
-        {
-            socket.send(&hello).map_err(|e| format!("resend CONNECT: {e}"))?;
-            last_hello = Instant::now();
-        }
+        let mut failed = None;
         if session.transport.state == State::Online {
             match session.transport.poll_retransmission(Instant::now()) {
                 Ok(Some(retry)) => {
                     socket.send(&retry).map_err(|e| format!("resend vital chunk: {e}"))?;
                 }
                 Ok(None) => {}
-                Err(e) => return Err(format!("reliable transport stopped: {e:?}")),
+                Err(e) => failed = Some(format!("reliable transport stopped: {e:?}")),
             }
+        }
+        if failed.is_none() && last_receive.elapsed() > Duration::from_secs(20) {
+            failed = Some("No valid server packets for 20 seconds".into());
+        }
+        if let Some(reason) = failed {
+            if reconnect_attempts >= 3 {
+                return Err(format!("{reason}; maximum 3 reconnects exhausted"));
+            }
+            reconnect_attempts += 1;
+            eprintln!("Connection lost ({reason}); reconnect attempt {reconnect_attempts}/3");
+            hello = session.restart_connection()
+                .map_err(|e| format!("reconnect state: {e:?}"))?;
+            socket.send(&hello).map_err(|e| format!("reconnect UDP: {e}"))?;
+            last_hello = Instant::now();
+            last_keepalive = last_hello;
+            last_receive = last_hello;
+            last_snapshot_at = last_hello;
+            last_ack_snapshot = -1;
+            intended_tick = 1;
+            current_snapshot = None;
+            previous_snapshot = None;
+            accumulator = Duration::ZERO;
+            continue;
+        }
+        if session.stage == Stage::Connecting &&
+            last_hello.elapsed() >= Duration::from_millis(500)
+        {
+            socket.send(&hello).map_err(|e| format!("resend CONNECT: {e}"))?;
+            last_hello = Instant::now();
         }
         if session.transport.state == State::Online &&
             last_keepalive.elapsed() >= Duration::from_secs(1)

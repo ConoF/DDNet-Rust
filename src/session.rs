@@ -118,6 +118,22 @@ impl GameSession06 {
         Ok(start)
     }
 
+    /// Start a new 0.6 handshake using the current credentials and limits.
+    /// Clears the previous transport's ACK window, unacknowledged packets,
+    /// pending map chunks and snapshot history atomically.
+    ///
+    /// Caller must only use this on an explicitly failed connection or
+    /// user-requested reconnect. It does not retry on intentional kicks.
+    pub fn restart_connection(&mut self) -> Result<Vec<u8>, SessionError> {
+        let mut fresh = Self::new(
+            self.password.clone(), self.max_map_bytes, self.max_tiles,
+        );
+        fresh.start_info = self.start_info.clone();
+        let hello = fresh.connect()?;
+        *self = fresh;
+        Ok(hello)
+    }
+
     /// Parse one server UDP datagram. All output packets are returned as actions.
     pub fn receive(&mut self, data: &[u8]) -> Result<Vec<GameAction>, SessionError> {
         let events = self.transport.receive(data)?;
@@ -599,6 +615,47 @@ mod tests {
         let decoded = decode_message(chunks[0].payload).unwrap();
         assert_eq!(decoded.id, MessageId::Regular { system: true, number: 16 });
         assert_eq!(crate::input::InputFrame::unpack_payload(decoded.payload), Ok(frame));
+    }
+
+    #[test]
+    fn reconnect_resets_network_ack_map_and_snapshot_state() {
+        let map = small_real_datafile_v3();
+        let mut session = GameSession06::new("private".into(), 4096, 1024);
+        session.start_info.name = "ReconnectTee".into();
+        feed_handshake(&mut session);
+        session.receive(&server_message(
+            NETMSG_MAP_CHANGE, &make_map_change(&map), 1, 1,
+        )).unwrap();
+        assert_eq!(session.stage, Stage::Downloading);
+        assert_eq!(session.map_name(), Some("mini"));
+        assert!(session.transport.outstanding_count() > 0);
+        assert_eq!(session.transport.receiver.ack, 1);
+        assert_ne!(session.transport.token, crate::transport::SecurityToken::Unknown);
+
+        let hello = session.restart_connection().unwrap();
+        assert_eq!(hello, [vec![0x10, 0, 0, 1], b"TKEN".to_vec(), vec![0xff; 4]].concat());
+        assert_eq!(session.stage, Stage::Connecting);
+        assert_eq!(session.map_name(), None);
+        assert!(session.pending_map.is_none());
+        assert!(session.loaded_map.is_none());
+        assert!(session.snapshot_states.is_empty());
+        assert_eq!(session.snapshots.last_tick(), None);
+        assert_eq!(session.transport.sequence, 0);
+        assert_eq!(session.transport.peer_ack, 0);
+        assert_eq!(session.transport.receiver.ack, 0);
+        assert_eq!(session.transport.outstanding_count(), 0);
+        assert_eq!(session.transport.token, crate::transport::SecurityToken::Unknown);
+        assert_eq!(session.start_info.name, "ReconnectTee");
+        assert_eq!(session.password, "private");
+        assert_eq!(session.max_map_bytes, 4096);
+        assert_eq!(session.max_tiles, 1024);
+
+        let mut extra = b"TKEN".to_vec();
+        extra.extend_from_slice(&TOKEN.to_be_bytes());
+        let events = session.receive(&server_control(2, &extra)).unwrap();
+        assert!(events.contains(&GameAction::TransportConnected));
+        assert_eq!(session.stage, Stage::WaitingMap);
+        assert_eq!(session.transport.sequence, 1);
     }
 
     #[test]
