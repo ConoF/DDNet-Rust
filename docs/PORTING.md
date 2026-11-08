@@ -34,7 +34,9 @@ The Rust executable does not use any C++ code or FFI.
 | Complete delta snapshot decoding and playable game state | Not implemented | None |
 | Map downloads, snapshot-aware headless UDP session and NETMSG_INPUT | Partial | Mock server, CRC and input packet tests |
 | Pure Rust CPU debug framebuffer for map and tee snapshot overlays | Implemented as diagnostic module | Pixel-level tests, real upstream map PPM regression |
-| Textured GPU renderer, OS window, input devices, UI, audio | Not implemented | None |
+| Native offline window and experimental online snapshot viewer | Partial | Linux Xvfb, Windows build, simulated 50 Hz input; no stable public-server test |
+| Pure Rust stereo PCM mixer, looping and positional sound | Partial | Six unit tests, WAV smoke; no audio device or asset decoders |
+| Full textured graphics, UI, audio output and asset decoding | Not implemented | None |
 | Server browser, gameplay, editor and demos | Not implemented | None |
 
 Passing CI here **does not** mean the game itself is operational.
@@ -82,3 +84,7 @@ Use `cargo run --features window -- --play-offline upstream/ddnet/data/maps/ctf1
 ## Experimental online snapshot window
 
 Run `cargo run --features window -- --play-online HOST:8303` for a DDNet 0.6 server. The window uses Rust UDP handshake, map transfer, snapshot deltas and sends neutral/keyboard input at 50Hz. This is experimental and has not been verified against a public server; it is **not** a feature-complete or stable DDNet client. Key bindings match the offline viewer. Only collision tiles and abstract tee markers are rendered.
+
+## Audio diagnostics
+
+The Rust-only PCM engine ports the core stereo mix, master/channel volume, mono/stereo handling, loop transition and basic circular/rectangular spatial attenuation from DDNet 20.2.1. Run `cargo run --locked -- --audio-smoke target/audio-smoke.wav` to export a synthetic 440 Hz sound. The output is a test waveform, not DDNet's original audio assets. Audio hardware playback, Opus/WavPack decoding, real-time callbacks and parity across all DDNet edge cases are still outstanding.
