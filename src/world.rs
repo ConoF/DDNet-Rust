@@ -377,8 +377,10 @@ mod tests {
     #[test]
     fn super_player_still_blocks_movement_when_normal_collision_is_off() {
         let map = flat_map();
-        let mut ordinary = World::default();
-        ordinary.player_collision = false;
+        let mut ordinary = World {
+            player_collision: false,
+            ..World::default()
+        };
         let mut moving = player(1, 100.0);
         moving.rules.collision_disabled = true;
         moving.tee.character.velocity.x = 80.0;
