@@ -173,7 +173,7 @@ fn show(
                         match fetch_master() {
                             Ok((new_list, new_source)) => {
                                 servers = new_list;
-                                source_label = new_source;
+                                source_label = new_source.to_owned();
                                 selected = 0;
                             }
                             Err(error) => eprintln!("Master refresh failed: {error:?}"),
