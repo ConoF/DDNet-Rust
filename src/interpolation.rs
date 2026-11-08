@@ -183,7 +183,12 @@ mod tests {
         let composed = 1.0 - (1.0 - half_frame) * (1.0 - half_frame);
         assert!((full_frame - composed).abs() < 1.0e-6);
         assert_eq!(camera_follow_fraction(Duration::ZERO), 0.0);
-        assert!((camera_follow_fraction(Duration::from_secs(1)) - 1.0).abs() < 1.0e-4);
+        // Frame stalls are intentionally capped at 250 ms so recovery
+        // does not teleport the camera after a long window pause.
+        assert_eq!(
+            camera_follow_fraction(Duration::from_secs(1)),
+            camera_follow_fraction(Duration::from_millis(250)),
+        );
     }
 
     #[test]
