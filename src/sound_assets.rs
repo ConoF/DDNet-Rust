@@ -199,7 +199,7 @@ mod tests {
             Some(SoundError::InvalidFile));
         assert_eq!(decode_wavpack(&[0; 33], 48_000).err(),
             Some(SoundError::InvalidFile));
-        assert_eq!(decode_wavpack(b"wvpk012345678901234567890123456", 0).err(),
+        assert_eq!(decode_wavpack(b"wvpk0123456789012345678901234567", 0).err(),
             Some(SoundError::Audio(AudioError::InvalidRate)));
         assert_eq!(decode_wavpack(&vec![0; MAX_WAVPACK_FILE_BYTES + 1],
             48_000).err(), Some(SoundError::InvalidFile));
