@@ -15,11 +15,11 @@ jobs:
         with:
           components: clippy, rustfmt
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --locked
       - name: Unit tests and tick simulation
-        run: cargo test --all-targets
+        run: cargo test --all-targets --locked
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
       - name: CLI smoke test
         run: cargo run -- --self-test
       - name: Compare variable integers with unmodified upstream C++
@@ -39,17 +39,12 @@ jobs:
           cargo run -- --inspect-game-map upstream/ddnet/data/maps/ctf1.map
           cargo run -- --inspect-game-map upstream/ddnet/data/maps/coverage.map
           cargo run -- --inspect-game-map upstream/ddnet/data/maps/Tutorial.map
-      - name: Emit dependency lockfile for reproducibility
-        run: |
-          echo 'DDNET_LOCK_BEGIN'
-          cat Cargo.lock
-          echo 'DDNET_LOCK_END'
 
   windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --all-targets
-      - run: cargo build --release
+      - run: cargo test --all-targets --locked
+      - run: cargo build --release --locked
       - run: cargo run -- --self-test
