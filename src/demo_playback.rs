@@ -287,6 +287,42 @@ impl DemoCursor {
     pub fn current_tick(&self) -> i32 { self.index.frames[self.frame_index].tick }
     pub fn state(&self) -> &SnapshotState { &self.state }
 
+    /// Frames before the first complete keyframe cannot be reconstructed.
+    pub fn first_playable_frame_index(&self) -> usize {
+        self.index.frames.iter()
+            .position(|frame| frame.keyframe && frame.snapshots > 0)
+            .expect("demo index was validated at open")
+    }
+
+    /// Decode the upcoming frame without advancing the playback cursor.
+    /// The native player caches this preview until the current frame changes,
+    /// so drawing at 60 FPS does not decompress the demo 60 times a second.
+    pub fn preview_next_frame(&mut self) -> Result<Option<(i32, SnapshotState)>, ReplayError> {
+        let next_index = self.frame_index.saturating_add(1);
+        let Some(frame) = self.index.frames.get(next_index) else {
+            return Ok(None);
+        };
+        let target_tick = frame.tick;
+        let mut state = self.state.clone();
+        for chunk in &self.index.chunks[self.next_chunk..] {
+            if chunk.tick > target_tick { break; }
+            match chunk.kind {
+                ChunkKind::Snapshot => {
+                    let words = self.index.decode_chunk(&mut self.file, chunk, &self.codec)?;
+                    state = parse_full_snapshot(&words)?;
+                }
+                ChunkKind::Delta => {
+                    let words = self.index.decode_chunk(&mut self.file, chunk, &self.codec)?;
+                    if !words.is_empty() {
+                        state = self.delta.apply_words(&words, &state)?;
+                    }
+                }
+                ChunkKind::Message | ChunkKind::Reserved => {}
+            }
+        }
+        Ok(Some((target_tick, state)))
+    }
+
     pub fn seek_tick(&mut self, tick: i32) -> Result<(), ReplayError> {
         let after = self.index.frames.partition_point(|f| f.tick <= tick);
         if after == 0 { return Err(ReplayError::NoKeyframe); }
@@ -587,4 +623,37 @@ mod tests {
         assert_eq!(parse_full_snapshot(&vec![0; 20_000]), Err(ReplayError::InvalidSnapshot));
         std::fs::remove_file(path).unwrap();
     }
+    #[test]
+    fn preview_next_frame_preserves_current_snapshot_and_seek_state() {
+        let path = fixture_file(5);
+        let mut cursor = DemoCursor::open(&path).unwrap();
+        assert_eq!(cursor.first_playable_frame_index(), 0);
+        let (tick, preview) = cursor.preview_next_frame().unwrap().unwrap();
+        assert_eq!(tick, 51);
+        assert_eq!(preview.find(9, 0).unwrap().words[1], 110);
+        assert_eq!(cursor.current_tick(), 50);
+        assert_eq!(cursor.state().find(9, 0).unwrap().words[1], 100);
+        cursor.seek_frame(1).unwrap();
+        assert_eq!(cursor.state().find(9, 0).unwrap().words[1], 110);
+        assert!(cursor.preview_next_frame().unwrap().is_none());
+        cursor.seek_frame(0).unwrap();
+        assert_eq!(cursor.preview_next_frame().unwrap().unwrap().0, 51);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn player_begins_at_first_complete_keyframe_not_empty_leading_tick() {
+        let mut bytes = test_demo(5);
+        bytes.splice(436..436, [0x80, 0, 0, 0, 49]);
+        let path = std::env::temp_dir().join(format!(
+            "ddnet-rust-leading-frame-{}.demo", std::process::id(),
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let mut cursor = DemoCursor::open(&path).unwrap();
+        assert_eq!(cursor.first_playable_frame_index(), 1);
+        assert_eq!(cursor.current_tick(), 50);
+        assert_eq!(cursor.seek_frame(0), Err(ReplayError::NoKeyframe));
+        std::fs::remove_file(path).unwrap();
+    }
+
 }

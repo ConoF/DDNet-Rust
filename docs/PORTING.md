@@ -405,3 +405,16 @@ The window-feature demo viewer supports --play-demo FILE.demo with a keyframe-aw
 CI creates a genuine Huffman-compressed synthetic demo with 201 tick markers, two keyframes, delta updates and an official map. It launches the native replay window under Xvfb and validates a PNG. The downloadable CachyOS release runs the same test from the extracted archive.
 
 Limitations: not yet verified with a user's actual multiplayer demo. Original demo audio, all UUID extension netobjects, additional visual effects and fully faithful interpolation remain future work.
+
+## Stage: fractional-frame demo playback and safe seeking
+
+The native `--play-demo FILE.demo` viewer now presents sub-tick animation at
+60 FPS by previewing and caching only the next decoded frame, interpolating
+positions and active hook coordinates without altering the 50 Hz authoritative
+snapshot. Objects spawn and disappear only at their recorded tick; teleport
+jumps over 256px do not animate across the map. Paused stepping uses exact
+snapshots. Home/restart and backward stepping cannot seek before the first
+complete keyframe (some recordings contain an earlier empty tick marker).
+Tests cover non-mutating preview, forward/backward seeking, visibility at
+spawns/despawns, hook changes and teleport discontinuities. **This is display
+smoothing, not full DDNet replay prediction, physics or protocol parity.**

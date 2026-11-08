@@ -69,6 +69,54 @@ pub fn interpolate_snapshots(
     display
 }
 
+
+/// Interpolate recorded frames for presentation only. Unlike live snapshot
+/// interpolation, a replay must keep the *earlier* frame's object inventory
+/// until the next tick: pickups, spawns and despawns must not appear early.
+/// Missing characters and jumps over 256px remain unchanged until the tick.
+pub fn interpolate_replay_snapshots(
+    earlier: &SnapshotState,
+    later: &SnapshotState,
+    progress: f32,
+) -> SnapshotState {
+    let t = if progress.is_finite() {
+        progress.clamp(0.0, 1.0) as f64
+    } else {
+        0.0
+    };
+    if t >= 1.0 { return later.clone(); }
+    let mut display = earlier.clone();
+    for item in &mut display.items {
+        if !matches!(item.type_id, 8 | 9) || item.words.len() < 15 {
+            continue;
+        }
+        let Some(next) = later.find(item.type_id, item.id) else {
+            continue;
+        };
+        if next.words.len() != item.words.len() { continue; }
+        let dx = i64::from(next.words[1]) - i64::from(item.words[1]);
+        let dy = i64::from(next.words[2]) - i64::from(item.words[2]);
+        if dx.abs() > MAX_SMOOTH_DISTANCE || dy.abs() > MAX_SMOOTH_DISTANCE {
+            continue;
+        }
+        for index in [1usize, 2] {
+            item.words[index] = lerp_coordinate(item.words[index], next.words[index], t);
+        }
+        if item.words[9] > 0 && item.words[9] == next.words[9] {
+            let hook_dx = i64::from(next.words[11]) - i64::from(item.words[11]);
+            let hook_dy = i64::from(next.words[12]) - i64::from(item.words[12]);
+            if hook_dx.abs() <= MAX_SMOOTH_DISTANCE
+                && hook_dy.abs() <= MAX_SMOOTH_DISTANCE
+            {
+                for index in [11usize, 12] {
+                    item.words[index] = lerp_coordinate(item.words[index], next.words[index], t);
+                }
+            }
+        }
+    }
+    display
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,4 +167,31 @@ mod tests {
         let other_id = snap(2, 42, 30, 0, 0);
         assert_eq!(interpolate_snapshots(&old, &other_id, 0.5), other_id);
     }
+    #[test]
+    fn demo_interpolation_does_not_anticipate_object_creation_or_deletion() {
+        let mut old = snap(2, 100, 200, 5, 130);
+        old.items.push(snap(4, 30, 30, 0, 0).items.remove(0));
+        let mut new = snap(2, 120, 220, 5, 150);
+        new.items.push(snap(3, 300, 300, 0, 0).items.remove(0));
+        let halfway = interpolate_replay_snapshots(&old, &new, 0.5);
+        let tee = halfway.find(9, 2).unwrap();
+        assert_eq!((tee.words[1], tee.words[2], tee.words[11]), (110, 210, 140));
+        assert!(halfway.find(9, 3).is_none());
+        assert!(halfway.find(9, 4).is_some());
+        assert_eq!(interpolate_replay_snapshots(&old, &new, 1.0), new);
+        assert_eq!(old.find(9, 2).unwrap().words[1], 100);
+    }
+
+    #[test]
+    fn demo_interpolation_holds_teleport_and_invalid_fraction() {
+        let old = snap(2, 0, 0, 5, 20);
+        let teleported = snap(2, 10000, 0, 5, 25);
+        assert_eq!(interpolate_replay_snapshots(&old, &teleported, 0.9), old);
+        assert_eq!(interpolate_replay_snapshots(&old, &teleported, f32::NAN), old);
+        let unhooked = snap(2, 40, 0, 0, 400);
+        let middle = interpolate_replay_snapshots(&old, &unhooked, 0.5);
+        assert_eq!(middle.find(9, 2).unwrap().words[1], 20);
+        assert_eq!(middle.find(9, 2).unwrap().words[11], 20);
+    }
+
 }

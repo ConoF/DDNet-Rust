@@ -11,10 +11,12 @@ use crate::datafile::Datafile;
 use crate::demo_playback::{DemoClock, DemoCursor};
 use crate::graphics::{Camera, Framebuffer, BACKGROUND};
 use crate::huffman::Huffman;
+use crate::interpolation::interpolate_replay_snapshots;
 use crate::map::GameMap;
 use crate::netobjects::CharacterCoreNet;
 use crate::physics::Vec2;
 use crate::protocol::write_int;
+use crate::snapshot_delta::SnapshotState;
 use crate::window_assets::WindowAssets;
 
 const W: usize = 960;
@@ -66,23 +68,23 @@ fn demo_map(cursor: &DemoCursor, path: &Path) -> Result<Option<ReplayMap>, Strin
     Ok(Some(ReplayMap { collision, assets }))
 }
 
-fn camera_target(cursor: &DemoCursor, fallback: Vec2) -> Vec2 {
-    cursor.state().items.iter().find_map(CharacterCoreNet::from_object)
+fn camera_target(state: &SnapshotState, fallback: Vec2) -> Vec2 {
+    state.items.iter().find_map(CharacterCoreNet::from_object)
         .map(|character| Vec2::new(character.x as f32, character.y as f32))
         .unwrap_or(fallback)
 }
 
 fn paint(
-    frame: &mut Framebuffer, cursor: &DemoCursor, clock: &DemoClock,
-    map: Option<&ReplayMap>, camera: Camera,
+    frame: &mut Framebuffer, cursor: &DemoCursor, displayed: &SnapshotState,
+    clock: &DemoClock, map: Option<&ReplayMap>, camera: Camera,
 ) -> Result<(), String> {
     frame.clear(BACKGROUND);
     if let Some(map) = map {
         map.assets.draw_map(frame, &map.collision, camera)?;
-        map.assets.draw_snapshot(frame, cursor.state(), camera,
+        map.assets.draw_snapshot(frame, displayed, camera,
                                  cursor.current_tick() as u64)?;
     } else {
-        frame.render_snapshot(cursor.state(), camera)
+        frame.render_snapshot(displayed, camera)
             .map_err(|e| format!("demo characters: {e:?}"))?;
     }
     fill_rect(frame, 0, 0, W, 26, HUD);
@@ -90,7 +92,7 @@ fn paint(
     fill_rect(frame, 0, 470, W, H - 470, HUD);
     let first = cursor.index.frames.first().map_or(0, |f| f.tick);
     let last = cursor.index.frames.last().map_or(first, |f| f.tick);
-    let seconds = (cursor.current_tick() - first) as f32 / 50.0;
+    let seconds = (clock.tick - f64::from(first)).max(0.0) / 50.0;
     text(frame, TIMELINE_LEFT, 480, &format!(
         "{}  {:.1}s  tick {}/{}   {:.2}x  {}",
         cursor.index.info.map_name, seconds, cursor.current_tick(),
@@ -121,7 +123,7 @@ fn play_impl(path: &Path, screenshot: Option<&Path>) -> Result<(), String> {
     }
     let mut clock = DemoClock::new(cursor.current_tick());
     let mut camera = Camera {
-        center: camera_target(&cursor, Vec2::default()), scale: 1.5
+        center: camera_target(cursor.state(), Vec2::default()), scale: 1.5
     };
     let mut frame = Framebuffer::new(W as u32, H as u32)
         .map_err(|e| format!("framebuffer: {e:?}"))?;
@@ -131,7 +133,8 @@ fn play_impl(path: &Path, screenshot: Option<&Path>) -> Result<(), String> {
     window.set_target_fps(60);
     let mut previous = Instant::now();
     let mut frames = 0usize;
-    let first = cursor.index.frames[0].tick;
+    let first = cursor.current_tick();
+    let mut next_frame_cache: Option<(usize, i32, SnapshotState)> = None;
     let last = cursor.index.frames.last().map_or(first, |f| f.tick);
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let now = Instant::now();
@@ -154,6 +157,7 @@ fn play_impl(path: &Path, screenshot: Option<&Path>) -> Result<(), String> {
                     Key::Left | Key::Right => {
                         let next = if key == Key::Left {
                             cursor.frame_index().saturating_sub(1)
+                                .max(cursor.first_playable_frame_index())
                         } else {
                             (cursor.frame_index() + 1).min(cursor.index.frames.len() - 1)
                         };
@@ -206,14 +210,33 @@ fn play_impl(path: &Path, screenshot: Option<&Path>) -> Result<(), String> {
                 cursor.seek_tick(tick).map_err(|e| format!("advance: {e:?}"))?;
             }
         }
-        let target = camera_target(&cursor, camera.center);
+        // The clock retains a fractional 50 Hz tick while the cursor keeps
+        // the last complete authoritative demo snapshot.
+        let mut blended = None;
+        if !clock.paused && clock.tick > f64::from(cursor.current_tick())
+            && cursor.current_tick() < last
+        {
+            let current_index = cursor.frame_index();
+            if next_frame_cache.as_ref().is_none_or(|(index, _, _)| *index != current_index) {
+                next_frame_cache = cursor.preview_next_frame()
+                    .map_err(|e| format!("preview demo frame: {e:?}"))?
+                    .map(|(tick, state)| (current_index, tick, state));
+            }
+            if let Some((_, next_tick, next_state)) = next_frame_cache.as_ref() {
+                let span = f64::from(next_tick - cursor.current_tick()).max(1.0);
+                let t = ((clock.tick - f64::from(cursor.current_tick())) / span) as f32;
+                blended = Some(interpolate_replay_snapshots(cursor.state(), next_state, t));
+            }
+        }
+        let displayed = blended.as_ref().unwrap_or(cursor.state());
+        let target = camera_target(displayed, camera.center);
         if screenshot.is_some() {
             camera.center = target;
         } else {
             camera.center.x += (target.x - camera.center.x) * 0.25;
             camera.center.y += (target.y - camera.center.y) * 0.25;
         }
-        paint(&mut frame, &cursor, &clock, map.as_ref(), camera)?;
+        paint(&mut frame, &cursor, displayed, &clock, map.as_ref(), camera)?;
         window.update_with_buffer(&frame.pixels, W, H)
             .map_err(|e| format!("present: {e}"))?;
         frames += 1;
@@ -332,7 +355,7 @@ mod tests {
         let cursor = DemoCursor::open(&path).unwrap();
         let mut pixels = Framebuffer::new(W as u32, H as u32).unwrap();
         let clock = DemoClock::new(cursor.current_tick());
-        paint(&mut pixels, &cursor, &clock, None, Camera::default()).unwrap();
+        paint(&mut pixels, &cursor, cursor.state(), &clock, None, Camera::default()).unwrap();
         assert_eq!(pixels.pixels[TIMELINE_TOP * W + TIMELINE_LEFT], 0xffdf7d);
         assert_eq!(pixels.pixels[TIMELINE_TOP * W + W - 1], HUD);
         std::fs::remove_file(path).unwrap();
