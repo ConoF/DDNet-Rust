@@ -11,12 +11,15 @@ use crate::graphics::{Camera, Framebuffer};
 use crate::map::GameMap;
 use crate::map_visual::VisualMap;
 use crate::snapshot_delta::SnapshotState;
+use crate::sprite_render::render_animated_snapshot;
 use crate::texture::Texture;
 
 #[derive(Debug, Default)]
 pub struct WindowAssets {
     pub visual_map: Option<VisualMap>,
     pub default_skin: Option<Texture>,
+    /// Atlas of hook head/chain and six weapon sprites (32x16 DDNet grid).
+    pub game_sprites: Option<Texture>,
 }
 
 pub fn candidate_roots(map_path: Option<&Path>) -> Vec<PathBuf> {
@@ -60,6 +63,15 @@ impl WindowAssets {
                     }
                 }
             }
+            if assets.game_sprites.is_none() {
+                if let Ok(data) = std::fs::read(root.join("game.png")) {
+                    if let Ok(image) = Texture::from_png(&data) {
+                        if image.width % 32 == 0 && image.height % 16 == 0 {
+                            assets.game_sprites = Some(image);
+                        }
+                    }
+                }
+            }
             if assets.visual_map.is_none() {
                 if let Ok(visual) = VisualMap::from_datafile(file, &root) {
                     if !visual.layers.is_empty() {
@@ -67,7 +79,8 @@ impl WindowAssets {
                     }
                 }
             }
-            if assets.default_skin.is_some() && assets.visual_map.is_some() {
+            if assets.default_skin.is_some()
+                && assets.visual_map.is_some() && assets.game_sprites.is_some() {
                 break;
             }
         }
@@ -88,9 +101,11 @@ impl WindowAssets {
     }
 
     pub fn draw_snapshot(
-        &self, frame: &mut Framebuffer, snapshot: &SnapshotState, camera: Camera,
+        &self, frame: &mut Framebuffer, snapshot: &SnapshotState,
+        camera: Camera, tick: u64,
     ) -> Result<usize, String> {
-        frame.render_snapshot_with_skin(snapshot, camera, self.default_skin.as_ref())
-            .map_err(|e| format!("tee render: {e:?}"))
+        render_animated_snapshot(frame, snapshot, camera,
+            self.default_skin.as_ref(), self.game_sprites.as_ref(), tick)
+            .map_err(|e| format!("animated tee render: {e:?}"))
     }
 }

@@ -69,7 +69,8 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
         .map_err(|e| format!("game layer: {e:?}"))?;
     let assets = WindowAssets::from_datafile(&file, Some(Path::new(path)));
     if smoke_output.is_some()
-        && (assets.visual_map.is_none() || assets.default_skin.is_none())
+        && (assets.visual_map.is_none() || assets.default_skin.is_none()
+            || assets.game_sprites.is_none())
     {
         return Err("textured smoke requires DDNet mapres and skins/default.png".into());
     }
@@ -86,6 +87,9 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
     let mut snapshot = SnapshotState {
         items: vec![SnapshotObject { type_id: 9, id: 0, words: vec![0; 22] }],
     };
+    let mut selected_weapon = 1i32; // 0 hammer; 1 gun; 2 shotgun; 3 grenade; 4 laser; 5 ninja
+    let mut attack_tick = 0i32;
+    let mut last_attack_button = false;
     let mut previous = Instant::now();
     let mut accumulator = Duration::ZERO;
     let mut frames: usize = 0;
@@ -106,6 +110,17 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
             .unwrap_or((SCREEN_W as f32 * 0.75, SCREEN_H as f32 * 0.5));
         let direction = i32::from(window.is_key_down(Key::D) || window.is_key_down(Key::Right))
             - i32::from(window.is_key_down(Key::A) || window.is_key_down(Key::Left));
+        if window.is_key_down(Key::Key1) { selected_weapon = 0; }
+        if window.is_key_down(Key::Key2) { selected_weapon = 1; }
+        if window.is_key_down(Key::Key3) { selected_weapon = 2; }
+        if window.is_key_down(Key::Key4) { selected_weapon = 3; }
+        if window.is_key_down(Key::Key5) { selected_weapon = 4; }
+        if window.is_key_down(Key::Key6) { selected_weapon = 5; }
+        let attack_button = window.get_mouse_down(MouseButton::Left);
+        if attack_button && !last_attack_button {
+            attack_tick = simulator.tick.min(i32::MAX as u64) as i32;
+        }
+        last_attack_button = attack_button;
         let controls = SimInput {
             direction,
             jump: window.is_key_down(Key::W) || window.is_key_down(Key::Space)
@@ -139,12 +154,19 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
         let entity = &mut snapshot.items[0].words;
         entity[1] = simulator.position.x.round() as i32;
         entity[2] = simulator.position.y.round() as i32;
+        entity[3] = (simulator.character.velocity.x * 256.0).round() as i32;
+        entity[4] = (simulator.character.velocity.y * 256.0).round() as i32;
+        entity[5] = (controls.aim.y.atan2(controls.aim.x) * 256.0).round() as i32;
+        entity[6] = direction;
+        entity[19] = selected_weapon;
+        entity[20] = 0; // EMOTE_NORMAL
+        entity[21] = attack_tick;
         entity[9] = if matches!(simulator.hook.state, HookState::Flying | HookState::Grabbed) {
             simulator.hook.state as i32
         } else { 0 };
         entity[11] = simulator.hook.position.x.round() as i32;
         entity[12] = simulator.hook.position.y.round() as i32;
-        assets.draw_snapshot(&mut pixels, &snapshot, camera)?;
+        assets.draw_snapshot(&mut pixels, &snapshot, camera, simulator.tick)?;
         window.update_with_buffer(&pixels.pixels, SCREEN_W, SCREEN_H)
             .map_err(|e| format!("present: {e}"))?;
         frames += 1;

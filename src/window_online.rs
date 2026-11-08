@@ -246,7 +246,8 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             pixels.clear(crate::graphics::BACKGROUND);
         }
         if let Some(snapshot) = display.as_ref() {
-            assets.draw_snapshot(&mut pixels, snapshot, camera)?;
+            assets.draw_snapshot(&mut pixels, snapshot, camera,
+                current_snapshot.unwrap_or(0).max(0) as u64)?;
         }
         if last_title.elapsed() > Duration::from_secs(1) {
             window.set_title(&format!("DDNet-Rust 0.6 prototype | {peer} | {:?} | tick {:?}",

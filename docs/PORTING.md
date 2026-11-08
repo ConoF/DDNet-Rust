@@ -219,3 +219,24 @@ The Xvfb offline window smoke test now requires both the original map
 textures and default skin, so it cannot silently pass after reverting
 to diagnostic rectangles. Native Windows still runs the complete Rust
 build, tests and Clippy, without an interactive Windows smoke test.
+
+## Stage 4 / sprite-driven character motion, hook and weapons
+
+The shared CPU compositor \`src/sprite_render.rs\` now uses the original
+DDNet 20.2.1 sprite coordinates from \`datasrc/content.py\` for
+\`skins/default.png\` (8x4) and \`game.png\` (32x16).
+It draws hooked chain segments and hook head, selects all six weapon
+body sprites from the full 0.6 Character netobject, rotates weapons by
+the captured player aim angle, plays recent-attack muzzle/recoil, turns
+eyes, and moves feet from tick-driven gait and horizontal velocity.
+
+The offline sandbox exposes **1..6** for cosmetic weapon selection and
+left mouse for a cosmetic attack preview. Combat remains unimplemented.
+The online 0.6 window reads real weapon/emote/attack tick snapshots.
+Both windows continue to fall back to diagnostic graphics if original
+resources are absent. Unit tests validate weapon atlas selection,
+hook chain/head, deterministic gait, recent attacks and extreme inputs.
+
+This is a simple tick-driven **visual approximation**, NOT the complete
+upstream \`CAnimState\` / walk-jump animation blend, dynamic player
+skins, named emotes, weapon sounds, or sprite batching.
