@@ -13,6 +13,7 @@ pub enum DatafileError {
     InvalidOffset,
     InvalidItem,
     InvalidItemType,
+    DuplicateItemId,
     MissingRawBlock,
     OutputTooLarge,
     DecompressionFailed,
@@ -90,7 +91,10 @@ fn parse_offsets(
     let mut previous = 0;
     for index in 0..count {
         let value = cursor.size()?;
-        if (index == 0 && value != 0) || value < previous || value > section_size {
+        if (index == 0 && value != 0)
+            || (index > 0 && value <= previous)
+            || value >= section_size
+        {
             return Err(DatafileError::InvalidOffset);
         }
         offsets.push(value);
@@ -135,22 +139,35 @@ impl<'a> Datafile<'a> {
         let needed = table_bytes.checked_add(item_size)
             .and_then(|sum| sum.checked_add(data_size))
             .ok_or(DatafileError::InvalidHeader)?;
-        if needed > bytes.len().saturating_sub(cursor.position) {
+        let remaining = bytes.len().saturating_sub(cursor.position);
+        if needed > remaining {
             return Err(DatafileError::Truncated);
         }
+        if needed != remaining {
+            return Err(DatafileError::InvalidHeader);
+        }
 
+        // The upstream reader requires non-empty item-type groups that
+        // partition the item table contiguously, without gaps or overlaps.
         let mut item_types = Vec::with_capacity(num_types);
+        let mut counted_items = 0usize;
         for _ in 0..num_types {
             let raw_type = cursor.size()?;
             let start = cursor.size()?;
             let count = cursor.size()?;
-            if raw_type > u16::MAX as usize ||
-                start.checked_add(count).is_none_or(|end| end > num_items) ||
-                item_types.iter().any(|entry: &ItemType| entry.type_id == raw_type as u16)
+            if raw_type > u16::MAX as usize
+                || count == 0
+                || start != counted_items
+                || start.checked_add(count).is_none_or(|end| end > num_items)
+                || item_types.iter().any(|entry: &ItemType| entry.type_id == raw_type as u16)
             {
                 return Err(DatafileError::InvalidItemType);
             }
+            counted_items += count; // checked against num_items above
             item_types.push(ItemType { type_id: raw_type as u16, start, count });
+        }
+        if counted_items != num_items {
+            return Err(DatafileError::InvalidItemType);
         }
 
         let item_offsets = parse_offsets(&mut cursor, num_items, item_size)?;
@@ -186,6 +203,9 @@ impl<'a> Datafile<'a> {
             }
             let end_of_payload = 8usize.checked_add(payload_length)
                 .ok_or(DatafileError::InvalidItem)?;
+            if end_of_payload != span.len() {
+                return Err(DatafileError::InvalidItem);
+            }
             let payload = span.get(8..end_of_payload).ok_or(DatafileError::InvalidItem)?;
             items.push(Item {
                 type_id: (packed_id >> 16) as u16,
@@ -196,10 +216,16 @@ impl<'a> Datafile<'a> {
 
         for item_type in &item_types {
             let end = item_type.start + item_type.count; // validated earlier
-            if items[item_type.start..end].iter()
-                .any(|item| item.type_id != item_type.type_id)
-            {
-                return Err(DatafileError::InvalidItemType);
+            let mut seen_ids = std::collections::HashSet::new();
+            for item in &items[item_type.start..end] {
+                if item.type_id != item_type.type_id {
+                    return Err(DatafileError::InvalidItemType);
+                }
+                // Preserve DDNet's backwards compatibility: legacy maps
+                // may contain duplicate ITEMTYPE_EX (0xffff) IDs.
+                if item.type_id != 0xffff && !seen_ids.insert(item.id) {
+                    return Err(DatafileError::DuplicateItemId);
+                }
             }
         }
 
@@ -332,6 +358,81 @@ mod tests {
         let mut bad = sample(3);
         bad[60..64].copy_from_slice(&(-1i32).to_le_bytes()); // item payload size
         assert_eq!(Datafile::parse(&bad), Err(DatafileError::InvalidItem));
+    }
+
+    fn two_items(type_id: u16, first_id: u16, second_id: u16) -> Vec<u8> {
+        // Two 12-byte items under one contiguous type group, one raw block.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"DATA");
+        for value in [3, 0, 0, 1, 2, 1, 24, 3] {
+            add_i32(&mut bytes, value);
+        }
+        for value in [i32::from(type_id), 0, 2, 0, 12, 0] {
+            add_i32(&mut bytes, value);
+        }
+        for id in [first_id, second_id] {
+            add_i32(&mut bytes, (i32::from(type_id) << 16) | i32::from(id));
+            add_i32(&mut bytes, 4);
+            add_i32(&mut bytes, 42);
+        }
+        bytes.extend_from_slice(&[1, 2, 3]);
+        let size = i32::try_from(bytes.len() - 16).unwrap();
+        bytes[8..12].copy_from_slice(&size.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn rejects_gaps_zero_length_type_groups_and_duplicate_item_ids() {
+        let valid = two_items(1, 7, 8);
+        assert_eq!(Datafile::parse(&valid).unwrap().items.len(), 2);
+
+        let duplicate = two_items(1, 7, 7);
+        assert_eq!(
+            Datafile::parse(&duplicate),
+            Err(DatafileError::DuplicateItemId)
+        );
+        // Upstream deliberately permits duplicate IDs for UUID mappings.
+        let ex = two_items(0xffff, 7, 7);
+        assert_eq!(Datafile::parse(&ex).unwrap().items.len(), 2);
+
+        let mut gap = valid.clone();
+        gap[40..44].copy_from_slice(&1i32.to_le_bytes()); // first group starts at 1
+        assert_eq!(Datafile::parse(&gap), Err(DatafileError::InvalidItemType));
+
+        let mut missing = valid.clone();
+        missing[44..48].copy_from_slice(&1i32.to_le_bytes()); // orphan second item
+        assert_eq!(Datafile::parse(&missing), Err(DatafileError::InvalidItemType));
+
+        let mut empty_group = valid;
+        empty_group[44..48].copy_from_slice(&0i32.to_le_bytes());
+        assert_eq!(Datafile::parse(&empty_group), Err(DatafileError::InvalidItemType));
+    }
+
+    #[test]
+    fn rejects_overlapping_offsets_mismatched_item_sizes_and_trailing_bytes() {
+        let valid = two_items(1, 7, 8);
+
+        let mut duplicate_offset = valid.clone();
+        duplicate_offset[52..56].copy_from_slice(&0i32.to_le_bytes());
+        assert_eq!(Datafile::parse(&duplicate_offset), Err(DatafileError::InvalidOffset));
+
+        let mut short_item = valid.clone();
+        short_item[64..68].copy_from_slice(&0i32.to_le_bytes());
+        assert_eq!(Datafile::parse(&short_item), Err(DatafileError::InvalidItem));
+
+        let mut trailing = valid.clone();
+        trailing.push(0);
+        assert_eq!(Datafile::parse(&trailing), Err(DatafileError::InvalidHeader));
+
+        let mut duplicate_raw_offset = sample(3);
+        duplicate_raw_offset[24..28].copy_from_slice(&2i32.to_le_bytes());
+        duplicate_raw_offset.splice(56..56, 1i32.to_le_bytes());
+        let size = i32::try_from(duplicate_raw_offset.len() - 16).unwrap();
+        duplicate_raw_offset[8..12].copy_from_slice(&size.to_le_bytes());
+        assert_eq!(
+            Datafile::parse(&duplicate_raw_offset),
+            Err(DatafileError::InvalidOffset)
+        );
     }
 
     #[test]
