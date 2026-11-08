@@ -196,3 +196,26 @@ a PNG artifact. This is *not* the final DDNet renderer: quads, animated
 envelopes, decorative details, lighting, GPU batching, and full
 per-layer mapping need additional porting. Physics and protocol remain
 independent from this visual subsystem.
+
+## Stage 4 — textured game windows and default tee skin
+
+Both the offline 50 Hz native window and the experimental online 0.6
+window now use \`VisualMap\` image-backed map layers if the DDNet
+\`data/\` resources are available; otherwise they preserve the
+collision-color fallback. The downloaded map retains bounded, CRC
+verified DATA bytes so the online window can load embedded visual
+textures rather than losing them after collision decoding. The offline
+window derives its asset root from the map path; online can also use
+\`DDNET_DATA_DIR\`, \`data/\`, or \`upstream/ddnet/data/\`.
+
+The snapshot renderer additionally uses the original
+\`skins/default.png\` spritesheet (8x4 grid from upstream
+\`datasrc/content.py\`) to paint static body, eyes and feet, with
+hook lines behind the tee. This is a simplified skin composition,
+not the exact upstream animated character render; player-specific skins,
+eye emotes, shadows and foot animation remain to be ported.
+
+The Xvfb offline window smoke test now requires both the original map
+textures and default skin, so it cannot silently pass after reverting
+to diagnostic rectangles. Native Windows still runs the complete Rust
+build, tests and Clippy, without an interactive Windows smoke test.

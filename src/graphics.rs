@@ -7,6 +7,7 @@ use crate::map::GameMap;
 use crate::netobjects::CharacterCoreNet;
 use crate::physics::Vec2;
 use crate::snapshot_delta::SnapshotState;
+use crate::texture::Texture;
 
 pub const BACKGROUND: u32 = 0x171e28;
 pub const SOLID: u32 = 0x718da5;
@@ -187,6 +188,120 @@ impl Framebuffer {
         Ok(drawn)
     }
 
+    /// Draw an original 0.6 DDNet skin atlas if supplied. Falls back to
+    /// diagnostic circles when the default.png sheet is unavailable.
+    /// Sprite grid and rectangles follow upstream datasrc/content.py:
+    /// 8x4, body (0,0,3,3), feet (6,1,2,1), eyes (2,3,1,1).
+    /// This draws a static tee, not the full skeletal walk/emote animation.
+    pub fn render_snapshot_with_skin(
+        &mut self,
+        snapshot: &SnapshotState,
+        camera: Camera,
+        skin: Option<&Texture>,
+    ) -> Result<usize, RenderError> {
+        if !camera.scale.is_finite() || !(0.05..=16.0).contains(&camera.scale)
+            || !camera.center.x.is_finite() || !camera.center.y.is_finite()
+        {
+            return Err(RenderError::InvalidCamera);
+        }
+        let Some(skin) = skin.filter(|s| {
+            s.width % 8 == 0 && s.height % 4 == 0 && s.width >= 8 && s.height >= 4
+        }) else {
+            return self.render_snapshot(snapshot, camera);
+        };
+
+        let mut drawn = 0;
+        for item in &snapshot.items {
+            if let Some(character) = CharacterCoreNet::from_object(item) {
+                self.draw_skin_tee(character, camera, skin);
+                drawn += 1;
+            }
+        }
+        Ok(drawn)
+    }
+
+    fn draw_skin_tee(&mut self, chara: CharacterCoreNet, camera: Camera, skin: &Texture) {
+        let tee = Vec2::new(chara.x as f32, chara.y as f32);
+        let center = self.screen(tee, camera);
+        // Screen-space bound also guards arithmetic on corrupted netobject
+        // coordinates. Invalid/far offscreen tees need no rasterization.
+        if center.0.unsigned_abs() > 100_000 || center.1.unsigned_abs() > 100_000 {
+            return;
+        }
+        if chara.hook_state > 0 {
+            let hook = Vec2::new(chara.hook_x as f32, chara.hook_y as f32);
+            if (hook.x - tee.x).abs() < 8192.0
+                && (hook.y - tee.y).abs() < 8192.0
+            {
+                let dest = self.screen(hook, camera);
+                if dest.0.unsigned_abs() <= 100_000 && dest.1.unsigned_abs() <= 100_000 {
+                    self.line_screen(center, dest, HOOK);
+                }
+            }
+        }
+        let scale = camera.scale;
+        self.blit_skin_region(skin, (6, 1, 2, 1),
+            (center.0 - (13.0 * scale) as i64,
+             center.1 + (7.0 * scale) as i64,
+             center.0 + (1.0 * scale) as i64,
+             center.1 + (17.0 * scale) as i64));
+        self.blit_skin_region(skin, (6, 1, 2, 1),
+            (center.0 + (1.0 * scale) as i64,
+             center.1 + (7.0 * scale) as i64,
+             center.0 + (15.0 * scale) as i64,
+             center.1 + (17.0 * scale) as i64));
+        self.blit_skin_region(skin, (0, 0, 3, 3),
+            (center.0 - (17.0 * scale) as i64,
+             center.1 - (17.0 * scale) as i64,
+             center.0 + (17.0 * scale) as i64,
+             center.1 + (15.0 * scale) as i64));
+        self.blit_skin_region(skin, (2, 3, 1, 1),
+            (center.0 + (1.0 * scale) as i64,
+             center.1 - (8.0 * scale) as i64,
+             center.0 + (13.0 * scale) as i64,
+             center.1 + (4.0 * scale) as i64));
+    }
+
+    fn blit_skin_region(
+        &mut self, skin: &Texture, source: (usize, usize, usize, usize),
+        dest: (i64, i64, i64, i64),
+    ) {
+        let (left, top, right, bottom) = dest;
+        if right <= left || bottom <= top { return; }
+        let (sx, sy, sw, sh) = source;
+        let cell_w = skin.width as usize / 8;
+        let cell_h = skin.height as usize / 4;
+        let src_x = sx * cell_w;
+        let src_y = sy * cell_h;
+        let src_w = sw * cell_w;
+        let src_h = sh * cell_h;
+        let xmin = left.clamp(0, i64::from(self.width));
+        let xmax = right.clamp(0, i64::from(self.width));
+        let ymin = top.clamp(0, i64::from(self.height));
+        let ymax = bottom.clamp(0, i64::from(self.height));
+        for y in ymin..ymax {
+            for x in xmin..xmax {
+                let tex_x = src_x + (((x - left) as usize * src_w)
+                    / (right - left) as usize).min(src_w - 1);
+                let tex_y = src_y + (((y - top) as usize * src_h)
+                    / (bottom - top) as usize).min(src_h - 1);
+                let src = (tex_y * skin.width as usize + tex_x) * 4;
+                let a = u32::from(skin.rgba[src + 3]);
+                if a == 0 { continue; }
+                let pos = y as usize * self.width as usize + x as usize;
+                let old = self.pixels[pos];
+                let backdrop = [(old >> 16) & 255, (old >> 8) & 255, old & 255];
+                let mut blended = 0u32;
+                for (c, &component) in backdrop.iter().enumerate() {
+                    let next = (u32::from(skin.rgba[src + c]) * a
+                        + component * (255 - a) + 127) / 255;
+                    blended = (blended << 8) | next;
+                }
+                self.pixels[pos] = blended;
+            }
+        }
+    }
+
     fn draw_character(&mut self, chara: CharacterCoreNet, camera: Camera) {
         let tee = Vec2::new(chara.x as f32, chara.y as f32);
         let center = self.screen(tee, camera);
@@ -308,6 +423,32 @@ mod tests {
         assert_eq!(frame.pixel(48,32), Some(TEE));
         assert_eq!(frame.pixel(65,32), Some(HOOK));
         assert_eq!(frame.pixel(80,32), Some(HOOK));
+    }
+
+    #[test]
+    fn original_skin_atlas_replaces_placeholder_tee_in_snapshot() {
+        let mut rgba = vec![0; 80 * 40 * 4];
+        // Body is the 3x3 cells at atlas top left: solid red.
+        for y in 0..30usize {
+            for x in 0..30usize {
+                let p = (y * 80 + x) * 4;
+                rgba[p..p + 4].copy_from_slice(&[240, 40, 20, 255]);
+            }
+        }
+        let skin = Texture::from_rgba(80, 40, rgba).unwrap();
+        let mut frame = Framebuffer::new(80, 80).unwrap();
+        let mut words = vec![0; 22];
+        words[1] = 40;
+        words[2] = 40;
+        let state = SnapshotState {
+            items: vec![SnapshotObject { type_id: 9, id: 0, words }],
+        };
+        let camera = Camera { center: Vec2::new(40.0, 40.0), scale: 1.0 };
+        assert_eq!(frame.render_snapshot_with_skin(&state, camera, Some(&skin)), Ok(1));
+        assert_eq!(frame.pixel(40, 40), Some(0xf02814));
+        frame.clear(BACKGROUND);
+        assert_eq!(frame.render_snapshot_with_skin(&state, camera, None), Ok(1));
+        assert_eq!(frame.pixel(40, 40), Some(TEE));
     }
 
     #[test]

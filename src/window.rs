@@ -1,7 +1,9 @@
 //! Interactive, offline-only DDNet physics sandbox backed by the Rust CPU renderer.
-//! No server connection, texture assets or DDNet GUI are implemented here.
+//! Offline prototype: textured DDNet map and default skin where assets exist;
+//! no server connection or full DDNet GUI.
 
 use std::time::{Duration, Instant};
+use std::path::Path;
 
 use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
 
@@ -12,6 +14,7 @@ use crate::map::GameMap;
 use crate::physics::Vec2;
 use crate::simulator::{SimInput, TeeSimulator};
 use crate::snapshot_delta::{SnapshotObject, SnapshotState};
+use crate::window_assets::WindowAssets;
 
 const SCREEN_W: usize = 960;
 const SCREEN_H: usize = 540;
@@ -64,6 +67,12 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
     let file = Datafile::parse(&bytes).map_err(|e| format!("datafile: {e:?}"))?;
     let map = GameMap::from_datafile(&file, 16_777_216)
         .map_err(|e| format!("game layer: {e:?}"))?;
+    let assets = WindowAssets::from_datafile(&file, Some(Path::new(path)));
+    if smoke_output.is_some()
+        && (assets.visual_map.is_none() || assets.default_skin.is_none())
+    {
+        return Err("textured smoke requires DDNet mapres and skins/default.png".into());
+    }
     let spawn = offline_spawn(&map).ok_or("no safe spawn available")?;
     let mut window = Window::new(
         "DDNet-Rust: OFFLINE physics prototype",
@@ -126,7 +135,7 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
 
         camera.center.x += (simulator.position.x - camera.center.x) * 0.2;
         camera.center.y += (simulator.position.y - camera.center.y) * 0.2;
-        pixels.render_map(&map, camera).map_err(|e| format!("draw map: {e:?}"))?;
+        assets.draw_map(&mut pixels, &map, camera)?;
         let entity = &mut snapshot.items[0].words;
         entity[1] = simulator.position.x.round() as i32;
         entity[2] = simulator.position.y.round() as i32;
@@ -135,8 +144,7 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
         } else { 0 };
         entity[11] = simulator.hook.position.x.round() as i32;
         entity[12] = simulator.hook.position.y.round() as i32;
-        pixels.render_snapshot(&snapshot, camera)
-            .map_err(|e| format!("draw tee: {e:?}"))?;
+        assets.draw_snapshot(&mut pixels, &snapshot, camera)?;
         window.update_with_buffer(&pixels.pixels, SCREEN_W, SCREEN_H)
             .map_err(|e| format!("present: {e}"))?;
         frames += 1;
@@ -144,7 +152,7 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
             if frames >= 30 {
                 let png = pixels.png_bytes().map_err(|e| format!("png: {e:?}"))?;
                 std::fs::write(output, png).map_err(|e| format!("write {output}: {e}"))?;
-                println!("Window/X11 render smoke test: 30 frames -> {output}");
+                println!("Textured DDNet map and skin window smoke: 30 frames -> {output}");
                 return Ok(());
             }
         }

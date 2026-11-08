@@ -2,7 +2,7 @@
 //!
 //! This uses the native Rust transport, map downloader and snapshot decoder,
 //! not an embedded DDNet C++ client. It is NOT a full DDNet player client:
-//! missing rendering assets, complete prediction, editor, skins, sound
+//! missing full renderer/prediction/editor, custom skins, sound
 //! and some 0.6/0.7 protocol extensions.
 
 use std::io::ErrorKind;
@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
 
 use crate::graphics::{Camera, Framebuffer};
+use crate::datafile::Datafile;
+use crate::window_assets::WindowAssets;
 use crate::interpolation::interpolate_snapshots;
 use crate::input::{InputFrame, PlayerInput};
 use crate::netobjects::{CharacterCoreNet, PlayerInfoNet};
@@ -47,7 +49,8 @@ fn movement_input(direction: i32, jump: bool, hook: bool, target: Vec2) -> Playe
 }
 
 /// Opens a real window and connects to a *remote* DDNet 0.6 server.
-/// Inputs go over UDP at 50 Hz. All visuals are diagnostic collision colors.
+/// Inputs go over UDP at 50 Hz. Visuals use map tiles and default skin
+/// when original DDNet data assets are available, with a collision fallback.
 pub fn play_online(endpoint: &str) -> Result<(), String> {
     let address = if endpoint.contains(':') { endpoint.to_owned() }
         else { format!("{endpoint}:8303") };
@@ -67,6 +70,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     let mut pixels = Framebuffer::new(WIDTH as u32, HEIGHT as u32)
         .map_err(|e| format!("framebuffer: {e:?}"))?;
     let mut camera = Camera { center: Vec2::default(), scale: 1.5 };
+    let mut assets = WindowAssets::default();
     let mut session = GameSession06::new(String::new(), 64 * 1024 * 1024, 16_777_216);
     let mut hello = session.connect().map_err(|e| format!("handshake: {e:?}"))?;
     socket.send(&hello).map_err(|e| format!("CONNECT: {e}"))?;
@@ -122,6 +126,12 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                     }
                     GameAction::MapLoaded { width, height, .. } => {
                         camera.center = Vec2::new(width as f32 * 16.0, height as f32 * 16.0);
+                        // The transport keeps CRC-checked original map bytes,
+                        // not only the collision layer. Decode assets once.
+                        assets = session.loaded_map_bytes.as_deref()
+                            .and_then(|bytes| Datafile::parse(bytes).ok())
+                            .map(|file| WindowAssets::from_datafile(&file, None))
+                            .unwrap_or_default();
                     }
                     _ => {}
                 }
@@ -158,6 +168,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             intended_tick = 1;
             current_snapshot = None;
             previous_snapshot = None;
+            assets = WindowAssets::default();
             accumulator = Duration::ZERO;
             continue;
         }
@@ -230,13 +241,12 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             }
         }
         if let Some(map) = session.loaded_map.as_ref() {
-            pixels.render_map(map, camera).map_err(|e| format!("draw map: {e:?}"))?;
+            assets.draw_map(&mut pixels, map, camera)?;
         } else {
             pixels.clear(crate::graphics::BACKGROUND);
         }
         if let Some(snapshot) = display.as_ref() {
-            pixels.render_snapshot(snapshot, camera)
-                .map_err(|e| format!("draw snapshot: {e:?}"))?;
+            assets.draw_snapshot(&mut pixels, snapshot, camera)?;
         }
         if last_title.elapsed() > Duration::from_secs(1) {
             window.set_title(&format!("DDNet-Rust 0.6 prototype | {peer} | {:?} | tick {:?}",

@@ -88,6 +88,9 @@ jobs:
           fi
           xvfb-run -a cargo run --locked --features window -- --play-offline-smoke upstream/ddnet/data/maps/ctf1.map target/offline-window-smoke.png
           python3 -c "from pathlib import Path; p=Path('target/offline-window-smoke.png'); assert p.stat().st_size > 100; assert p.read_bytes()[:8] == bytes((137,80,78,71,13,10,26,10))"
+      - name: Verify offline window skin and textured map smoke
+        run: |
+          python3 -c "from pathlib import Path; p=Path('target/window-smoke.png'); assert p.read_bytes()[:8]==bytes((137,80,78,71,13,10,26,10)); assert p.stat().st_size>1000"
       - name: Publish real window smoke screenshot
         uses: actions/upload-artifact@v4
         with:

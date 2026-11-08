@@ -21,6 +21,8 @@ pub mod map;
 pub mod graphics;
 pub mod texture;
 pub mod map_visual;
+#[cfg(feature = "window")]
+pub mod window_assets;
 pub mod audio;
 #[cfg(feature = "window")]
 pub mod window;

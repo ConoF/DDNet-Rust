@@ -80,6 +80,9 @@ pub struct GameSession06 {
     pub stage: Stage,
     pub transport: Client06,
     pub loaded_map: Option<GameMap>,
+    /// CRC-verified downloaded DATA bytes retained for original map graphics.
+    /// Bounded by max_map_bytes and cleared on map change/reconnect.
+    pub loaded_map_bytes: Option<Vec<u8>>,
     pub start_info: StartInfo,
     password: String,
     max_map_bytes: usize,
@@ -97,6 +100,7 @@ impl GameSession06 {
             stage: Stage::Offline,
             transport: Client06::new(),
             loaded_map: None,
+            loaded_map_bytes: None,
             start_info: StartInfo::default(),
             password,
             max_map_bytes,
@@ -201,6 +205,7 @@ impl GameSession06 {
                 self.pending_map = Some(pending);
                 self.map_name = Some(change.name.clone());
                 self.loaded_map = None;
+                self.loaded_map_bytes = None;
                 self.snapshots = SnapshotAssembler::new();
                 self.snapshot_states.clear();
                 self.stage = Stage::Downloading;
@@ -228,6 +233,7 @@ impl GameSession06 {
                         name, width: map.width, height: map.height,
                     });
                     self.loaded_map = Some(map);
+                    self.loaded_map_bytes = Some(map_bytes);
                     self.stage = Stage::WaitingConReady;
                     self.send_system(&client_ready(), true, actions)?;
                 } else {
@@ -445,6 +451,7 @@ mod tests {
         }));
         assert_eq!(client.stage, Stage::WaitingConReady);
         assert_eq!(client.loaded_map.as_ref().unwrap().tiles[0].index, 1);
+        assert_eq!(client.loaded_map_bytes.as_deref(), Some(map.as_slice()));
         assert_eq!(client.transport.sequence, 3); // READY vital.
 
         let started = client.receive(&server_message(
@@ -501,6 +508,7 @@ mod tests {
         )).unwrap_err();
         assert_eq!(error, SessionError::Message(MessageError::MapCrcMismatch));
         assert!(client.loaded_map.is_none());
+        assert!(client.loaded_map_bytes.is_none());
         assert_eq!(client.stage, Stage::Downloading);
     }
 
@@ -638,6 +646,7 @@ mod tests {
         assert_eq!(session.map_name(), None);
         assert!(session.pending_map.is_none());
         assert!(session.loaded_map.is_none());
+        assert!(session.loaded_map_bytes.is_none());
         assert!(session.snapshot_states.is_empty());
         assert_eq!(session.snapshots.last_tick(), None);
         assert_eq!(session.transport.sequence, 0);
