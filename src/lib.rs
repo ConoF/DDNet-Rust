@@ -33,6 +33,7 @@ pub mod map_visual;
 pub mod quad_render;
 pub mod envelope;
 pub mod gpu_scene;
+pub mod gpu_tees;
 #[cfg(feature = "gpu")]
 #[allow(unsafe_code)]
 pub mod gpu_renderer;
