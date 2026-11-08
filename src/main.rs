@@ -1,4 +1,5 @@
 use ddnet_rust::datafile::Datafile;
+use ddnet_rust::demo::DemoInfo;
 use ddnet_rust::map_visual::VisualMap;
 use std::path::Path;
 use ddnet_rust::map::GameMap;
@@ -29,6 +30,7 @@ fn main() {
         [arg] if arg == "--codec-vectors" => codec_vectors(),
         [arg] if arg == "--huffman-vectors" => huffman_vectors(),
         [arg, path] if arg == "--inspect-map" => inspect_map(path),
+        [arg, path] if arg == "--inspect-demo" => inspect_demo(path),
         [arg, path] if arg == "--inspect-game-map" => inspect_game_map(path),
         [arg, path, output] if arg == "--render-debug-map" => render_debug_map(path, output, false),
         [arg, path, output] if arg == "--render-debug-png" => render_debug_map(path, output, true),
@@ -70,6 +72,7 @@ fn print_help() {
     println!("  --codec-vectors     Emit integer vectors for C++ differential testing");
     println!("  --huffman-vectors   Compare compressed output against upstream C++");
     println!("  --inspect-map PATH  Parse and validate a v3/v4 DDNet map's metadata");
+    println!("  --inspect-demo FILE.demo  Inspect DDNet demo v3-v6 metadata");
     println!("  --render-debug-map MAP OUT.ppm  Export collision map to PPM");
     println!("  --render-debug-png MAP OUT.png  Export collision map to PNG");
     println!("  --render-textured-png MAP DATA_DIR OUT.png  Render PNG/embedded visual tilemap layers");
@@ -709,4 +712,21 @@ fn connect_last() {
         std::process::exit(2)
     }
     play_online(&settings.last_server);
+}
+
+fn inspect_demo(path: &str) {
+    let info = DemoInfo::inspect_file(Path::new(path)).unwrap_or_else(|error| {
+        eprintln!("Invalid DDNet demo {path}: {error:?}");
+        std::process::exit(1);
+    });
+    println!("Demo: {path}; format version: {}", info.version);
+    println!("Network: {}; type: {}", info.network_version, info.kind);
+    println!("Map: {}; size: {}; crc: {:08x}", info.map_name, info.map_size, info.map_crc);
+    println!("Duration: {} seconds; recorded: {}", info.length_seconds, info.timestamp);
+    println!("Timeline ticks: {:?}", info.timeline_markers);
+    if let Some(hash) = info.map_sha256 {
+        let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
+        println!("Map SHA256: {hex}");
+    }
+    println!("Map offset: {}; first chunk offset: {}", info.map_offset, info.first_chunk_offset);
 }

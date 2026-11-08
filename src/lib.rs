@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod datafile;
+pub mod demo;
 pub mod network;
 pub mod reliable;
 pub mod transport;
