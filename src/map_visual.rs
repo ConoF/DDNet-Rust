@@ -132,13 +132,10 @@ fn load_image(
             let metadata = std::fs::metadata(&path).map_err(|_| VisualError::Io)?;
             if metadata.len() > MAX_ASSET_BYTES { return Err(VisualError::TooLarge); }
             let bytes = std::fs::read(path).map_err(|_| VisualError::Io)?;
-            let texture = Texture::from_png(&bytes)?;
-            // Map dimensions are declarative metadata. Match the original
-            // loaded PNG dimensions for safe atlas addressing.
-            if texture.width != width || texture.height != height {
-                return Err(VisualError::InvalidImage);
-            }
-            Ok(texture)
+            // Exactly as in DDNet 20.2.1 mapimages.cpp: external images
+            // use the PNG's dimensions, not m_Width/m_Height from the map.
+            // Legacy maps can set those metadata fields to 0 or stale sizes.
+            Ok(Texture::from_png(&bytes)?)
         }
         _ => Err(VisualError::InvalidImage),
     }
@@ -407,6 +404,34 @@ mod tests {
             VisualMap::from_datafile(&modified, Path::new(".")),
             Err(VisualError::InvalidAssetName),
         );
+    }
+
+    #[test]
+    fn external_image_dimensions_come_from_png_not_stale_map_metadata() {
+        // DDNet's mapimages.cpp does not inspect map dimensions for
+        // external resources; only embedded RGBA images use them.
+        let root = std::env::temp_dir().join(format!(
+            "ddnet-rust-mapres-dim-test-{}", std::process::id(),
+        ));
+        let mapres = root.join("mapres");
+        std::fs::create_dir_all(&mapres).unwrap();
+        let image = crate::graphics::Framebuffer::new(2, 2).unwrap();
+        std::fs::write(mapres.join("synthetic.png"), image.png_bytes().unwrap()).unwrap();
+        let image_payload = words(&[1, 0, 0, 1, 0, -1]);
+        let file = Datafile {
+            version: 4, item_types: vec![],
+            items: vec![Item {
+                type_id: MAP_IMAGE, id: 0, payload: &image_payload,
+            }],
+            raw_blocks: vec![RawBlock {
+                encoded: b"synthetic\0", uncompressed_size: None,
+            }],
+        };
+        let visuals = VisualMap::from_datafile(&file, &root).unwrap();
+        assert_eq!(visuals.images.len(), 1);
+        assert_eq!(visuals.images[0].width, 2);
+        assert_eq!(visuals.images[0].height, 2);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
