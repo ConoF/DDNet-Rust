@@ -88,3 +88,7 @@ Run `cargo run --features window -- --play-online HOST:8303` for a DDNet 0.6 ser
 ## Audio diagnostics
 
 The Rust-only PCM engine ports the core stereo mix, master/channel volume, mono/stereo handling, loop transition and basic circular/rectangular spatial attenuation from DDNet 20.2.1. Run `cargo run --locked -- --audio-smoke target/audio-smoke.wav` to export a synthetic 440 Hz sound. The output is a test waveform, not DDNet's original audio assets. Audio hardware playback, Opus/WavPack decoding, real-time callbacks and parity across all DDNet edge cases are still outstanding.
+
+## Network snapshot display interpolation
+
+The experimental online window now blends character/hook coordinates between consecutive decoded 0.6 snapshots. Large position changes (over 256 world pixels), missing objects and hook transitions snap immediately. This does **not** modify server snapshots, prediction or input acknowledgements. The smoothing is diagnostic and is not yet a verified port of DDNet's full interpolation/prediction implementation.

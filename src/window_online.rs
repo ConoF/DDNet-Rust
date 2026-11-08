@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
 
 use crate::graphics::{Camera, Framebuffer};
+use crate::interpolation::interpolate_snapshots;
 use crate::input::{InputFrame, PlayerInput};
 use crate::netobjects::{CharacterCoreNet, PlayerInfoNet};
 use crate::physics::Vec2;
@@ -79,6 +80,8 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     let mut intended_tick: i32 = 1;
     let mut last_ack_snapshot: i32 = -1;
     let mut current_snapshot: Option<i32> = None;
+    let mut previous_snapshot: Option<i32> = None;
+    let mut last_snapshot_at = Instant::now();
     let mut last_title = Instant::now();
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
@@ -107,7 +110,9 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                     }
                     GameAction::SnapshotDecoded { tick, .. } => {
                         last_ack_snapshot = tick;
+                        previous_snapshot = current_snapshot;
                         current_snapshot = Some(tick);
+                        last_snapshot_at = Instant::now();
                         intended_tick = intended_tick.max(tick.saturating_add(1));
                     }
                     GameAction::Disconnected(reason) => {
@@ -172,12 +177,24 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             }
         }
 
-        if let Some(tick) = current_snapshot {
-            if let Some(snapshot) = session.snapshot_state(tick) {
-                if let Some(pos) = preferred_character(snapshot) {
-                    camera.center.x += (pos.x - camera.center.x) * 0.3;
-                    camera.center.y += (pos.y - camera.center.y) * 0.3;
+        // Interpolation is display-only; input ACKs and prediction always use
+        // the unmodified decoded snapshots stored in GameSession06.
+        let display = current_snapshot
+            .and_then(|tick| session.snapshot_state(tick))
+            .map(|newest| {
+                if let Some(previous) = previous_snapshot
+                    .and_then(|tick| session.snapshot_state(tick))
+                {
+                    let progress = last_snapshot_at.elapsed().as_secs_f32() / 0.02;
+                    interpolate_snapshots(previous, newest, progress)
+                } else {
+                    newest.clone()
                 }
+            });
+        if let Some(snapshot) = display.as_ref() {
+            if let Some(pos) = preferred_character(snapshot) {
+                camera.center.x += (pos.x - camera.center.x) * 0.3;
+                camera.center.y += (pos.y - camera.center.y) * 0.3;
             }
         }
         if let Some(map) = session.loaded_map.as_ref() {
@@ -185,11 +202,9 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         } else {
             pixels.clear(crate::graphics::BACKGROUND);
         }
-        if let Some(tick) = current_snapshot {
-            if let Some(snapshot) = session.snapshot_state(tick) {
-                pixels.render_snapshot(snapshot, camera)
-                    .map_err(|e| format!("draw snapshot: {e:?}"))?;
-            }
+        if let Some(snapshot) = display.as_ref() {
+            pixels.render_snapshot(snapshot, camera)
+                .map_err(|e| format!("draw snapshot: {e:?}"))?;
         }
         if last_title.elapsed() > Duration::from_secs(1) {
             window.set_title(&format!("DDNet-Rust 0.6 prototype | {peer} | {:?} | tick {:?}",

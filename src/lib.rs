@@ -13,6 +13,7 @@ pub mod input;
 pub mod session;
 pub mod snapshot;
 pub mod snapshot_delta;
+pub mod interpolation;
 pub mod netobjects;
 pub mod huffman;
 pub mod layers;
