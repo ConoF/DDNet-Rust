@@ -77,3 +77,12 @@ Graphics sets FPS/zoom, and Sound toggles sounds. The settings persist
 to `~/.config/ddnet-rust/settings.json` on Linux (or the appropriate
 XDG config directory). Exact original DDNet fonts, all skins and
 all menu pages have not yet been ported.
+
+
+### Original DDNet font assets
+
+The package ships the original DDNet 20.2.1
+`data/fonts/DejaVuSans.ttf`. The UI now builds a native reusable
+TrueType glyph atlas with proportional Latin, Cyrillic and punctuation
+glyphs; native GPU and software fallback share metrics. If the
+font asset is missing, the client falls back to the older ASCII bitmap.

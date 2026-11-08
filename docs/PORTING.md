@@ -661,3 +661,20 @@ and Controls currently show informational text instead of fake
 interactive options. These remain follow-up tasks rather than complete
 parity. The `--play-offline-menu-smoke MAP PNG` command captures the
 actual menu in an Xvfb window for regression comparisons.
+
+
+## Original DDNet text font
+
+An original pinned-upstream `DejaVuSans.ttf` font is discovered in
+`data/fonts/`, rasterized once using pure Rust `fontdue`, and shared
+by native GPU atlas glyph batching and CPU fallback. Latin/Cyrillic
+and punctuation glyphs are pre-rasterized to a bounded atlas; this
+removes the previous ASCII-only "?" placeholders for common Russian
+chat and menu text and replaces fixed 8 px glyph widths with font
+advances. The packaged CachyOS client includes the TTF asset.
+
+**Not full font parity:** original DDNet multi-resolution rendering,
+FontAwesome icon font, international fallback families, outline/
+shadow sampling, DPI scaling and complete localization are not
+implemented. If the TTF file is absent or unsupported, a small
+ASCII bitmap renderer remains available rather than failing startup.

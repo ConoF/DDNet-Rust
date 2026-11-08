@@ -13,6 +13,9 @@ on:
       - src/gpu_tees.rs
       - src/sprite_render.rs
       - src/gpu_shader.wgsl
+      - src/ui_font.rs
+      - src/gpu_hud.rs
+      - src/online_ui.rs
       - src/main.rs
       - src/window_online.rs
       - src/window.rs

@@ -40,6 +40,8 @@ jobs:
           install -m 755 packaging/cachyos/run.sh "dist/$bundle/run.sh"
           cp -a upstream/ddnet/data/mapres "dist/$bundle/data/"
           cp -a upstream/ddnet/data/audio "dist/$bundle/data/"
+          mkdir -p "dist/$bundle/data/fonts"
+          cp upstream/ddnet/data/fonts/DejaVuSans.ttf "dist/$bundle/data/fonts/DejaVuSans.ttf"
           cp upstream/ddnet/data/game.png "dist/$bundle/data/game.png"
           cp upstream/ddnet/data/skins/default.png "dist/$bundle/data/skins/"
           cp upstream/ddnet/data/maps/ctf1.map "dist/$bundle/data/maps/"
