@@ -56,16 +56,16 @@ impl TeeBuilder {
             let dy = py * size.1;
             let x = center.0 + dx * cos - dy * sin;
             let y = center.1 + dx * sin + dy * cos;
-            let mut uv = uv[i];
+            let mut tex_uv = uv[i];
             if flip_y {
                 // Flip vertical atlas coordinate in sprite-local space; the
                 // CPU blitter uses exactly the same inverse v transform.
-                uv[1] = uv[if i == 0 { 2 } else if i == 1 { 3 }
-                            else if i == 2 { 0 } else { 1 }][1];
+                tex_uv[1] = uv[if i == 0 { 2 } else if i == 1 { 3 }
+                                else if i == 2 { 0 } else { 1 }][1];
             }
             corners[i] = GpuVertex {
                 clip: [2.0 * x / self.width - 1.0, 1.0 - 2.0 * y / self.height],
-                uv,
+                uv: tex_uv,
                 color,
             };
         }
