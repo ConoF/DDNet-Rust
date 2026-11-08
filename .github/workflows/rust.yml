@@ -34,6 +34,16 @@ jobs:
           cargo run -- --inspect-map upstream/ddnet/data/maps/ctf1.map
           cargo run -- --inspect-map upstream/ddnet/data/maps/coverage.map
           cargo run -- --inspect-map upstream/ddnet/data/maps/Tutorial.map
+      - name: Decompress official DDNet map game layers
+        run: |
+          cargo run -- --inspect-game-map upstream/ddnet/data/maps/ctf1.map
+          cargo run -- --inspect-game-map upstream/ddnet/data/maps/coverage.map
+          cargo run -- --inspect-game-map upstream/ddnet/data/maps/Tutorial.map
+      - name: Emit dependency lockfile for reproducibility
+        run: |
+          echo 'DDNET_LOCK_BEGIN'
+          cat Cargo.lock
+          echo 'DDNET_LOCK_END'
 
   windows:
     runs-on: windows-latest

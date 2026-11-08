@@ -1,4 +1,5 @@
 use ddnet_rust::datafile::Datafile;
+use ddnet_rust::map::GameMap;
 use ddnet_rust::physics::{Character, Input, JumpEvent, Tuning};
 use ddnet_rust::protocol::{decode_int, write_int};
 
@@ -15,6 +16,7 @@ fn main() {
         [arg] if arg == "--self-test" => self_test(),
         [arg] if arg == "--codec-vectors" => codec_vectors(),
         [arg, path] if arg == "--inspect-map" => inspect_map(path),
+        [arg, path] if arg == "--inspect-game-map" => inspect_game_map(path),
         _ => {
             eprintln!("Unknown arguments. Run ddnet-rust --help.");
             std::process::exit(2);
@@ -74,5 +76,29 @@ fn inspect_map(path: &str) {
         map.item_types.len(),
         map.items.len(),
         map.raw_blocks.len()
+    );
+}
+
+fn inspect_game_map(path: &str) {
+    let bytes = std::fs::read(path).unwrap_or_else(|error| {
+        eprintln!("Unable to open {path}: {error}");
+        std::process::exit(1);
+    });
+    let file = Datafile::parse(&bytes).unwrap_or_else(|error| {
+        eprintln!("Invalid DDNet datafile {path}: {error:?}");
+        std::process::exit(1);
+    });
+    let game = GameMap::from_datafile(&file, 16_777_216).unwrap_or_else(|error| {
+        eprintln!("Invalid game collision layer {path}: {error:?}");
+        std::process::exit(1);
+    });
+    let solids = game
+        .tiles
+        .iter()
+        .filter(|tile| matches!(tile.index, 1 | 3))
+        .count();
+    println!(
+        "{path}: collision layer {}x{}, {} solid/nohook tiles",
+        game.width, game.height, solids
     );
 }

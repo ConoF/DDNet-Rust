@@ -15,7 +15,8 @@ The Rust executable does not use any C++ code or FFI.
 | Signed Teeworlds variable integers | Implemented | Reference vectors, 165k+ round trips, C++ differential test |
 | UTF-8 NUL-terminated strings | Partial, strict | Invalid-input and bounds tests |
 | Teeworlds datafile v3/v4 metadata and item/block indexing | Partial | Synthetic fixtures, truncation/fuzz simulation and real DDNet map files |
-| v4 zlib-compressed data blocks / map layer decoding | Not implemented | None |
+| v4 zlib-compressed data blocks | Implemented, bounded | zlib round trips, corruption and size-limit tests |
+| Vanilla game layer tiles and basic solid/ground queries | Partial | synthetic simulations and real-map CI smoke tests |
 | 0.6 packet and chunk header packing/validation | Partial | Fixed vectors, roundtrips, rejected malformed inputs |
 | UDP connection, tokens, reliability, Huffman, 0.7 networking | Not implemented | None |
 | Gravity, directional movement, ground/air jump | Partial | 50 Hz tick-state simulation tests |
