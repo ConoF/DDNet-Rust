@@ -110,7 +110,7 @@ impl Texture {
                 }
                 b"PLTE" => {
                     if seen_idat || !palette.is_empty() || payload.is_empty()
-                        || payload.len() % 3 != 0 || payload.len() > 768
+                        || !payload.len().is_multiple_of(3) || payload.len() > 768
                     {
                         return Err(TextureError::Malformed);
                     }
