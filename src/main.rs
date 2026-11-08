@@ -4,6 +4,7 @@ use ddnet_rust::layers::PhysicsLayers;
 use ddnet_rust::physics::{Character, Input, JumpEvent, Tuning};
 use ddnet_rust::protocol::{decode_int, write_int};
 use ddnet_rust::transport::probe_server;
+use ddnet_rust::session::{GameAction, GameSession06, Stage};
 use ddnet_rust::huffman::{reference_inputs, Huffman};
 
 const CODEC_VECTORS: &[i32] = &[
@@ -23,6 +24,7 @@ fn main() {
         [arg, path] if arg == "--inspect-game-map" => inspect_game_map(path),
         [arg, path] if arg == "--inspect-layers" => inspect_layers(path),
         [arg, addr] if arg == "--probe-server" => probe(addr),
+        [arg, addr] if arg == "--connect-headless" => connect_headless(addr),
         _ => {
             eprintln!("Unknown arguments. Run ddnet-rust --help.");
             std::process::exit(2);
@@ -37,6 +39,7 @@ fn print_help() {
     println!("  --huffman-vectors   Compare compressed output against upstream C++");
     println!("  --inspect-map PATH  Parse and validate a v3/v4 DDNet map's metadata");
     println!("  --probe-server HOST[:PORT]  Probe a live DDNet 0.6 UDP handshake");
+    println!("  --connect-headless HOST[:PORT]  Test DDNet 0.6 login and map download");
     println!("  --version           Print project and upstream versions");
 }
 
@@ -159,4 +162,108 @@ fn huffman_vectors() {
         }
         println!();
     }
+}
+
+fn connect_headless(endpoint: &str) {
+    use std::net::{ToSocketAddrs, UdpSocket};
+    use std::time::{Duration, Instant};
+
+    let address = if endpoint.contains(':') {
+        endpoint.to_owned()
+    } else {
+        format!("{endpoint}:8303")
+    };
+    let peer = address
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addresses| addresses.next())
+        .unwrap_or_else(|| {
+            eprintln!("Unable to resolve DDNet server: {address}");
+            std::process::exit(2);
+        });
+    let socket = UdpSocket::bind(if peer.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" })
+        .unwrap_or_else(|error| {
+            eprintln!("UDP bind failed: {error}");
+            std::process::exit(1);
+        });
+    socket.connect(peer).unwrap_or_else(|error| {
+        eprintln!("UDP connect failed: {error}");
+        std::process::exit(1);
+    });
+    socket.set_read_timeout(Some(Duration::from_millis(250))).unwrap();
+
+    let mut session = GameSession06::new(String::new(), 64 * 1024 * 1024, 16_777_216);
+    let hello = session.connect().expect("start fresh DDNet transport");
+    socket.send(&hello).unwrap_or_else(|error| {
+        eprintln!("Initial packet failed: {error}");
+        std::process::exit(1);
+    });
+    println!("DDNet 0.6: connecting to {peer} (headless, 12 second cap)");
+
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let mut last_connect = Instant::now();
+    let mut last_keepalive = Instant::now();
+    let mut incoming = [0u8; 1400];
+
+    while Instant::now() < deadline {
+        match socket.recv(&mut incoming) {
+            Ok(length) => {
+                let actions = match session.receive(&incoming[..length]) {
+                    Ok(actions) => actions,
+                    Err(error) => {
+                        eprintln!("Discarding unsupported or invalid packet: {error:?}");
+                        continue;
+                    }
+                };
+                for action in actions {
+                    match action {
+                        GameAction::Outgoing(bytes) => {
+                            if let Err(error) = socket.send(&bytes) {
+                                eprintln!("UDP write failed: {error}");
+                                std::process::exit(1);
+                            }
+                        }
+                        GameAction::TransportConnected => println!("Transport: connected"),
+                        GameAction::MapAnnounced { name, size } =>
+                            println!("Server map: {name}, {size} bytes"),
+                        GameAction::MapLoaded { name, width, height } =>
+                            println!("Map validated: {name} ({width}x{height} tiles)"),
+                        GameAction::EnterGameSent => {
+                            println!("ENTERGAME transmitted. Snapshot/rendering not implemented yet.");
+                            return;
+                        }
+                        GameAction::Disconnected(reason) => {
+                            eprintln!("Server closed connection: {reason}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+            Err(error) if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) => {}
+            Err(error) => {
+                eprintln!("UDP receive failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        if session.stage == Stage::Connecting
+            && last_connect.elapsed() >= Duration::from_millis(500)
+        {
+            let _ = socket.send(&hello);
+            last_connect = Instant::now();
+        }
+        if session.transport.state == ddnet_rust::transport::State::Online
+            && last_keepalive.elapsed() >= Duration::from_secs(1)
+        {
+            if let Ok(bytes) = session.transport.keepalive() {
+                let _ = socket.send(&bytes);
+            }
+            last_keepalive = Instant::now();
+        }
+    }
+
+    eprintln!("Timed out waiting for DDNet 0.6 map/READY handshake. Stage: {:?}", session.stage);
+    std::process::exit(1);
 }
