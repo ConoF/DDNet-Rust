@@ -471,8 +471,8 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         accumulated_frame_ms += render_started.elapsed().as_secs_f32() * 1000.0;
         let sample_seconds = last_title.elapsed().as_secs_f32();
         if sample_seconds >= 1.0 {
-            displayed_fps = frames_in_sample as f32 / sample_seconds;
-            displayed_frame_ms = accumulated_frame_ms / frames_in_sample as f32;
+            let displayed_fps = frames_in_sample as f32 / sample_seconds;
+            let displayed_frame_ms = accumulated_frame_ms / frames_in_sample as f32;
             window.set_title(&format!(
                 "DDNet-Rust | {peer} | FPS {:.0} | frame {:.1} ms | tick {:?} | ACK {} | recovery {} | input {:?}ms",
                 displayed_fps, displayed_frame_ms, current_snapshot,
