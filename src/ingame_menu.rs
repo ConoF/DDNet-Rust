@@ -15,7 +15,6 @@ const PANEL: u32 = 0x213344;
 const SHADOW: u32 = 0x101b28;
 const HEADER: u32 = 0x304b61;
 const SELECTED: u32 = 0x467993;
-const HOVER: u32 = 0x355768;
 const WHITE: u32 = 0xf2f5f5;
 const PALE: u32 = 0xb8c8d3;
 const ACCENT: u32 = 0x9adce8;

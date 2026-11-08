@@ -440,6 +440,20 @@ impl GameSession06 {
         Ok(self.transport.send_message(&client_say(team, text)?, true)?)
     }
 
+    /// Send a vital in-game Cl_ChangeInfo (name, clan, skin and colors).
+    /// Update local handshake metadata only once the packet is encoded.
+    pub fn change_name(&mut self, name: &str) -> Result<Vec<u8>, SessionError> {
+        if self.stage != Stage::EnterGameSent {
+            return Err(SessionError::UnexpectedStage);
+        }
+        let mut new_info = self.start_info.clone();
+        new_info.name = name.to_owned();
+        let packet = new_info.pack_change()?;
+        let wire = self.transport.send_message(&packet, true)?;
+        self.start_info = new_info;
+        Ok(wire)
+    }
+
     /// -1=spectators, 0=red/regular team, 1=blue (if server permits).
     pub fn set_team(&mut self, team: i32) -> Result<Vec<u8>, SessionError> {
         if self.stage != Stage::EnterGameSent {

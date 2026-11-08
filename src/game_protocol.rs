@@ -170,6 +170,15 @@ impl StartInfo {
     /// Strict validation prevents malformed names/skins from reaching
     /// the remote server. Limits are measured in UTF-8 bytes.
     pub fn pack(&self) -> Result<Vec<u8>, MessageError> {
+        self.pack_message(NETMSGTYPE_CL_STARTINFO)
+    }
+
+    /// In-game name, clan and skin update (Cl_ChangeInfo=21).
+    pub fn pack_change(&self) -> Result<Vec<u8>, MessageError> {
+        self.pack_message(21)
+    }
+
+    fn pack_message(&self, id: u16) -> Result<Vec<u8>, MessageError> {
         if self.name.is_empty() || self.name.len() >= 16
             || self.clan.len() >= 12 || self.skin.is_empty()
             || self.skin.len() >= 24 {
@@ -185,7 +194,7 @@ impl StartInfo {
         write_int(self.color_feet, &mut data);
         encode_message(MessageId::Regular {
             system: false,
-            number: NETMSGTYPE_CL_STARTINFO,
+            number: id,
         }, &data)
     }
 }
