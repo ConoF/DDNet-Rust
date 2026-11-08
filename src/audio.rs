@@ -439,7 +439,7 @@ mod tests {
         ]);
         let reduced = input.resampled_to(8_000).unwrap();
         assert_eq!(reduced.data, input.data);
-        assert_eq!(input.resampled_to(0), Err(AudioError::InvalidRate));
+        assert_eq!(input.resampled_to(0).err(), Some(AudioError::InvalidRate));
     }
 
     #[test]
