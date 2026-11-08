@@ -139,3 +139,21 @@ lies at that endpoint. Three regression tests cover launch, the 380px
 range cutoff and boundary-wall behavior. This remains *partial* physics:
 hooking other characters, teleporting hooks, through/front tiles and
 DDNet-specific movement restrictions are still unimplemented.
+
+## Stage 3.3 — hooking a second character (partial)
+
+\`Hook::tick_with_players\` accepts a bounded, validated list of visible
+character cores (0..63 slots), with external team/solo/super eligibility.
+The hook chooses the nearest eligible target along the map-truncated
+segment and gives player intersection priority over the wall, mirroring
+\`CCharacterCore::Tick\`. It then tracks the hooked tee's position,
+releases on disappearance or permission loss, and applies the 60-tick
+player-only timeout. Separate \`Hook::apply_player_drag\` implements the
+two-body componentwise saturated drag of \`TickDeferred\`, without
+disabling the existing single-tee static-wall simulator.
+
+Deliberate limits: there is no owned \`CWorldCore\` yet, so no actual
+multiplayer tick orchestration, full team collision restrictions,
+telehook behavior, or player-player collision response. Those need
+a multi-core world integration rather than pretending a single-tee
+simulator provides complete hooking.
