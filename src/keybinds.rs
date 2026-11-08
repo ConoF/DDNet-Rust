@@ -60,6 +60,10 @@ mod tests {
         assert!(input2.held(0));
         assert!(input2.held(5));
         assert!(!input2.held(4));
+        let slots = BindSnapshot::from_keys(&[Key::Key1, Key::Key5], [false;3], &binds);
+        assert!(slots.held(10));
+        assert!(slots.held(14));
+        assert!(!slots.held(12));
     }
     #[test]
     fn snapshot_indices_are_bounded() {

@@ -173,13 +173,15 @@ pub fn fetch_master() -> Result<(Vec<ServerEntry>, &'static str), BrowserError> 
 }
 
 /// Bindable subset of the controls defined by upstream DDNet 20.2.1.
-pub const BIND_ACTIONS: [&str; 10] = [
+pub const BIND_ACTIONS: [&str; 15] = [
     "MOVE LEFT", "MOVE RIGHT", "JUMP", "JUMP ALT", "FIRE",
     "HOOK", "HOOK ALT", "CHAT", "TEAM CHAT", "SCOREBOARD",
+    "WEAPON 1", "WEAPON 2", "WEAPON 3", "WEAPON 4", "WEAPON 5",
 ];
-const DEFAULT_BINDS: [&str; 10] = [
+const DEFAULT_BINDS: [&str; BIND_ACTIONS.len()] = [
     "A", "D", "Space", "W", "MouseLeft",
     "MouseRight", "E", "T", "Y", "Tab",
+    "Key1", "Key2", "Key3", "Key4", "Key5",
 ];
 
 pub fn valid_binding(name: &str) -> bool {
@@ -437,12 +439,24 @@ impl ClientSettings {
             }
         }
         if let Some(entries) = obj.get("bindings").and_then(Value::as_array) {
-            if entries.len() == BIND_ACTIONS.len()
-                && entries.iter().all(|v|v.as_str().is_some_and(valid_binding))
+            if (entries.len() == BIND_ACTIONS.len() || entries.len() == 10)
+                && entries.iter().all(|v| v.as_str().is_some_and(valid_binding))
             {
                 let mut bindings = KeyBindings::default();
-                for (slot, item) in bindings.slots.iter_mut().zip(entries) {
-                    *slot = item.as_str().unwrap_or_default().to_owned();
+                if entries.len() == BIND_ACTIONS.len() {
+                    for (slot, item) in bindings.slots.iter_mut().zip(entries) {
+                        *slot = item.as_str().unwrap_or_default().to_owned();
+                    }
+                } else {
+                    // The first ten bindings existed before weapon rebinding.
+                    // Migrate by swapping conflicts, preserving legacy keys even
+                    // when users assigned Key1..Key5 to movement or chat.
+                    for (index, item) in entries.iter().enumerate() {
+                        let name = item.as_str().unwrap_or_default();
+                        if bindings.slots[index] != name {
+                            bindings.set(index, name);
+                        }
+                    }
                 }
                 if bindings.validate() { settings.bindings = bindings; }
             }
@@ -627,10 +641,22 @@ mod tests {
         assert!(!binds.set(99, "F1"));
         assert!(binds.validate());
         assert!(binds.uses("D"));
-        assert!(!binds.uses("Key1"));
+        assert!(binds.uses("Key1"));
         assert!(binds.set(4, "F12"));
         assert_eq!(binds.slots[4], "F12");
         assert!(binds.validate());
+    }
+
+    #[test]
+    fn legacy_bindings_keep_user_weapon_key_conflicts_during_migration() {
+        let path = std::env::temp_dir().join(format!(
+            "ddnet-rust-legacy-controls-{}.json", std::process::id()));
+        fs::write(&path, r#"{"bindings":["Key1","D","Space","W","MouseLeft","MouseRight","E","T","Y","Tab"]}"#).unwrap();
+        let loaded = ClientSettings::load(&path).unwrap();
+        assert_eq!(loaded.bindings.slots[0], "Key1");
+        assert_eq!(loaded.bindings.slots[10], "A");
+        assert!(loaded.bindings.validate());
+        let _ = fs::remove_file(path);
     }
 
     #[test]

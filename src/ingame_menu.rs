@@ -21,6 +21,7 @@ const ACCENT: u32 = 0x9adce8;
 const WARNING: u32 = 0xf4c06b;
 const ROW_HEIGHT: usize = 36;
 const BIND_ROW_HEIGHT: usize = 26;
+const VISIBLE_BIND_ROWS: usize = 10;
 
 /// Soft 5px rounded DDNet-style menu panels. Each scanline strip is
 /// disjoint, preventing alpha-overlap darkening on transparent UI.
@@ -188,6 +189,14 @@ impl MenuState {
             Page::Game => 5,
             Page::Settings => self.settings_tab.row_count(),
             Page::Players | Page::ServerInfo => 0,
+        }
+    }
+
+    fn first_control_row(&self) -> usize {
+        if self.page == Page::Settings && self.settings_tab == SettingsTab::Controls {
+            (self.selected / VISIBLE_BIND_ROWS) * VISIBLE_BIND_ROWS
+        } else {
+            0
         }
     }
 
@@ -410,8 +419,14 @@ impl MenuState {
         let row_height = if self.page == Page::Settings
             && self.settings_tab == SettingsTab::Controls
         { BIND_ROW_HEIGHT } else { ROW_HEIGHT };
-        for row in 0..self.rows() {
-            if hit(x, y+row*row_height, w, row_height-4) {
+        let first = self.first_control_row();
+        let last = if self.page == Page::Settings
+            && self.settings_tab == SettingsTab::Controls
+        {
+            (first + VISIBLE_BIND_ROWS).min(self.rows())
+        } else { self.rows() };
+        for row in first..last {
+            if hit(x, y+(row-first)*row_height, w, row_height-4) {
                 self.selected = row;
                 let direction = if self.page == Page::Settings
                     && matches!(self.settings_tab,
@@ -582,8 +597,13 @@ impl MenuState {
         let row_height = if self.settings_tab == SettingsTab::Controls {
             BIND_ROW_HEIGHT
         } else { ROW_HEIGHT };
-        for (i,label) in rows.iter().enumerate() {
-            let yy=y+i*row_height;
+        let first = self.first_control_row();
+        for (i,label) in rows.iter().enumerate().skip(first).take(
+            if self.settings_tab == SettingsTab::Controls {
+                VISIBLE_BIND_ROWS
+            } else { rows.len() }
+        ) {
+            let yy=y+(i-first)*row_height;
             rounded_panel(canvas,(x,yy,cw,row_height-4),
                 if i==self.selected { SELECTED } else { HEADER },255);
             canvas.write_text(x+12,yy+if row_height==BIND_ROW_HEIGHT { 6 } else { 12 },
@@ -609,7 +629,9 @@ impl MenuState {
             caption, PALE, cw/8);
         if self.settings_tab==SettingsTab::Controls {
             canvas.write_text(x,y+280,
-                "MOUSE BUTTONS CAN ALSO BE ASSIGNED",PALE,cw/8);
+                &format!("BINDINGS {}-{} / {}  |  UP/DOWN TO SCROLL",
+                    first+1, (first+VISIBLE_BIND_ROWS).min(rows.len()),
+                    rows.len()),PALE,cw/8);
         }
     }
 }
@@ -735,6 +757,26 @@ mod tests {
         menu.key(Key::Escape,&mut prefs);
         assert!(!menu.is_capturing_binding());
         assert!(menu.is_open());
+    }
+
+    #[test]
+    fn controls_list_scrolls_and_clicks_select_visible_weapon_binding() {
+        let mut menu = MenuState::new();
+        menu.toggle();
+        menu.page_select(Page::Settings);
+        menu.select_tab(SettingsTab::Controls);
+        let mut settings = ClientSettings::default();
+        for _ in 0..10 { menu.key(Key::Down, &mut settings); }
+        assert_eq!(menu.selected, 10);
+        assert_eq!(menu.first_control_row(), 10);
+        let layout = Layout::for_size(960, 540);
+        menu.click(((layout.content_x()+10) as f32,
+            (layout.content_y()+8) as f32), (960, 540), &mut settings);
+        assert!(menu.is_capturing_binding());
+        assert_eq!(menu.key(Key::F6, &mut settings),
+            Some(MenuAction::SettingsChanged));
+        assert_eq!(settings.bindings.slots[10], "F6");
+        assert!(settings.bindings.validate());
     }
 
     #[cfg(feature = "gpu")]
