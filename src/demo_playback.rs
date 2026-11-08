@@ -465,8 +465,14 @@ mod tests {
     }
 
     fn fixture_file(version: u8) -> std::path::PathBuf {
+        static NEXT_FIXTURE: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        // Rust tests run in parallel. Sharing PID+version alone can cause
+        // one test to truncate another test's in-progress demo file.
+        let serial = NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "ddnet-rust-demo-timeline-{}-v{}.demo", std::process::id(), version,
+            "ddnet-rust-demo-timeline-{}-{serial}-v{version}.demo",
+            std::process::id(),
         ));
         std::fs::write(&path, test_demo(version)).unwrap();
         path
