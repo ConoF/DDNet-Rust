@@ -369,7 +369,8 @@ impl VisualMap {
                         (start_x, start_y, end_x, end_y), (cell_w, cell_h));
                     drawn += 1;
                 }
-            Ok(drawn)
+            }
+        Ok(drawn)
     }
 }
 
