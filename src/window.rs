@@ -134,7 +134,7 @@ mod tests {
         bytes[(2 * 5 + 1) * 4] = 192;
         let map = GameMap::from_tile_bytes(5, 5, &bytes).unwrap();
         assert_eq!(offline_spawn(&map), Some(Vec2::new(48.0, 80.0)));
-        let empty = GameMap::from_tile_bytes(5, 5, &vec![0; 100]).unwrap();
+        let empty = GameMap::from_tile_bytes(5, 5, &[0; 100]).unwrap();
         assert_eq!(offline_spawn(&empty), None);
     }
 }
