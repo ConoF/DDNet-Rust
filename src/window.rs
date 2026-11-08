@@ -50,6 +50,16 @@ pub fn offline_spawn(map: &GameMap) -> Option<Vec2> {
 /// A/D: run, W/Space: jump, right mouse/E: hook, wheel: zoom,
 /// R: respawn, Escape: close.
 pub fn play_offline(path: &str) -> Result<(), String> {
+    play_offline_impl(path, None)
+}
+
+/// Opens the OS window inside a virtual display, advances scripted inputs and
+/// emits a real PNG screenshot; intended for GitHub Actions/Xvfb smoke tests.
+pub fn smoke_offline(path: &str, output: &str) -> Result<(), String> {
+    play_offline_impl(path, Some(output))
+}
+
+fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("map read: {e}"))?;
     let file = Datafile::parse(&bytes).map_err(|e| format!("datafile: {e:?}"))?;
     let map = GameMap::from_datafile(&file, 16_777_216)
@@ -69,6 +79,7 @@ pub fn play_offline(path: &str) -> Result<(), String> {
     };
     let mut previous = Instant::now();
     let mut accumulator = Duration::ZERO;
+    let mut frames: usize = 0;
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let now = Instant::now();
@@ -96,6 +107,17 @@ pub fn play_offline(path: &str) -> Result<(), String> {
                 (mouse.1 - SCREEN_H as f32 / 2.0) / camera.scale,
             ),
         };
+        // Exercise both movement and hook in CI without synthetic keyboard events.
+        let controls = if smoke_output.is_some() {
+            SimInput {
+                direction: 1,
+                jump: frames == 2,
+                hook: frames >= 10 && frames < 24,
+                aim: Vec2::new(1.0, -0.5),
+            }
+        } else {
+            controls
+        };
         for _ in 0..5 {
             if accumulator < PHYSICS_TICK { break; }
             simulator.step(&map, controls).map_err(|e| format!("tick: {e:?}"))?;
@@ -117,6 +139,18 @@ pub fn play_offline(path: &str) -> Result<(), String> {
             .map_err(|e| format!("draw tee: {e:?}"))?;
         window.update_with_buffer(&pixels.pixels, SCREEN_W, SCREEN_H)
             .map_err(|e| format!("present: {e}"))?;
+        frames += 1;
+        if let Some(output) = smoke_output {
+            if frames >= 30 {
+                let png = pixels.png_bytes().map_err(|e| format!("png: {e:?}"))?;
+                std::fs::write(output, png).map_err(|e| format!("write {output}: {e}"))?;
+                println!("Window/X11 render smoke test: 30 frames -> {output}");
+                return Ok(());
+            }
+        }
+    }
+    if smoke_output.is_some() {
+        return Err("smoke test window closed before 30 frames".into());
     }
     Ok(())
 }

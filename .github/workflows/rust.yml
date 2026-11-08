@@ -66,6 +66,14 @@ jobs:
             target/ctf1-debug.png
             target/tutorial-debug.png
           if-no-files-found: error
+      - name: Launch real X11 window and simulate movement under Xvfb
+        run: |
+          if ! command -v xvfb-run >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y xvfb xauth
+          fi
+          xvfb-run -a cargo run --locked --features window -- --play-offline-smoke upstream/ddnet/data/maps/ctf1.map target/offline-window-smoke.png
+          python3 -c "from pathlib import Path; p=Path('target/offline-window-smoke.png'); assert p.stat().st_size > 100; assert p.read_bytes()[:8] == bytes((137,80,78,71,13,10,26,10))"
       - name: Decode official extra DDNet physics layers
         run: |
           cargo run --locked -- --inspect-layers upstream/ddnet/data/maps/ctf1.map
