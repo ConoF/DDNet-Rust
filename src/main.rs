@@ -47,6 +47,8 @@ fn main() {
         [arg] if arg == "--settings" => print_client_settings(),
         [arg, name] if arg == "--set-name" => set_client_name(name),
         [arg] if arg == "--browse-servers" => browse_servers(),
+        [arg, fixture, screenshot] if arg == "--browse-servers-smoke" =>
+            browse_servers_smoke(fixture, screenshot),
         [arg, output] if arg == "--audio-smoke" => audio_smoke(output),
         [arg, file, output] if arg == "--audio-wv-preview" => audio_wv_preview(file, output),
         _ => {
@@ -76,6 +78,7 @@ fn print_help() {
     println!("  --servers [FILTER]  Fetch official master 0.6 servers (name/map/mode)");
     println!("  --servers-file JSON [FILTER]  Offline master JSON fixture");
     println!("  --browse-servers    Native window browser (feature: window)");
+    println!("  --browse-servers-smoke MASTER.json OUT.png  X11 browser screenshot");
     println!("  --set-name NICK     Save nickname for 0.6 login (max 15 bytes)");
     println!("  --settings          Show saved nickname/filter/last server");
     println!("  --version           Print project and upstream versions");
@@ -604,5 +607,18 @@ fn browse_servers() {
 #[cfg(not(feature = "window"))]
 fn browse_servers() {
     eprintln!("The windowed browser requires cargo run --features window -- --browse-servers");
+    std::process::exit(2);
+}
+
+#[cfg(feature = "window")]
+fn browse_servers_smoke(fixture: &str, screenshot: &str) {
+    if let Err(error) = ddnet_rust::server_menu::smoke_server_browser(fixture, screenshot) {
+        eprintln!("Browser smoke failed: {error}");
+        std::process::exit(1);
+    }
+}
+#[cfg(not(feature = "window"))]
+fn browse_servers_smoke(_fixture: &str, _screenshot: &str) {
+    eprintln!("Browser screenshot requires feature: window");
     std::process::exit(2);
 }

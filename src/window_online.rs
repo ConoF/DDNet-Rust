@@ -16,6 +16,7 @@ use crate::datafile::Datafile;
 use crate::window_assets::{WindowAssets, candidate_roots};
 use crate::game_audio::{attack_sound_for_weapon, try_start, GameAudio};
 use crate::sound_assets::GameSound;
+use crate::server_browser::ClientSettings;
 use crate::netobjects::CHARACTER_TYPE;
 use crate::interpolation::interpolate_snapshots;
 use crate::input::{InputFrame, PlayerInput};
@@ -104,6 +105,9 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     let mut assets = WindowAssets::default();
     let mut audio = try_start(&candidate_roots(None));
     let mut session = GameSession06::new(String::new(), 64 * 1024 * 1024, 16_777_216);
+    if let Ok(settings) = ClientSettings::load(&ClientSettings::default_path()) {
+        session.start_info.name = settings.nickname;
+    }
     let mut hello = session.connect().map_err(|e| format!("handshake: {e:?}"))?;
     socket.send(&hello).map_err(|e| format!("CONNECT: {e}"))?;
 
