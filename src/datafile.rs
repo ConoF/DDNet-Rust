@@ -426,7 +426,7 @@ mod tests {
 
         let mut duplicate_raw_offset = sample(3);
         duplicate_raw_offset[24..28].copy_from_slice(&2i32.to_le_bytes());
-        duplicate_raw_offset.splice(56..56, 1i32.to_le_bytes());
+        duplicate_raw_offset.splice(56..56, 0i32.to_le_bytes());
         let size = i32::try_from(duplicate_raw_offset.len() - 16).unwrap();
         duplicate_raw_offset[8..12].copy_from_slice(&size.to_le_bytes());
         assert_eq!(
