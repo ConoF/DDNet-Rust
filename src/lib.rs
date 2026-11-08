@@ -6,6 +6,7 @@
 
 pub mod datafile;
 pub mod demo;
+pub mod demo_playback;
 pub mod network;
 pub mod reliable;
 pub mod transport;

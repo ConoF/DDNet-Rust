@@ -1,5 +1,6 @@
 use ddnet_rust::datafile::Datafile;
 use ddnet_rust::demo::DemoInfo;
+use ddnet_rust::demo_playback::DemoIndex;
 use ddnet_rust::map_visual::VisualMap;
 use std::path::Path;
 use ddnet_rust::map::GameMap;
@@ -31,6 +32,8 @@ fn main() {
         [arg] if arg == "--huffman-vectors" => huffman_vectors(),
         [arg, path] if arg == "--inspect-map" => inspect_map(path),
         [arg, path] if arg == "--inspect-demo" => inspect_demo(path),
+        [arg, path] if arg == "--demo-timeline" => inspect_demo_timeline(path),
+        [arg, path, tick, image] if arg == "--demo-frame" => export_demo_frame(path, tick, image),
         [arg, path] if arg == "--inspect-game-map" => inspect_game_map(path),
         [arg, path, output] if arg == "--render-debug-map" => render_debug_map(path, output, false),
         [arg, path, output] if arg == "--render-debug-png" => render_debug_map(path, output, true),
@@ -71,6 +74,8 @@ fn print_help() {
     println!("  --self-test         Run isolated physics/protocol smoke tests");
     println!("  --codec-vectors     Emit integer vectors for C++ differential testing");
     println!("  --huffman-vectors   Compare compressed output against upstream C++");
+    println!("  --demo-timeline FILE.demo  Inspect ticks and keyframes");
+    println!("  --demo-frame FILE.demo TICK OUT.png  Render snapshot preview");
     println!("  --inspect-map PATH  Parse and validate a v3/v4 DDNet map's metadata");
     println!("  --inspect-demo FILE.demo  Inspect DDNet demo v3-v6 metadata");
     println!("  --render-debug-map MAP OUT.ppm  Export collision map to PPM");
@@ -729,4 +734,101 @@ fn inspect_demo(path: &str) {
         println!("Map SHA256: {hex}");
     }
     println!("Map offset: {}; first chunk offset: {}", info.map_offset, info.first_chunk_offset);
+}
+
+fn inspect_demo_timeline(path: &str) {
+    let index = DemoIndex::scan_file(Path::new(path)).unwrap_or_else(|error| {
+        eprintln!("Cannot scan DDNet demo {path}: {error:?}");
+        std::process::exit(1)
+    });
+    let keyframes: Vec<_> = index.frames.iter().filter(|frame| frame.keyframe)
+        .map(|frame| frame.tick).collect();
+    let snapshots: u64 = index.frames.iter().map(|frame| u64::from(frame.snapshots)).sum();
+    let deltas: u64 = index.frames.iter().map(|frame| u64::from(frame.deltas)).sum();
+    let messages: u64 = index.frames.iter().map(|frame| u64::from(frame.messages)).sum();
+    println!("Demo: {path}, map: {}, version: {}", index.info.map_name, index.info.version);
+    println!("Ticks: {} ({}..{}), keyframes: {}", index.frames.len(),
+        index.frames.first().map_or(0, |frame| frame.tick),
+        index.frames.last().map_or(0, |frame| frame.tick),
+        keyframes.len());
+    println!("Full snapshots: {snapshots}; deltas: {deltas}; messages: {messages}");
+    println!("Keyframe ticks (up to 30): {:?}", keyframes.iter().take(30).collect::<Vec<_>>());
+}
+
+fn export_demo_frame(path: &str, requested: &str, output: &str) {
+    use ddnet_rust::netobjects::CharacterCoreNet;
+    use ddnet_rust::map_visual::VisualMap;
+    use ddnet_rust::sprite_render::render_animated_snapshot;
+    use ddnet_rust::texture::Texture;
+
+    let tick: i32 = requested.parse().unwrap_or_else(|_| {
+        eprintln!("Invalid demo tick {requested}");
+        std::process::exit(2)
+    });
+    let demo_path = Path::new(path);
+    let index = DemoIndex::scan_file(demo_path).unwrap_or_else(|error| {
+        eprintln!("Cannot scan demo {path}: {error:?}");
+        std::process::exit(1)
+    });
+    let (actual_tick, snapshot) = index.snapshot_at_tick(demo_path, tick).unwrap_or_else(|error| {
+        eprintln!("Cannot reconstruct tick {tick} in demo: {error:?}");
+        std::process::exit(1)
+    });
+    let mut frame = Framebuffer::new(960, 540).expect("fixed framebuffer size");
+    let center = snapshot.items.iter().find_map(CharacterCoreNet::from_object)
+        .map(|c| Vec2::new(c.x as f32, c.y as f32))
+        .unwrap_or_else(|| Vec2::new(0.0, 0.0));
+    let camera = Camera { center, scale: 1.5 };
+    let embedded = index.embedded_map(demo_path).unwrap_or_else(|error| {
+        eprintln!("Cannot extract embedded map: {error:?}");
+        std::process::exit(1)
+    });
+    let resource_roots: Vec<std::path::PathBuf> = std::env::var_os("DDNET_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .into_iter()
+        .chain([std::path::PathBuf::from("data"),
+                std::path::PathBuf::from("upstream/ddnet/data")])
+        .collect();
+    let mut background_rendered = false;
+    if let Some(map_data) = &embedded {
+        if let Ok(datafile) = Datafile::parse(map_data) {
+            for root in &resource_roots {
+                if let Ok(visual) = VisualMap::from_datafile(&datafile, root) {
+                    if !visual.layers.is_empty() && visual.render(&mut frame, camera).is_ok() {
+                        background_rendered = true;
+                        break;
+                    }
+                }
+            }
+            if !background_rendered {
+                if let Ok(map) = GameMap::from_datafile(&datafile, 16_777_216) {
+                    background_rendered = frame.render_map(&map, camera).is_ok();
+                }
+            }
+        }
+    }
+    if !background_rendered {
+        frame.clear(ddnet_rust::graphics::BACKGROUND);
+    }
+    let mut skin = None;
+    let mut game = None;
+    for root in &resource_roots {
+        if skin.is_none() {
+            skin = std::fs::read(root.join("skins/default.png")).ok()
+                .and_then(|bytes| Texture::from_png(&bytes).ok());
+        }
+        if game.is_none() {
+            game = std::fs::read(root.join("game.png")).ok()
+                .and_then(|bytes| Texture::from_png(&bytes).ok());
+        }
+    }
+    let tees = render_animated_snapshot(&mut frame, &snapshot, camera,
+        skin.as_ref(), game.as_ref(), actual_tick as u64)
+        .expect("fixed valid render camera");
+    std::fs::write(output, frame.png_bytes().expect("bounded PNG")).unwrap_or_else(|error| {
+        eprintln!("Cannot write PNG {output}: {error}");
+        std::process::exit(1)
+    });
+    println!("Demo preview: tick {actual_tick}, {} snapshot items, {tees} tee(s) -> {output}",
+        snapshot.items.len());
 }

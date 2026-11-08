@@ -377,3 +377,23 @@ both an offline screenshot and the browser screenshot. This is a
 glibc-linked native Linux build (not an AppImage/static build);
 CachyOS uses X11 or XWayland and system ALSA libraries. Live DDNet
 public-server compatibility is not guaranteed by these smoke tests.
+
+## Stage 7 — demo frame decoding and first screenshot playback primitive
+
+The original \`TWDEMO\` v3-v6 chunk stream now has a bounded,
+seek-based decoder in \`src/demo_playback.rs\`. It reads legacy (v3/v4)
+and compressed (v5/v6) tick markers, indexes keyframes and all chunk
+types, validates payload boundaries and frame ordering without loading
+large .demo bodies, and runs each snapshot chunk through the original
+static Huffman and DDNet variable integer decompressors. Full snapshots
+are reconstructed from \`CSnapshot\` data headers and offsets; delta
+snapshots are applied using the already tested vanilla 0.6 decoder.
+A random-access frame request begins at the nearest earlier keyframe.
+
+CLI: \`--demo-timeline FILE.demo\` reports frames, keyframes and snapshot
+statistics; \`--demo-frame FILE.demo TICK OUT.png\` reconstructs a frame
+and draws characters, using an embedded map and original textures
+where available. Synthetic test recordings cover v3/v4/v5/v6,
+Huffman-encoded snapshots, delta updates, malformed ticks, bounds and
+truncation. Demo playback in a native interactive window, audio,
+full UUID extended netobjects and editing remain unimplemented.
