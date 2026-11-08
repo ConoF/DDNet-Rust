@@ -24,6 +24,7 @@ use crate::game_audio::{attack_sound_for_weapon, try_start, GameAudio};
 use crate::sound_assets::GameSound;
 use crate::server_browser::ClientSettings;
 use crate::ingame_menu::{MenuAction, MenuState, ServerStatus};
+use crate::keybinds::BindSnapshot;
 use crate::netobjects::CHARACTER_TYPE;
 use crate::interpolation::{
     camera_follow_fraction, interpolate_snapshots, online_interpolation_fraction,
@@ -33,6 +34,7 @@ use crate::frame_stats::FrameTiming;
 use crate::input::{
     correct_next_input_tick, FireCounter, InputFrame, PlayerInput,
     PLAYERFLAG_CHATTING, PLAYERFLAG_PLAYING, PLAYERFLAG_IN_MENU,
+    PLAYERFLAG_SCOREBOARD,
 };
 use crate::gameplay::WeaponControls;
 use crate::online_ui::{OnlineHud, TextInputCollector};
@@ -56,7 +58,7 @@ fn preferred_character(snapshot: &SnapshotState) -> Option<Vec2> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InputMode { Play, Chat, Menu }
+enum InputMode { Play, Chat, Menu, Scoreboard }
 
 fn movement_input(
     direction: i32, jump: bool, hook: bool, fire: i32,
@@ -80,7 +82,9 @@ fn movement_input(
         target_y: target.y.round().clamp(-10000.0, 10000.0) as i32,
         jump: i32::from(jump),
         fire,
-        player_flags: PLAYERFLAG_PLAYING,
+        player_flags: if mode == InputMode::Scoreboard {
+            PLAYERFLAG_PLAYING | PLAYERFLAG_SCOREBOARD
+        } else { PLAYERFLAG_PLAYING },
         hook: i32::from(hook),
         wanted_weapon: weapons.wanted_weapon,
         next_weapon: weapons.next_weapon,
@@ -197,6 +201,9 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     let mut weapons = WeaponControls::default();
     let mut menu = MenuState::new();
     let mut left_mouse_was_down = false;
+    let mut right_mouse_was_down = false;
+    let mut middle_mouse_was_down = false;
+    let mut previous_bindings = BindSnapshot::default();
     let mut exit_requested = false;
 
     while window.is_open() && !exit_requested {
@@ -246,8 +253,6 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             } else {
                 match key {
                     Key::Escape => menu.toggle(),
-                    Key::T => hud.open_chat(false),
-                    Key::Y => hud.open_chat(true),
                     Key::Key1 => { weapons.select(1); }
                     Key::Key2 => { weapons.select(2); }
                     Key::Key3 => { weapons.select(3); }
@@ -268,7 +273,22 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         // Mouse clicks use the same tested hitboxes as the menu renderer.
         // A held fire button must not activate multiple menu entries.
         let left_mouse_down = window.get_mouse_down(MouseButton::Left);
-        if menu.is_open() && left_mouse_down && !left_mouse_was_down {
+        let right_mouse_down = window.get_mouse_down(MouseButton::Right);
+        let middle_mouse_down = window.get_mouse_down(MouseButton::Middle);
+        if menu.is_capturing_binding() {
+            let mouse_binding = if right_mouse_down && !right_mouse_was_down {
+                Some("MouseRight")
+            } else if middle_mouse_down && !middle_mouse_was_down {
+                Some("MouseMiddle")
+            } else if left_mouse_down && !left_mouse_was_down {
+                Some("MouseLeft")
+            } else { None };
+            if let Some(button) = mouse_binding {
+                if let Some(action) = menu.bind_mouse(button, &mut connection) {
+                    menu_actions.push(action);
+                }
+            }
+        } else if menu.is_open() && left_mouse_down && !left_mouse_was_down {
             if let Some(pos) = window.get_mouse_pos(MouseMode::Discard) {
                 if let Some(action) = menu.click(pos, (WIDTH, HEIGHT), &mut connection) {
                     menu_actions.push(action);
@@ -276,6 +296,8 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             }
         }
         left_mouse_was_down = left_mouse_down;
+        right_mouse_was_down = right_mouse_down;
+        middle_mouse_was_down = middle_mouse_down;
 
         for action in menu_actions {
             match action {
@@ -337,6 +359,16 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             }
         }
         if exit_requested { break; }
+
+        let sampled_bindings = BindSnapshot::capture(&window, &connection.bindings);
+        if !menu.is_open() && !hud.is_typing() {
+            if sampled_bindings.pressed_since(previous_bindings, 7) {
+                hud.open_chat(false);
+            } else if sampled_bindings.pressed_since(previous_bindings, 8) {
+                hud.open_chat(true);
+            }
+        }
+        previous_bindings = sampled_bindings;
 
         // Bound the datagrams processed in a single render frame.
         for _ in 0..256 {
@@ -511,12 +543,11 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         let typing = hud.is_typing();
         let blocked = typing || menu.is_open();
         let control = movement_input(
-            i32::from(window.is_key_down(Key::D) || window.is_key_down(Key::Right)) -
-            i32::from(window.is_key_down(Key::A) || window.is_key_down(Key::Left)),
-            window.is_key_down(Key::Space) || window.is_key_down(Key::W)
-                || window.is_key_down(Key::Up),
-            window.get_mouse_down(MouseButton::Right) || window.is_key_down(Key::E),
-            fire_counter.sample(!blocked && window.get_mouse_down(MouseButton::Left)),
+            i32::from(sampled_bindings.held(1)) -
+            i32::from(sampled_bindings.held(0)),
+            sampled_bindings.held(2) || sampled_bindings.held(3),
+            sampled_bindings.held(5) || sampled_bindings.held(6),
+            fire_counter.sample(!blocked && sampled_bindings.held(4)),
             Vec2::new(
                 (mouse.0 - WIDTH as f32 / 2.0) / camera.scale,
                 (mouse.1 - HEIGHT as f32 / 2.0) / camera.scale,
@@ -524,6 +555,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             weapons,
             if menu.is_open() { InputMode::Menu }
                 else if typing { InputMode::Chat }
+                else if sampled_bindings.held(9) { InputMode::Scoreboard }
                 else { InputMode::Play },
         );
         for _ in 0..5 {
@@ -633,7 +665,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                 snapshot.find(CHARACTER_TYPE, id)
             )
         ).and_then(|obj| obj.words.get(19).copied());
-        let scoreboard = if window.is_key_down(Key::Tab)
+        let scoreboard = if sampled_bindings.held(9)
             && !hud.is_typing() && !menu.is_open() {
             current_snapshot.and_then(|tick| session.snapshot_state(tick))
         } else {
@@ -773,5 +805,8 @@ mod tests {
         assert_eq!(paused.direction, 0);
         assert_eq!(paused.fire, 4);
         assert_eq!(paused.hook, 0);
+        let tab = movement_input(0, false, false, 0,
+            Vec2::new(1.0, 0.0), weapons, InputMode::Scoreboard);
+        assert_eq!(tab.player_flags, PLAYERFLAG_PLAYING | PLAYERFLAG_SCOREBOARD);
     }
 }
