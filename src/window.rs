@@ -26,7 +26,7 @@ use crate::simulator::{SimInput, TeeSimulator};
 use crate::snapshot_delta::{SnapshotObject, SnapshotState};
 use crate::window_assets::{WindowAssets, candidate_roots};
 use crate::server_browser::ClientSettings;
-use crate::ingame_menu::{MenuAction, MenuState, ServerStatus};
+use crate::ingame_menu::{MenuAction, MenuState, ServerStatus, Page, SettingsTab};
 use crate::keybinds::BindSnapshot;
 use crate::online_ui::TextInputCollector;
 use crate::game_audio::{attack_sound_for_weapon, try_start};
@@ -69,27 +69,35 @@ pub fn offline_spawn(map: &GameMap) -> Option<Vec2> {
 /// A/D: run, W/Space: jump, right mouse/E: hook, wheel: zoom,
 /// R: respawn, Escape: close.
 pub fn play_offline(path: &str) -> Result<(), String> {
-    play_offline_impl(path, None, false, false)
+    play_offline_impl(path, None, false, None)
 }
 
 /// Opens the OS window inside a virtual display, advances scripted inputs and
 /// emits a real PNG screenshot; intended for GitHub Actions/Xvfb smoke tests.
 pub fn smoke_offline(path: &str, output: &str) -> Result<(), String> {
-    play_offline_impl(path, Some(output), false, false)
+    play_offline_impl(path, Some(output), false, None)
 }
 
 #[cfg(feature = "gpu")]
 pub fn smoke_gpu_offline(path: &str) -> Result<(), String> {
-    play_offline_impl(path, None, true, false)
+    play_offline_impl(path, None, true, None)
 }
 
 /// Deterministic screenshot of the actual Esc menu over the offline game.
 pub fn smoke_offline_menu(path: &str, output: &str) -> Result<(), String> {
-    play_offline_impl(path, Some(output), false, true)
+    play_offline_impl(path, Some(output), false, Some((Page::Game, SettingsTab::General)))
+}
+
+/// Test the actual Controls page using original DDNet glyphs and default
+/// bindings in a deterministic X11 screenshot.
+pub fn smoke_offline_controls(path: &str, output: &str) -> Result<(), String> {
+    play_offline_impl(path, Some(output), false,
+        Some((Page::Settings, SettingsTab::Controls)))
 }
 
 fn play_offline_impl(
-    path: &str, smoke_output: Option<&str>, gpu_smoke: bool, menu_smoke: bool,
+    path: &str, smoke_output: Option<&str>, gpu_smoke: bool,
+    menu_page: Option<(Page, SettingsTab)>,
 ) -> Result<(), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("map read: {e}"))?;
     let file = Datafile::parse(&bytes).map_err(|e| format!("datafile: {e:?}"))?;
@@ -161,7 +169,11 @@ fn play_offline_impl(
     let mut accumulator = Duration::ZERO;
     let mut frames: usize = 0;
     let mut menu = MenuState::new();
-    if menu_smoke { menu.toggle(); }
+    if let Some((page, tab)) = menu_page {
+        menu.toggle();
+        menu.page = page;
+        menu.settings_tab = tab;
+    }
     let mut left_was_down = false;
     let mut right_was_down = false;
     let mut middle_was_down = false;

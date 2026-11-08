@@ -678,3 +678,20 @@ FontAwesome icon font, international fallback families, outline/
 shadow sampling, DPI scaling and complete localization are not
 implemented. If the TTF file is absent or unsupported, a small
 ASCII bitmap renderer remains available rather than failing startup.
+
+
+### Remappable in-game input (incremental parity)
+
+The Controls settings tab now has ten working, persistent bindings:
+Move Left, Move Right, Jump, Jump Alt, Fire, Hook, Hook Alt, Chat,
+Team Chat and Scoreboard. Click a row or press Enter, then press
+a new key or mouse button. Escape cancels; conflicts swap binding
+slots rather than silently unbinding another action. The live 0.6
+input sampler and offline sandbox both read these values each frame.
+The original Teeworlds/DDNet scoreboard flag (bit 8) is sent when
+the scoreboard action is held. The same validated bindings persist
+in `settings.json` and survive restart. The `--play-offline-controls-smoke`
+fixture captures the real Controls tab for visual comparison.
+
+Full DDNet binds parity (modifier combinations, custom console commands,
+unlimited bind slots and gamepad) is **not** implemented yet.
