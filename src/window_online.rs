@@ -27,7 +27,7 @@ use crate::input::{
 };
 use crate::gameplay::WeaponControls;
 use crate::online_ui::{OnlineHud, TextInputCollector};
-use crate::netobjects::CharacterCoreNet;
+use crate::netobjects::{player_name, CharacterCoreNet};
 use crate::physics::Vec2;
 use crate::prediction::{apply_visual_prediction, local_character_id, LocalPredictor};
 use crate::session::{GameAction, GameSession06, Stage};
@@ -259,8 +259,18 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                         input_time_left_ms = Some(time_left_ms);
                     }
                     GameAction::ChatReceived { team, client_id, text } => {
-                        let label = if team != 0 { "team" } else { "all" };
-                        hud.chat_line(&format!("[{label} #{client_id}] "), &text);
+                        let channel = if team != 0 { "TEAM" } else { "ALL" };
+                        let name = u16::try_from(client_id).ok()
+                            .and_then(|id| current_snapshot
+                                .and_then(|tick| session.snapshot_state(tick))
+                                .and_then(|state| player_name(state, id)))
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or_else(|| if client_id < 0 {
+                                String::from("SERVER")
+                            } else {
+                                format!("#{client_id}")
+                            });
+                        hud.chat_line(&format!("[{channel} {name}] "), &text);
                     }
                     GameAction::ServerBroadcast(text) => {
                         hud.announcement(&text);
@@ -437,8 +447,13 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                 snapshot.find(CHARACTER_TYPE, id)
             )
         ).and_then(|obj| obj.words.get(19).copied());
+        let scoreboard = if window.is_key_down(Key::Tab) && !hud.is_typing() {
+            current_snapshot.and_then(|tick| session.snapshot_state(tick))
+        } else {
+            None
+        };
         hud.render(&mut pixels, &format!("{:?}", session.stage),
-            local_weapon, current_snapshot);
+            local_weapon, current_snapshot, scoreboard);
         if last_title.elapsed() > Duration::from_secs(1) {
             window.set_title(&format!(
                 "DDNet-Rust 0.6 prototype | {peer} | {:?} | tick {:?} | ACK {} | recovery {} | input {:?}ms",
