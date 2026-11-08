@@ -8,6 +8,7 @@ pub mod datafile;
 pub mod network;
 pub mod reliable;
 pub mod transport;
+pub mod game_protocol;
 pub mod layers;
 pub mod map;
 pub mod physics;
