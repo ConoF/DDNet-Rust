@@ -59,6 +59,8 @@ pub mod window_online;
 pub mod online_ui;
 #[cfg(feature = "window")]
 pub mod ingame_menu;
+#[cfg(feature = "window")]
+pub mod ui_font;
 pub mod physics;
 pub mod hook;
 pub mod simulator;
