@@ -18,6 +18,7 @@ pub mod layers;
 pub mod map;
 pub mod physics;
 pub mod hook;
+pub mod simulator;
 pub mod protocol;
 
 pub const UPSTREAM_VERSION: &str = "20.2.1";
