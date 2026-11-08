@@ -659,7 +659,6 @@ mod tests {
         assert!(!s.sound_enabled);
     }
 
-    #[cfg(feature = "gpu")]
     #[test]
     fn controls_tab_records_keyboard_and_mouse_rebinds() {
         let mut menu=MenuState::new(); menu.toggle(); menu.page_select(Page::Settings);
@@ -682,6 +681,7 @@ mod tests {
         assert!(menu.is_open());
     }
 
+    #[cfg(feature = "gpu")]
     #[test]
     fn ui_paints_on_cpu_and_gpu_without_screen_upload() {
         let mut m=MenuState::new();m.toggle();
