@@ -426,9 +426,15 @@ impl GpuRenderer {
             Ok(output) => output,
             Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
                 self.surface.configure(&self.device, &self.config);
-                self.surface.get_current_texture()
-                    .map_err(|e| format!("GPU surface recovery: {e}"))?
+                match self.surface.get_current_texture() {
+                    Ok(output) => output,
+                    // Temporary compositor stalls must not disconnect the game.
+                    Err(wgpu::SurfaceError::Timeout) => return Ok(()),
+                    Err(error) => return Err(format!("GPU surface recovery: {error}")),
+                }
             }
+            // A one-frame timeout is recoverable; the next frame retries.
+            Err(wgpu::SurfaceError::Timeout) => return Ok(()),
             Err(error) => return Err(format!("GPU presentation: {error}")),
         };
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());

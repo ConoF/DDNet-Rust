@@ -48,6 +48,15 @@ use crate::transport::State;
 const WIDTH: usize = 960;
 const HEIGHT: usize = 540;
 const TICK: Duration = Duration::from_millis(20);
+// Never allow a burst of UDP packets to monopolize a presentation frame.
+// Packets remain in the kernel receive queue for the next frame.
+const MAX_PACKETS_PER_FRAME: usize = 64;
+const MAX_RECEIVE_TIME: Duration = Duration::from_millis(3);
+
+fn receive_budget_exhausted(processed: usize, elapsed: Duration) -> bool {
+    processed >= MAX_PACKETS_PER_FRAME
+        || (processed >= 8 && elapsed >= MAX_RECEIVE_TIME)
+}
 
 fn preferred_character(snapshot: &SnapshotState) -> Option<Vec2> {
     let local = local_character_id(snapshot)
@@ -384,8 +393,13 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         }
         previous_bindings = sampled_bindings;
 
-        // Bound the datagrams processed in a single render frame.
-        for _ in 0..256 {
+        // Bound both packet count and elapsed CPU work. A large receive
+        // backlog must not freeze the camera, input or render loop.
+        let receive_started = Instant::now();
+        for processed in 0..MAX_PACKETS_PER_FRAME {
+            if receive_budget_exhausted(processed, receive_started.elapsed()) {
+                break;
+            }
             let count = match socket.recv(&mut packet) {
                 Ok(count) => count,
                 Err(e) if e.kind() == ErrorKind::WouldBlock => break,
@@ -490,7 +504,10 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             }
         }
         if failed.is_none() && last_receive.elapsed() > receive_timeout {
-            failed = Some("No valid server packets for 20 seconds".into());
+            failed = Some(format!(
+                "No valid server packets for {} seconds",
+                connection.connect_timeout_secs,
+            ));
         }
         if let Some(reason) = failed {
             if reconnect_attempts >= reconnect_limit {
@@ -758,6 +775,15 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::snapshot_delta::SnapshotObject;
+
+    #[test]
+    fn udp_receive_work_is_bounded_without_starving_small_bursts() {
+        assert!(!receive_budget_exhausted(0, Duration::from_secs(1)));
+        assert!(!receive_budget_exhausted(7, Duration::from_secs(1)));
+        assert!(!receive_budget_exhausted(8, MAX_RECEIVE_TIME - Duration::from_nanos(1)));
+        assert!(receive_budget_exhausted(8, MAX_RECEIVE_TIME));
+        assert!(receive_budget_exhausted(MAX_PACKETS_PER_FRAME, Duration::ZERO));
+    }
 
     #[test]
     fn prefer_local_player_when_multiple_character_objects_exist() {
