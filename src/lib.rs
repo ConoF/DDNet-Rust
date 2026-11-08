@@ -17,6 +17,7 @@ pub mod netobjects;
 pub mod huffman;
 pub mod layers;
 pub mod map;
+pub mod graphics;
 pub mod physics;
 pub mod hook;
 pub mod simulator;
