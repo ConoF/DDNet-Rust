@@ -23,7 +23,8 @@ The Rust executable does not use any C++ code or FFI.
 | Gravity, directional movement, ground/air jump | Partial | 50 Hz tick-state simulation tests |
 | Velocity ramp and projectile position | Math functions only | Unit tests |
 | Basic game tiles, ground tests, MovePoint / MoveBox | Partial | Synthetic collision, wall, ground, corner and bounded-motion simulations |
-| Front/switch/tune/teleport layers, full collision | Not implemented | None |
+| Front/tele/speedup/switch/tune layer extraction | Partial | Type/offset tests and official map CI fixtures |
+| Front/switch/tune/teleport gameplay logic and full collision | Not implemented | None |
 | Hook, player interactions, full prediction | Not implemented | None |
 | Handshake, snapshot decoding, live server communication | Not implemented | None |
 | Map download, graphics, input devices, UI, audio | Not implemented | None |

@@ -1,5 +1,6 @@
 use ddnet_rust::datafile::Datafile;
 use ddnet_rust::map::GameMap;
+use ddnet_rust::layers::PhysicsLayers;
 use ddnet_rust::physics::{Character, Input, JumpEvent, Tuning};
 use ddnet_rust::protocol::{decode_int, write_int};
 
@@ -17,6 +18,7 @@ fn main() {
         [arg] if arg == "--codec-vectors" => codec_vectors(),
         [arg, path] if arg == "--inspect-map" => inspect_map(path),
         [arg, path] if arg == "--inspect-game-map" => inspect_game_map(path),
+        [arg, path] if arg == "--inspect-layers" => inspect_layers(path),
         _ => {
             eprintln!("Unknown arguments. Run ddnet-rust --help.");
             std::process::exit(2);
@@ -100,5 +102,26 @@ fn inspect_game_map(path: &str) {
     println!(
         "{path}: collision layer {}x{}, {} solid/nohook tiles",
         game.width, game.height, solids
+    );
+}
+
+fn inspect_layers(path: &str) {
+    let bytes = std::fs::read(path).unwrap_or_else(|error| {
+        eprintln!("Unable to open {path}: {error}");
+        std::process::exit(1);
+    });
+    let file = Datafile::parse(&bytes).unwrap_or_else(|error| {
+        eprintln!("Invalid map datafile {path}: {error:?}");
+        std::process::exit(1);
+    });
+    let layers = PhysicsLayers::from_datafile(&file, 16_777_216).unwrap_or_else(|error| {
+        eprintln!("Invalid physics layers {path}: {error:?}");
+        std::process::exit(1);
+    });
+    println!(
+        "{path}: {}x{} front={} tele={} speedup={} switch={} tune={}",
+        layers.game.width, layers.game.height,
+        layers.front.is_some(), layers.tele.is_some(),
+        layers.speedup.is_some(), layers.switches.is_some(), layers.tune.is_some(),
     );
 }

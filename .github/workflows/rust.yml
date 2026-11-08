@@ -39,6 +39,12 @@ jobs:
           cargo run -- --inspect-game-map upstream/ddnet/data/maps/ctf1.map
           cargo run -- --inspect-game-map upstream/ddnet/data/maps/coverage.map
           cargo run -- --inspect-game-map upstream/ddnet/data/maps/Tutorial.map
+      - name: Decode official extra DDNet physics layers
+        run: |
+          cargo run --locked -- --inspect-layers upstream/ddnet/data/maps/ctf1.map
+          cargo run --locked -- --inspect-layers upstream/ddnet/data/maps/coverage.map
+          cargo run --locked -- --inspect-layers upstream/ddnet/data/maps/Tutorial.map
+          cargo run --locked -- --inspect-layers upstream/ddnet/data/maps/LearnToPlay.map
 
   windows:
     runs-on: windows-latest
