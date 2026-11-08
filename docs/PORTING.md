@@ -19,14 +19,18 @@ The Rust executable does not use any C++ code or FFI.
 | Vanilla game layer tiles and basic solid/ground queries | Partial | synthetic simulations and real-map CI smoke tests |
 | 0.6 packet and chunk header packing/validation | Partial | Fixed vectors, roundtrips, rejected malformed inputs |
 | Offline 10-bit vital ACK/sequence window | Partial | Loss, duplication, reordering and wraparound simulations |
-| UDP socket, actual resend timers, tokens, Huffman, 0.7 networking | Not implemented | None |
+| UDP 0.6 transport CONNECT/ACCEPT, security token and bounded resend model | Partial | Real localhost UDP handshake, malformed packet tests |
+| DDNet 0.6 system message packer and CRC-checked map chunks | Partial | Golden vectors, chunk replay, CRC32 and invalid maps |
+| Native DDNet static Huffman packet codec | Implemented as isolated module | Randomized roundtrips and byte-for-byte C++ differential CI |
+| 0.7 networking, complete timed resend, snapshots and gameplay session | Not implemented | None |
 | Gravity, directional movement, ground/air jump | Partial | 50 Hz tick-state simulation tests |
 | Velocity ramp and projectile position | Math functions only | Unit tests |
 | Basic game tiles, ground tests, MovePoint / MoveBox | Partial | Synthetic collision, wall, ground, corner and bounded-motion simulations |
 | Front/tele/speedup/switch/tune layer extraction | Partial | Type/offset tests and official map CI fixtures |
 | Front/switch/tune/teleport gameplay logic and full collision | Not implemented | None |
 | Hook, player interactions, full prediction | Not implemented | None |
-| Handshake, snapshot decoding, live server communication | Not implemented | None |
+| UDP 0.6 handshake probe (not game login) | Partial | Loopback UDP mock server; public server compatibility unverified |
+| Snapshot decoding and playable server session | Not implemented | None |
 | Map download, graphics, input devices, UI, audio | Not implemented | None |
 | Server browser, gameplay, editor and demos | Not implemented | None |
 
@@ -59,3 +63,5 @@ cargo run -- --inspect-map upstream/ddnet/data/maps/ctf1.map
 The Linux CI compiles a small C++ test from the **original DDNet header** and
 compares its integer encoding output byte-for-byte with the Rust implementation.
 This is a limited differential test, not a full client simulation.
+
+> Important: a transport-level handshake is only the first part of DDNet's login. No rendering, player session or full compatibility has been implemented.

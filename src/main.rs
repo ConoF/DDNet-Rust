@@ -4,6 +4,7 @@ use ddnet_rust::layers::PhysicsLayers;
 use ddnet_rust::physics::{Character, Input, JumpEvent, Tuning};
 use ddnet_rust::protocol::{decode_int, write_int};
 use ddnet_rust::transport::probe_server;
+use ddnet_rust::huffman::{reference_inputs, Huffman};
 
 const CODEC_VECTORS: &[i32] = &[
     i32::MIN, -65536, -65, -64, -2, -1, 0, 1, 63, 64, 255, 65535, i32::MAX,
@@ -17,6 +18,7 @@ fn main() {
         [arg] if arg == "--version" => println!("DDNet-Rust 0.1.0 (upstream 20.2.1)"),
         [arg] if arg == "--self-test" => self_test(),
         [arg] if arg == "--codec-vectors" => codec_vectors(),
+        [arg] if arg == "--huffman-vectors" => huffman_vectors(),
         [arg, path] if arg == "--inspect-map" => inspect_map(path),
         [arg, path] if arg == "--inspect-game-map" => inspect_game_map(path),
         [arg, path] if arg == "--inspect-layers" => inspect_layers(path),
@@ -32,6 +34,7 @@ fn print_help() {
     println!("DDNet-Rust (work in progress; not yet a playable client)");
     println!("  --self-test         Run isolated physics/protocol smoke tests");
     println!("  --codec-vectors     Emit integer vectors for C++ differential testing");
+    println!("  --huffman-vectors   Compare compressed output against upstream C++");
     println!("  --inspect-map PATH  Parse and validate a v3/v4 DDNet map's metadata");
     println!("  --probe-server HOST[:PORT]  Probe a live DDNet 0.6 UDP handshake");
     println!("  --version           Print project and upstream versions");
@@ -143,5 +146,17 @@ fn probe(endpoint: &str) {
             eprintln!("DDNet 0.6 handshake failed: {error}");
             std::process::exit(1);
         }
+    }
+}
+
+fn huffman_vectors() {
+    let codec = Huffman::new();
+    for (index, input) in reference_inputs().into_iter().enumerate() {
+        let output = codec.compress(&input, 10_000).expect("Huffman reference input");
+        print!("{index} ");
+        for byte in output {
+            print!("{byte:02x}");
+        }
+        println!();
     }
 }

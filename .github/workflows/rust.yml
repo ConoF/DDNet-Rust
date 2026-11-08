@@ -29,6 +29,15 @@ jobs:
           ./target/reference-packer > target/upstream-vectors.txt
           cargo run --quiet -- --codec-vectors > target/rust-vectors.txt
           diff -u target/upstream-vectors.txt target/rust-vectors.txt
+      - name: Compare Huffman compression against actual DDNet C++ code
+        shell: bash
+        run: |
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror -Itools/reference_shims -Iupstream/ddnet/src \
+            tools/reference_huffman.cpp upstream/ddnet/src/engine/shared/huffman.cpp \
+            -o target/reference-huffman
+          ./target/reference-huffman > target/cpp-huffman-vectors.txt
+          cargo run --quiet --locked -- --huffman-vectors > target/rust-huffman-vectors.txt
+          diff -u target/cpp-huffman-vectors.txt target/rust-huffman-vectors.txt
       - name: Parse real DDNet 20.2.1 map metadata
         run: |
           cargo run -- --inspect-map upstream/ddnet/data/maps/ctf1.map
