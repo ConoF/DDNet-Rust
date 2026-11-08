@@ -43,7 +43,7 @@ pub enum HuffmanError {
     InvalidTree,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct Node {
     leaves: Option<[usize; 2]>,
     symbol: usize,
@@ -62,7 +62,7 @@ impl Node {
 }
 
 /// A deterministic codec; instantiate once and reuse per connection.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Huffman {
     nodes: Vec<Node>,
     root: usize,
