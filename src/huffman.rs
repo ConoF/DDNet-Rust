@@ -85,7 +85,7 @@ impl Huffman {
         while remaining.len() > 1 {
             // Rust sort_by is stable, preserving C++ std::stable_sort tie
             // ordering even after a merged node changes its frequency.
-            remaining.sort_by(|left, right| right.0.cmp(&left.0));
+            remaining.sort_by_key(|left| std::cmp::Reverse(left.0));
             let lowest = remaining.pop().expect("nonempty tree");
             let next = remaining.last_mut().expect("two or more nodes");
             let index = nodes.len();
