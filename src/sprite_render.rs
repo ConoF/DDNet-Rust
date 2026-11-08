@@ -57,8 +57,8 @@ fn skin_eye(emote: i32) -> Sprite {
 
 fn valid_sheet(tex: &Texture, grid: (usize, usize)) -> bool {
     tex.width as usize >= grid.0 && tex.height as usize >= grid.1
-        && tex.width as usize % grid.0 == 0
-        && tex.height as usize % grid.1 == 0
+        && (tex.width as usize).is_multiple_of(grid.0)
+        && (tex.height as usize).is_multiple_of(grid.1)
 }
 
 fn to_screen(frame: &Framebuffer, camera: Camera, x: f32, y: f32) -> (f32, f32) {
