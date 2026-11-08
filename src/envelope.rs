@@ -309,6 +309,40 @@ mod tests {
     }
 
     #[test]
+    fn teeworlds_v3_embedded_bezier_handles_are_interpolated() {
+        let envelope = words(&[
+            3, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ]);
+        let mut points = vec![0u8; ENVPOINT_BEZIER_SIZE * 2];
+        // First envelope point: time zero, Bezier curve, value zero.
+        points[4..8].copy_from_slice(&5i32.to_le_bytes());
+        // m_aOutTangentDeltaX[0] = +333 ms.
+        points[56..60].copy_from_slice(&333i32.to_le_bytes());
+        // Second point: time 1000 ms, value 1.0 in 22.10.
+        let next = ENVPOINT_BEZIER_SIZE;
+        points[next..next + 4].copy_from_slice(&1000i32.to_le_bytes());
+        points[next + 8..next + 12].copy_from_slice(&1024i32.to_le_bytes());
+        // m_aInTangentDeltaX[0] = -333 ms.
+        points[next + 24..next + 28].copy_from_slice(&(-333i32).to_le_bytes());
+        let file = Datafile {
+            version: 4,
+            items: vec![
+                Item { type_id: MAP_ENVELOPE, id: 0, payload: &envelope },
+                Item { type_id: MAP_ENVPOINTS, id: 0, payload: &points },
+            ],
+            item_types: vec![], raw_blocks: vec![],
+        };
+        let parsed = EnvelopeSet::from_datafile(&file).unwrap();
+        let at_250 = parsed.evaluate(0, 0,
+            EnvelopeTimes { game_ms: 250.0, local_ms: 0.0 }, [0.0; 4]);
+        assert!(at_250[0] > 0.12 && at_250[0] < 0.20,
+            "Bezier interpolation should differ from linear: {}", at_250[0]);
+        let at_500 = parsed.evaluate(0, 0,
+            EnvelopeTimes { game_ms: 500.0, local_ms: 0.0 }, [0.0; 4]);
+        assert!((at_500[0] - 0.5).abs() < 0.005);
+    }
+
+    #[test]
     fn rejects_missing_out_of_range_and_non_monotonic_points() {
         let payload = words(&[2, 4, 0, 3, 0,0,0,0,0,0,0,0,0]);
         let points = words(&[point(0, 1, 0), point(200, 1, 100),
