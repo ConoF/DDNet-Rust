@@ -11,6 +11,10 @@ use crate::datafile::Datafile;
 use crate::graphics::{Camera, Framebuffer};
 #[cfg(feature = "gpu")]
 use crate::gpu_renderer::{GpuRenderer, TeeFrame, OVERLAY_KEY};
+#[cfg(feature = "gpu")]
+use crate::gpu_hud::GpuHudScene;
+#[cfg(feature = "gpu")]
+use crate::online_ui::HudCanvas;
 use crate::hook::HookState;
 use crate::map::GameMap;
 use crate::physics::Vec2;
@@ -118,10 +122,7 @@ fn play_offline_impl(
     let mut gpu_tee = Framebuffer::new(SCREEN_W as u32, SCREEN_H as u32)
         .map_err(|e| format!("GPU tee overlay: {e:?}"))?;
     #[cfg(feature = "gpu")]
-    let mut gpu_hud = Framebuffer::new(SCREEN_W as u32, SCREEN_H as u32)
-        .map_err(|e| format!("GPU HUD overlay: {e:?}"))?;
-    #[cfg(feature = "gpu")]
-    gpu_hud.clear(OVERLAY_KEY);
+    let mut gpu_hud = GpuHudScene::new(SCREEN_W, SCREEN_H);
     // Hardware-free Xvfb smoke remains deterministic. Real play opens the
     // default WASAPI/ALSA output and keeps decoding on the game thread.
     let mut audio = if smoke_output.is_none() && !gpu_smoke {
@@ -263,6 +264,10 @@ fn play_offline_impl(
         }
         #[cfg(feature = "gpu")]
         if let Some(renderer) = gpu.as_mut() {
+            gpu_hud.clear();
+            if gpu_smoke {
+                gpu_hud.write_text(10, 10, "GPU HUD", 0xffffff, 7);
+            }
             renderer.render(assets.visual_map.as_ref(), camera, animation_times,
                 TeeFrame {
                     state: Some(&snapshot),
@@ -272,6 +277,9 @@ fn play_offline_impl(
                 }, &gpu_tee, &gpu_hud)?;
             if gpu_smoke && renderer.last_native_tee_vertices() == 0 {
                 return Err("GPU smoke presented a frame without native tee sprites".into());
+            }
+            if gpu_smoke && renderer.last_native_hud_vertices() == 0 {
+                return Err("GPU smoke presented a frame without native HUD glyphs".into());
             }
             window.update();
         } else {

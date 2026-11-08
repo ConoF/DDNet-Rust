@@ -16,6 +16,8 @@ use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 use crate::graphics::{Camera, Framebuffer};
 #[cfg(feature = "gpu")]
 use crate::gpu_renderer::{GpuRenderer, TeeFrame, OVERLAY_KEY};
+#[cfg(feature = "gpu")]
+use crate::gpu_hud::GpuHudScene;
 use crate::datafile::Datafile;
 use crate::window_assets::{WindowAssets, candidate_roots};
 use crate::game_audio::{attack_sound_for_weapon, try_start, GameAudio};
@@ -145,8 +147,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     let mut gpu_tee = Framebuffer::new(WIDTH as u32, HEIGHT as u32)
         .map_err(|e| format!("GPU tee framebuffer: {e:?}"))?;
     #[cfg(feature = "gpu")]
-    let mut gpu_hud = Framebuffer::new(WIDTH as u32, HEIGHT as u32)
-        .map_err(|e| format!("GPU HUD framebuffer: {e:?}"))?;
+    let mut gpu_hud = GpuHudScene::new(WIDTH, HEIGHT);
     let mut camera = Camera { center: Vec2::default(), scale: 1.5 };
     let mut assets = WindowAssets::default();
     let mut audio = try_start(&candidate_roots(None));
@@ -537,16 +538,21 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             None
         };
         #[cfg(feature = "gpu")]
-        if using_gpu { gpu_hud.clear(OVERLAY_KEY); }
-        #[cfg(feature = "gpu")]
-        let ui_frame = if using_gpu { &mut gpu_hud } else { &mut pixels };
-        #[cfg(not(feature = "gpu"))]
-        let ui_frame = &mut pixels;
-        if let Some(snapshot) = display.as_ref() {
-            hud.draw_nameplates(ui_frame, snapshot, camera);
+        if using_gpu {
+            gpu_hud.clear();
+            if let Some(snapshot) = display.as_ref() {
+                hud.draw_nameplates(&mut gpu_hud, snapshot, camera);
+            }
+            hud.render(&mut gpu_hud, &format!("{:?}", session.stage),
+                local_weapon, current_snapshot, scoreboard);
         }
-        hud.render(ui_frame, &format!("{:?}", session.stage),
-            local_weapon, current_snapshot, scoreboard);
+        if !using_gpu {
+            if let Some(snapshot) = display.as_ref() {
+                hud.draw_nameplates(&mut pixels, snapshot, camera);
+            }
+            hud.render(&mut pixels, &format!("{:?}", session.stage),
+                local_weapon, current_snapshot, scoreboard);
+        }
         #[cfg(feature = "gpu")]
         if let Some(renderer) = gpu.as_mut() {
             renderer.render(assets.visual_map.as_ref(), camera, animation_times,
