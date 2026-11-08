@@ -3,17 +3,22 @@
 //! The same minifb window retains input/OS handling; Vulkan/DX12/Metal/GLES
 //! presents directly to the native surface. Visible tile/quad geometry is
 //! uploaded once per frame, and map texture atlases only on map changes.
-//! Tee sprites and legacy HUD are uploaded as separate alpha overlays until
-//! their original sprite/font rendering is moved onto the GPU.
+//! Only unsupported tee assets use the CPU fallback. HUD glyphs and panels
+//! are native GPU geometry; original scalable DDNet fonts remain pending.
 
 use minifb::Window;
 
 use crate::envelope::EnvelopeTimes;
 use crate::gpu_scene::{build_gpu_scene, GpuBatch, GpuScene, GpuVertex, VERTEX_STRIDE};
 use crate::gpu_tees::{build_gpu_tees, GpuTeeScene, SpriteTextureSlots};
+use crate::gpu_hud::{
+    font_atlas_rgba, GpuHudScene, FONT_WIDTH, FONT_HEIGHT,
+    HUD_FONT_SLOT, HUD_SOLID_SLOT,
+};
 use crate::sprite_render::{valid_sheet, GRID_SKIN, GRID_GAME};
 use crate::snapshot_delta::SnapshotState;
 use crate::texture::Texture;
+use crate::online_ui::HudCanvas;
 use crate::graphics::{Camera, Framebuffer, BACKGROUND};
 use crate::map_visual::VisualMap;
 
@@ -48,8 +53,8 @@ pub struct GpuRenderer {
     map_image_count: usize,
     skin_ready: bool,
     last_sprite_vertices: usize,
+    last_hud_vertices: usize,
     overlay_tee: ImageBind,
-    overlay_hud: ImageBind,
     vertices: wgpu::Buffer,
     capacity: usize,
     overlay_vertices: wgpu::Buffer,
@@ -196,16 +201,11 @@ impl GpuRenderer {
             (width, height), &vec![0; (width * height * 4) as usize],
             "DDNet tee overlay",
         );
-        let overlay_hud = Self::make_texture(
-            &device, &queue, &layout, &sampler,
-            (width, height), &vec![0; (width * height * 4) as usize],
-            "DDNet HUD overlay",
-        );
         Ok(Self {
             surface, device, queue, config, pipeline, layout, sampler,
             images: Vec::new(), map_image_count: 0, skin_ready: false,
-            last_sprite_vertices: 0,
-            overlay_tee, overlay_hud,
+            last_sprite_vertices: 0, last_hud_vertices: 0,
+            overlay_tee,
             vertices, capacity: INITIAL_VERTICES, overlay_vertices,
         })
     }
@@ -252,7 +252,8 @@ impl GpuRenderer {
     }
 
     /// Upload atlases only when the actual map or visual assets change.
-    /// Slots: map images (0..N), solid white (N), skin (N+1), game (N+2).
+    /// Slots: map images (0..N), white (N), skin (N+1), game (N+2),
+    /// single-channel-like RGBA font atlas (N+3).
     /// Keeping those indices stable avoids texture binding churn per frame.
     pub fn sync_assets(
         &mut self, map: Option<&VisualMap>,
@@ -289,6 +290,11 @@ impl GpuRenderer {
                 dimensions, bytes, label,
             ));
         }
+        let glyphs = font_atlas_rgba();
+        self.images.push(Self::make_texture(
+            &self.device, &self.queue, &self.layout, &self.sampler,
+            (FONT_WIDTH, FONT_HEIGHT), &glyphs, "DDNet HUD glyph atlas",
+        ));
     }
 
     /// True when a compatible skin atlas was loaded. The caller may bypass
@@ -301,6 +307,11 @@ impl GpuRenderer {
     /// geometry. Used by the real-map smoke test, not an estimated FPS metric.
     pub fn last_native_tee_vertices(&self) -> usize {
         self.last_sprite_vertices
+    }
+
+    /// Native HUD geometry submitted in the last rendered frame.
+    pub fn last_native_hud_vertices(&self) -> usize {
+        self.last_hud_vertices
     }
 
     fn upload_overlay(queue: &wgpu::Queue, image: &wgpu::Texture, frame: &Framebuffer) {
@@ -334,16 +345,16 @@ impl GpuRenderer {
         }
     }
 
-    /// Presents background quads/tiles, then tees, then foreground, then HUD.
-    /// The two overlay buffers have transparent chroma-key backgrounds.
+    /// Presents GPU background, GPU tees (or CPU fallback), GPU foreground
+    /// and native GPU glyph/panel geometry. No fullscreen HUD upload occurs.
     pub fn render(
         &mut self, map: Option<&VisualMap>, camera: Camera, times: EnvelopeTimes,
-        tee: TeeFrame<'_>, tees: &Framebuffer, hud: &Framebuffer,
+        tee: TeeFrame<'_>, tees: &Framebuffer, hud: &GpuHudScene,
     ) -> Result<(), String> {
         if tees.width != self.config.width || tees.height != self.config.height
-            || hud.width != tees.width || hud.height != tees.height
+            || hud.dimensions() != (self.config.width as usize, self.config.height as usize)
         {
-            return Err("GPU overlay dimensions changed without surface reconfiguration".into());
+            return Err("GPU frame dimensions changed without surface reconfiguration".into());
         }
         let mut scene = map.map(|map| {
             build_gpu_scene(map, camera, times, self.config.width, self.config.height)
@@ -375,6 +386,28 @@ impl GpuRenderer {
                 .ok_or("GPU tee batch offset overflow")?;
         }
         scene.vertices.extend(sprite.vertices);
+
+        self.last_hud_vertices = hud.vertices.len();
+        let hud_base = u32::try_from(scene.vertices.len())
+            .map_err(|_| String::from("GPU HUD vertex offset overflow"))?;
+        let mut hud_batches = Vec::with_capacity(hud.batches.len());
+        for batch in &hud.batches {
+            let index = match batch.texture {
+                HUD_SOLID_SLOT => self.map_image_count,
+                HUD_FONT_SLOT => self.map_image_count + 3,
+                _ => return Err("unknown GPU HUD atlas slot".to_owned()),
+            };
+            hud_batches.push(GpuBatch {
+                texture: index,
+                start: batch.start.checked_add(hud_base)
+                    .ok_or("GPU HUD batch offset overflow")?,
+                count: batch.count,
+            });
+        }
+        scene.vertices.extend_from_slice(&hud.vertices);
+        if scene.vertices.len() > crate::gpu_scene::MAX_FRAME_VERTICES {
+            return Err("GPU map, tee and HUD vertex count exceeds frame limit".into());
+        }
         let bytes = scene.vertex_bytes();
         if scene.vertices.len() > self.capacity {
             self.capacity = scene.vertices.len().next_power_of_two();
@@ -389,7 +422,6 @@ impl GpuRenderer {
         if !native {
             Self::upload_overlay(&self.queue, &self.overlay_tee._texture, tees);
         }
-        Self::upload_overlay(&self.queue, &self.overlay_hud._texture, hud);
         let output = match self.surface.get_current_texture() {
             Ok(output) => output,
             Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
@@ -434,9 +466,7 @@ impl GpuRenderer {
             }
             pass.set_vertex_buffer(0, self.vertices.slice(..));
             Self::draw_batches(&mut pass, &scene.foreground, &self.images);
-            pass.set_vertex_buffer(0, self.overlay_vertices.slice(..));
-            pass.set_bind_group(0, &self.overlay_hud.group, &[]);
-            pass.draw(0..OVERLAY_VERTEX_COUNT, 0..1);
+            Self::draw_batches(&mut pass, &hud_batches, &self.images);
         }
         self.queue.submit(Some(encoder.finish()));
         output.present();
@@ -444,8 +474,8 @@ impl GpuRenderer {
     }
 }
 
-/// Convert old RGB framebuffers into alpha overlays. This is a transition
-/// path until weapon/tee sprites and proportional text get native GPU batches.
+/// Convert the legacy RGB tee fallback into an alpha overlay.
+ /// This is only used if native tee atlas assets are missing.
 pub fn rgba_overlay(frame: &Framebuffer) -> Vec<u8> {
     let mut rgba = Vec::with_capacity(frame.pixels.len() * 4);
     for &pixel in &frame.pixels {
