@@ -265,3 +265,15 @@ WAV output is genuine original decoded game audio, but it is not real-time
 headphone/speaker playback. Voice and world-event scheduling, Opus,
 music and sample variants remain for later stages. There is no C++
 runtime or FFI in the Rust decoder.
+
+### WavPack codec coverage in 20.2.1 resources
+
+The checked \`wavicle\` decoder supports the original lossless v0x405
+assets (for instance gun, shotgun, hammer, weapon switch and jumping).
+Several original v0x406 resources (hook attach/no-attach, airjump, laser
+fire) use **hybrid WavPack**, which that pure Rust library deliberately
+does not implement. Their files now return \`SoundError::Unsupported\`
+rather than reporting a corrupt file. The decoder is therefore a
+**partial** DDNet sound loader, not yet a drop-in replacement for the
+original native WavPack backend. CI validates three real lossless effects
+and uploads a playable WAV artifact.

@@ -30,6 +30,15 @@ impl From<AudioError> for SoundError {
     fn from(value: AudioError) -> Self { Self::Audio(value) }
 }
 
+fn codec_error(error: wavicle::Error) -> SoundError {
+    match error {
+        // The original client accepts hybrid WavPack, but wavicle 0.1.0
+        // does not. Distinguish unsupported valid encoding from corruption.
+        wavicle::Error::OutOfScope(_) => SoundError::Unsupported,
+        other => SoundError::DecodeFailed(other),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GameSound {
     GunFire,
@@ -87,7 +96,7 @@ pub fn decode_wavpack(bytes: &[u8], mixer_rate: u32) -> Result<Sample, SoundErro
     }
 
     let info = wavicle::StreamInfo::scan(bytes)
-        .map_err(SoundError::DecodeFailed)?;
+        .map_err(codec_error)?;
     if info.channels == 0 || info.channels > 2
         || info.is_float || info.bits_per_sample != 16
         || !(8_000..=192_000).contains(&info.sample_rate)
@@ -97,7 +106,7 @@ pub fn decode_wavpack(bytes: &[u8], mixer_rate: u32) -> Result<Sample, SoundErro
     let channels = usize::try_from(info.channels).map_err(|_| SoundError::Unsupported)?;
     let mut total_frames = 0usize;
     for block in wavicle::Blocks::new(bytes) {
-        let block = block.map_err(SoundError::DecodeFailed)?;
+        let block = block.map_err(codec_error)?;
         total_frames = total_frames.checked_add(block.header.block_samples as usize)
             .ok_or(SoundError::TooLarge)?;
         let count = total_frames.checked_mul(channels)
@@ -113,7 +122,7 @@ pub fn decode_wavpack(bytes: &[u8], mixer_rate: u32) -> Result<Sample, SoundErro
         return Err(SoundError::InconsistentPcm);
     }
 
-    let output = wavicle::decode_stream(bytes).map_err(SoundError::DecodeFailed)?;
+    let output = wavicle::decode_stream(bytes).map_err(codec_error)?;
     if output.samples.len() != total_frames * channels
         || output.channels != info.channels
         || output.sample_rate != info.sample_rate
@@ -207,6 +216,22 @@ mod tests {
         let mut oversized = b"wvpk".to_vec();
         oversized.resize(MAX_WAVPACK_FILE_BYTES + 1, 0);
         assert_eq!(decode_wavpack(&oversized, 48_000).err(), Some(SoundError::TooLarge));
+    }
+
+    #[test]
+    fn hybrid_wavpack_is_reported_as_unsupported_not_corrupt() {
+        // An internally consistent WavPack header for version 0x406
+        // with HYBRID_FLAG. The Rust decoder intentionally excludes it.
+        let mut header = [0u8; 32];
+        header[..4].copy_from_slice(b"wvpk");
+        header[4..8].copy_from_slice(&24u32.to_le_bytes());
+        header[8..10].copy_from_slice(&0x406u16.to_le_bytes());
+        header[20..24].copy_from_slice(&1u32.to_le_bytes());
+        header[24..28].copy_from_slice(&0x0000_0008u32.to_le_bytes());
+        assert_eq!(
+            decode_wavpack(&header, 48_000).err(),
+            Some(SoundError::Unsupported),
+        );
     }
 
     #[test]

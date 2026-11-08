@@ -29,8 +29,18 @@ jobs:
       - name: Decode original DDNet 20.2.1 WavPack sound effects
         run: |
           cargo run --locked -- --audio-wv-preview upstream/ddnet/data/audio/wp_gun_fire-01.wv target/gun-fire.wav
-          cargo run --locked -- --audio-wv-preview upstream/ddnet/data/audio/hook_attach-01.wv target/hook-attach.wav
-          python3 -c "import wave; files=['target/gun-fire.wav','target/hook-attach.wav']; [(lambda w: (print(f, w.getnframes(), w.getframerate()), (w.getnframes()>100 and w.getnchannels()==2 and w.getframerate()==48000) or (_ for _ in ()).throw(AssertionError(f))))(wave.open(f,'rb')) for f in files]"
+          cargo run --locked -- --audio-wv-preview upstream/ddnet/data/audio/wp_hammer_swing-01.wv target/hammer-swing.wav
+          cargo run --locked -- --audio-wv-preview upstream/ddnet/data/audio/foley_foot_left-01.wv target/player-jump.wav
+          python3 -c "import wave; files=['target/gun-fire.wav','target/hammer-swing.wav','target/player-jump.wav']; [(lambda w: (print(f, w.getnframes(), w.getframerate()), (w.getnframes()>100 and w.getnchannels()==2 and w.getframerate()==48000) or (_ for _ in ()).throw(AssertionError(f))))(wave.open(f,'rb')) for f in files]"
+      - name: Publish original DDNet decoded WAV effects
+        uses: actions/upload-artifact@v4
+        with:
+          name: ddnet-rust-sound-preview
+          path: |
+            target/gun-fire.wav
+            target/hammer-swing.wav
+            target/player-jump.wav
+          if-no-files-found: error
       - name: Compare variable integers with unmodified upstream C++
         shell: bash
         run: |
