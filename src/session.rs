@@ -17,6 +17,7 @@ use crate::map::{GameMap, MapError};
 use crate::transport::{Client06, Event, TransportError};
 use crate::snapshot::{SnapshotAssembler, SnapshotError, SnapshotPacket};
 use crate::snapshot_delta::{DeltaDecoder, SnapshotState};
+use crate::input::{InputFrame, InputError};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +53,7 @@ pub enum SessionError {
     Datafile(DatafileError),
     Map(MapError),
     Snapshot(SnapshotError),
+    Input(InputError),
     UnexpectedStage,
 }
 impl From<TransportError> for SessionError {
@@ -68,6 +70,9 @@ impl From<MapError> for SessionError {
 }
 impl From<SnapshotError> for SessionError {
     fn from(value: SnapshotError) -> Self { Self::Snapshot(value) }
+}
+impl From<InputError> for SessionError {
+    fn from(value: InputError) -> Self { Self::Input(value) }
 }
 
 #[derive(Debug, Clone)]
@@ -273,6 +278,15 @@ impl GameSession06 {
                 self.snapshot_states.remove(&oldest);
             }
         }
+    }
+
+    /// Sends one 0.6 system NETMSG_INPUT as an *unreliable* chunk, matching
+    /// upstream CClient::SendInput. The caller owns the 50 Hz scheduling.
+    pub fn send_input(&mut self, frame: InputFrame) -> Result<Vec<u8>, SessionError> {
+        if self.stage != Stage::EnterGameSent {
+            return Err(SessionError::UnexpectedStage);
+        }
+        Ok(self.transport.send_message(&frame.pack()?, false)?)
     }
 
     pub fn snapshot_state(&self, tick: i32) -> Option<&SnapshotState> {
@@ -555,6 +569,36 @@ mod tests {
             NETMSGTYPE_SV_READYTOENTER, &[], 1, 1
         )), Err(SessionError::UnexpectedStage));
         assert_eq!(client.stage, Stage::WaitingMap);
+    }
+
+    #[test]
+    fn headless_game_input_is_unreliable_and_not_available_during_login() {
+        let map = small_real_datafile_v3();
+        let mut session = GameSession06::new(String::new(), 4096, 1024);
+        let frame = crate::input::InputFrame {
+            last_ack_snapshot: -1,
+            intended_tick: 101,
+            input: crate::input::PlayerInput::default(),
+        };
+        assert_eq!(session.send_input(frame), Err(SessionError::UnexpectedStage));
+        feed_handshake(&mut session);
+        session.receive(&server_message(NETMSG_MAP_CHANGE, &make_map_change(&map), 1, 1)).unwrap();
+        session.receive(&server_message(NETMSG_MAP_DATA, &make_map_data(&map), 2, 2)).unwrap();
+        session.receive(&server_message(NETMSG_CON_READY, &[], 3, 3)).unwrap();
+        session.receive(&server_game_message(NETMSGTYPE_SV_READYTOENTER, &[], 4, 4)).unwrap();
+        assert_eq!(session.stage, Stage::EnterGameSent);
+        let sequence = session.transport.sequence;
+        let message = session.send_input(frame).unwrap();
+        assert_eq!(session.transport.sequence, sequence);
+        let crate::network::Packet::Connected { header, payload } =
+            crate::network::parse_packet_06(&message).unwrap()
+        else { panic!("input isn't a connected UDP packet"); };
+        assert_eq!(header.num_chunks, 1);
+        let chunks = crate::network::parse_chunks_06(&payload[..payload.len()-4], 1).unwrap();
+        assert_eq!(chunks[0].header.flags, 0); // no vital bit
+        let decoded = decode_message(chunks[0].payload).unwrap();
+        assert_eq!(decoded.id, MessageId::Regular { system: true, number: 16 });
+        assert_eq!(crate::input::InputFrame::unpack_payload(decoded.payload), Ok(frame));
     }
 
     #[test]
