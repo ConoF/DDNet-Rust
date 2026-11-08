@@ -470,6 +470,7 @@ mod tests {
     use super::*;
     use crate::datafile::{Item, RawBlock};
     use crate::physics::Vec2;
+    const MAP_ENVELOPE: u16 = 3;
 
     fn words(values: &[i32]) -> Vec<u8> {
         values.iter().flat_map(|v| v.to_le_bytes()).collect()
@@ -535,6 +536,86 @@ mod tests {
         bytes[136..140].copy_from_slice(&(-1i32).to_le_bytes());
         bytes[144..148].copy_from_slice(&(-1i32).to_le_bytes());
         bytes
+    }
+
+    #[test]
+    fn decoded_map_envelopes_drive_actual_quad_and_tile_pixels() {
+        // Original map uses envelope objects (type=3) and one contiguous
+        // array of 24-byte envpoints (type=6).
+        let pos_env = words(&[2, 3, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let color_env = words(&[2, 4, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let raw_points = words(&[
+            0, 1, 0, 0, 0, 0,
+            1000, 1, 16 * 1024, 0, 0, 0,
+            0, 1, 1024, 1024, 1024, 1024,
+            1000, 1, 512, 512, 512, 1024,
+        ]);
+        let mut quad = raw_quad([255, 0, 0, 255]);
+        quad[136..140].copy_from_slice(&0i32.to_le_bytes());
+        quad[144..148].copy_from_slice(&1i32.to_le_bytes());
+        let raw_layer = words(&[0, QUADMAP, 0, 1, 1, 0, -1]);
+        let file = Datafile {
+            version: 3, item_types: vec![],
+            items: vec![
+                Item { type_id: MAP_ENVELOPE, id: 0, payload: &pos_env },
+                Item { type_id: MAP_ENVELOPE, id: 1, payload: &color_env },
+                Item { type_id: 6, id: 0, payload: &raw_points },
+                Item { type_id: MAP_LAYER, id: 0, payload: &raw_layer },
+            ],
+            raw_blocks: vec![RawBlock { encoded: &quad, uncompressed_size: None }],
+        };
+        let map = VisualMap::from_datafile(&file, Path::new(".")).unwrap();
+        assert_eq!(map.envelopes.envelopes.len(), 2);
+        let mut frame = Framebuffer::new(48, 32).unwrap();
+        let camera = Camera { center: Vec2::new(24.0, 16.0), scale: 1.0 };
+        map.render_at(&mut frame, camera, EnvelopeTimes {
+            game_ms: 0.0, local_ms: 999.0,
+        }).unwrap();
+        assert_eq!(frame.pixel(4, 4), Some(0xff0000));
+        map.render_at(&mut frame, camera, EnvelopeTimes {
+            game_ms: 500.0, local_ms: 0.0,
+        }).unwrap();
+        assert_eq!(frame.pixel(4, 4), Some(BACKGROUND));
+        assert_eq!(frame.pixel(12, 4), Some(0xbf0000));
+        // Time wraps at the final keyframe.
+        map.render_at(&mut frame, camera, EnvelopeTimes {
+            game_ms: 1000.0, local_ms: 0.0,
+        }).unwrap();
+        assert_eq!(frame.pixel(4, 4), Some(0xff0000));
+    }
+
+    #[test]
+    fn static_tile_tint_evaluates_animated_color_envelopes() {
+        let (image_payload, mut layer_payload, atlas, tiles) = make_fixture();
+        layer_payload[44..48].copy_from_slice(&0i32.to_le_bytes());
+        let env = words(&[2, 4, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let points = words(&[
+            0, 1, 1024, 1024, 1024, 1024,
+            1000, 1, 0, 0, 0, 1024,
+        ]);
+        let file = Datafile {
+            version: 3, item_types: vec![],
+            items: vec![
+                Item { type_id: MAP_IMAGE, id: 0, payload: &image_payload },
+                Item { type_id: MAP_LAYER, id: 0, payload: &layer_payload },
+                Item { type_id: MAP_ENVELOPE, id: 0, payload: &env },
+                Item { type_id: 6, id: 0, payload: &points },
+            ],
+            raw_blocks: vec![
+                RawBlock { encoded: b"synthetic\\0", uncompressed_size: None },
+                RawBlock { encoded: &atlas, uncompressed_size: None },
+                RawBlock { encoded: &tiles, uncompressed_size: None },
+            ],
+        };
+        let map = VisualMap::from_datafile(&file, Path::new(".")).unwrap();
+        let camera = Camera { center: Vec2::new(32.0, 16.0), scale: 1.0 };
+        let mut frame = Framebuffer::new(64, 32).unwrap();
+        map.render_at(&mut frame, camera, EnvelopeTimes::default()).unwrap();
+        assert_eq!(frame.pixel(16, 16), Some(0xff0000));
+        map.render_at(&mut frame, camera, EnvelopeTimes {
+            game_ms: 500.0, local_ms: 0.0,
+        }).unwrap();
+        assert_eq!(frame.pixel(16, 16), Some(0x7f0000));
     }
 
     #[test]
