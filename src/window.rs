@@ -68,22 +68,27 @@ pub fn offline_spawn(map: &GameMap) -> Option<Vec2> {
 /// A/D: run, W/Space: jump, right mouse/E: hook, wheel: zoom,
 /// R: respawn, Escape: close.
 pub fn play_offline(path: &str) -> Result<(), String> {
-    play_offline_impl(path, None, false)
+    play_offline_impl(path, None, false, false)
 }
 
 /// Opens the OS window inside a virtual display, advances scripted inputs and
 /// emits a real PNG screenshot; intended for GitHub Actions/Xvfb smoke tests.
 pub fn smoke_offline(path: &str, output: &str) -> Result<(), String> {
-    play_offline_impl(path, Some(output), false)
+    play_offline_impl(path, Some(output), false, false)
 }
 
 #[cfg(feature = "gpu")]
 pub fn smoke_gpu_offline(path: &str) -> Result<(), String> {
-    play_offline_impl(path, None, true)
+    play_offline_impl(path, None, true, false)
+}
+
+/// Deterministic screenshot of the actual Esc menu over the offline game.
+pub fn smoke_offline_menu(path: &str, output: &str) -> Result<(), String> {
+    play_offline_impl(path, Some(output), false, true)
 }
 
 fn play_offline_impl(
-    path: &str, smoke_output: Option<&str>, gpu_smoke: bool,
+    path: &str, smoke_output: Option<&str>, gpu_smoke: bool, menu_smoke: bool,
 ) -> Result<(), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("map read: {e}"))?;
     let file = Datafile::parse(&bytes).map_err(|e| format!("datafile: {e:?}"))?;
@@ -155,6 +160,7 @@ fn play_offline_impl(
     let mut accumulator = Duration::ZERO;
     let mut frames: usize = 0;
     let mut menu = MenuState::new();
+    if menu_smoke { menu.toggle(); }
     let mut left_was_down = false;
 
     while window.is_open() {
