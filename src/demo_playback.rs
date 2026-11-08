@@ -253,6 +253,115 @@ impl DemoIndex {
     }
 }
 
+/// Incremental replay cursor: sequential frames use the existing decoded
+/// snapshot; arbitrary seeks restart from the nearest preceding keyframe.
+pub struct DemoCursor {
+    pub index: DemoIndex,
+    file: File,
+    codec: Huffman,
+    delta: DeltaDecoder,
+    frame_index: usize,
+    next_chunk: usize,
+    state: SnapshotState,
+}
+
+impl DemoCursor {
+    pub fn open(path: &Path) -> Result<Self, ReplayError> {
+        let index = DemoIndex::scan_file(path)?;
+        let first = index.frames.iter().position(|f| f.keyframe && f.snapshots > 0)
+            .ok_or(ReplayError::NoKeyframe)?;
+        let mut cursor = Self {
+            index,
+            file: File::open(path).map_err(|_| ReplayError::Io)?,
+            codec: Huffman::new(),
+            delta: DeltaDecoder::for_vanilla_06(),
+            frame_index: usize::MAX,
+            next_chunk: 0,
+            state: SnapshotState::default(),
+        };
+        cursor.seek_frame(first)?;
+        Ok(cursor)
+    }
+
+    pub fn frame_index(&self) -> usize { self.frame_index }
+    pub fn current_tick(&self) -> i32 { self.index.frames[self.frame_index].tick }
+    pub fn state(&self) -> &SnapshotState { &self.state }
+
+    pub fn seek_tick(&mut self, tick: i32) -> Result<(), ReplayError> {
+        let after = self.index.frames.partition_point(|f| f.tick <= tick);
+        if after == 0 { return Err(ReplayError::NoKeyframe); }
+        self.seek_frame(after - 1)
+    }
+
+    pub fn seek_frame(&mut self, frame_idx: usize) -> Result<(), ReplayError> {
+        if frame_idx >= self.index.frames.len() { return Err(ReplayError::InvalidTick); }
+        if frame_idx == self.frame_index { return Ok(()); }
+        let sequential = self.frame_index != usize::MAX
+            && self.frame_index.checked_add(1) == Some(frame_idx);
+        let start = if sequential {
+            self.next_chunk
+        } else {
+            let keyframe = self.index.frames[..=frame_idx].iter()
+                .rposition(|f| f.keyframe && f.snapshots > 0)
+                .ok_or(ReplayError::NoKeyframe)?;
+            let first_tick = self.index.frames[keyframe].tick;
+            self.state = SnapshotState::default();
+            self.index.chunks.partition_point(|c| c.tick < first_tick)
+        };
+        let target_tick = self.index.frames[frame_idx].tick;
+        let mut next = start;
+        for chunk in &self.index.chunks[start..] {
+            if chunk.tick > target_tick { break; }
+            match chunk.kind {
+                ChunkKind::Snapshot => {
+                    let words = self.index.decode_chunk(&mut self.file, chunk, &self.codec)?;
+                    self.state = parse_full_snapshot(&words)?;
+                }
+                ChunkKind::Delta => {
+                    let words = self.index.decode_chunk(&mut self.file, chunk, &self.codec)?;
+                    if !words.is_empty() {
+                        self.state = self.delta.apply_words(&words, &self.state)?;
+                    }
+                }
+                ChunkKind::Message | ChunkKind::Reserved => {}
+            }
+            next += 1;
+        }
+        self.frame_index = frame_idx;
+        self.next_chunk = next;
+        Ok(())
+    }
+}
+
+pub const DEMO_SPEEDS: [f64; 8] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 4.0];
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DemoClock {
+    pub paused: bool,
+    pub tick: f64,
+    pub speed_index: usize,
+}
+
+impl DemoClock {
+    pub fn new(tick: i32) -> Self {
+        Self { paused: false, tick: f64::from(tick), speed_index: 3 }
+    }
+    pub fn speed(&self) -> f64 { DEMO_SPEEDS[self.speed_index] }
+    pub fn faster(&mut self) {
+        self.speed_index = (self.speed_index + 1).min(DEMO_SPEEDS.len() - 1);
+    }
+    pub fn slower(&mut self) { self.speed_index = self.speed_index.saturating_sub(1); }
+    pub fn seek(&mut self, tick: i32) { self.tick = f64::from(tick); }
+    pub fn advance(&mut self, dt: std::time::Duration, last_tick: i32) -> i32 {
+        if !self.paused {
+            self.tick = (self.tick + dt.as_secs_f64().min(0.1) * 50.0 * self.speed())
+                .min(f64::from(last_tick));
+            if self.tick >= f64::from(last_tick) { self.paused = true; }
+        }
+        self.tick.floor() as i32
+    }
+}
+
 /// Parses CSnapshot (data_size, num_items, offsets, item headers and data)
 /// from CVariableInt::Decompress output. UUID-extended item type IDs are
 /// kept in their internal form until full UUID mapping is implemented.
@@ -418,6 +527,44 @@ mod tests {
         std::fs::write(&path, &bad).unwrap();
         assert_eq!(DemoIndex::scan_file(&path), Err(ReplayError::InvalidTick));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn cursor_sequential_and_backward_seek_preserves_delta_state() {
+        let path = fixture_file(6);
+        let mut cursor = DemoCursor::open(&path).unwrap();
+        assert_eq!(cursor.current_tick(), 50);
+        assert_eq!(cursor.state().find(9, 0).unwrap().words[1], 100);
+        cursor.seek_frame(1).unwrap();
+        assert_eq!(cursor.state().find(9, 0).unwrap().words[1], 110);
+        cursor.seek_tick(50).unwrap();
+        assert_eq!(cursor.state().find(9, 0).unwrap().words[1], 100);
+        cursor.seek_tick(51).unwrap();
+        assert_eq!(cursor.state().find(9, 0).unwrap().words[1], 110);
+        assert_eq!(cursor.seek_frame(2), Err(ReplayError::InvalidTick));
+        assert_eq!(cursor.seek_tick(49), Err(ReplayError::NoKeyframe));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn demo_clock_pauses_changes_speed_and_stops_at_final_tick() {
+        let mut c = DemoClock::new(100);
+        assert_eq!(c.speed(), 1.0);
+        assert_eq!(c.advance(std::time::Duration::from_millis(100), 250), 105);
+        c.paused = true;
+        assert_eq!(c.advance(std::time::Duration::from_secs(3), 250), 105);
+        c.seek(180);
+        c.faster();
+        assert_eq!(c.speed(), 1.25);
+        c.paused = false;
+        assert_eq!(c.advance(std::time::Duration::from_millis(80), 250), 185);
+        for _ in 0..15 { c.faster(); }
+        assert_eq!(c.speed(), 4.0);
+        c.seek(249);
+        assert_eq!(c.advance(std::time::Duration::from_secs(1), 250), 250);
+        assert!(c.paused);
+        for _ in 0..15 { c.slower(); }
+        assert_eq!(c.speed(), 0.25);
     }
 
     #[test]
