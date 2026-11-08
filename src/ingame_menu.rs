@@ -21,6 +21,28 @@ const ACCENT: u32 = 0x9adce8;
 const WARNING: u32 = 0xf4c06b;
 const ROW_HEIGHT: usize = 36;
 
+/// Soft 5px rounded DDNet-style menu panels. Each scanline strip is
+/// disjoint, preventing alpha-overlap darkening on transparent UI.
+fn rounded_panel<C: HudCanvas>(
+    canvas: &mut C, rect: (usize, usize, usize, usize),
+    color: u32, alpha: u8,
+) {
+    let (x,y,w,h) = rect;
+    if w < 12 || h < 12 {
+        canvas.fill_translucent_rect(x,y,w,h,color,alpha);
+        return;
+    }
+    for (top, inset) in [(0,5),(1,3),(2,2),(3,1),(4,1)] {
+        canvas.fill_translucent_rect(
+            x+inset,y+top,w-2*inset,1,color,alpha,
+        );
+        canvas.fill_translucent_rect(
+            x+inset,y+h-1-top,w-2*inset,1,color,alpha,
+        );
+    }
+    canvas.fill_translucent_rect(x,y+5,w,h-10,color,alpha);
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page { #[default] Game, Players, ServerInfo, Settings }
 
@@ -348,7 +370,7 @@ impl MenuState {
         // Preserve the animated world behind the original in-game UI.
         // Both GPU and CPU backends blend these rectangles correctly.
         canvas.fill_translucent_rect(0, 0, width, height, SHADOW, 185);
-        canvas.fill_translucent_rect(l.x, l.y, l.w, l.h, PANEL, 240);
+        rounded_panel(canvas,(l.x,l.y,l.w,l.h),PANEL,240);
         canvas.fill_rect(l.x, l.y, l.w, 48, HEADER);
         canvas.write_text(l.x+24, l.y+19, "DDNET", WHITE, 10);
         canvas.write_text(l.x+l.w.saturating_sub(228), l.y+19,
@@ -357,8 +379,8 @@ impl MenuState {
         let tab_w = l.w.saturating_sub(44) / Page::ALL.len();
         for (i, page) in Page::ALL.into_iter().enumerate() {
             let x = l.tab_origin()+i*tab_w;
-            canvas.fill_rect(x, l.y+57, tab_w.saturating_sub(4), 32,
-                if self.page == page { SELECTED } else { HEADER });
+            rounded_panel(canvas,(x,l.y+57,tab_w.saturating_sub(4),32),
+                if self.page == page { SELECTED } else { HEADER },255);
             canvas.write_text(x+10, l.y+68, page.title(), WHITE,
                 tab_w.saturating_sub(20)/8);
         }
@@ -388,8 +410,8 @@ impl MenuState {
         ];
         for (i, label) in buttons.into_iter().enumerate() {
             let y = l.content_y() + i*ROW_HEIGHT;
-            canvas.fill_rect(l.x+56, y, l.w.saturating_sub(112), ROW_HEIGHT-4,
-                if self.selected == i { SELECTED } else { HEADER });
+            rounded_panel(canvas,(l.x+56,y,l.w.saturating_sub(112),ROW_HEIGHT-4),
+                if self.selected == i { SELECTED } else { HEADER },255);
             canvas.write_text(l.x+70, y+12, label, WHITE,
                 l.w.saturating_sub(140)/8);
         }
@@ -453,8 +475,8 @@ impl MenuState {
     ) {
         for (i, tab) in SettingsTab::ALL.into_iter().enumerate() {
             let y=l.y+126+i*32;
-            canvas.fill_rect(l.category_x(), y, 148, 29,
-                if self.settings_tab==tab { SELECTED } else { HEADER });
+            rounded_panel(canvas,(l.category_x(),y,148,29),
+                if self.settings_tab==tab { SELECTED } else { HEADER },255);
             canvas.write_text(l.category_x()+12, y+10,
                 tab.title(), WHITE, 15);
         }
@@ -480,8 +502,8 @@ impl MenuState {
         };
         for (i,label) in rows.iter().enumerate() {
             let yy=y+i*ROW_HEIGHT;
-            canvas.fill_rect(x, yy, cw, ROW_HEIGHT-4,
-                if i==self.selected { SELECTED } else { HEADER });
+            rounded_panel(canvas,(x,yy,cw,ROW_HEIGHT-4),
+                if i==self.selected { SELECTED } else { HEADER },255);
             canvas.write_text(x+12,yy+12,label,WHITE,cw.saturating_sub(22)/8);
         }
         let caption: &str = match self.settings_tab {
