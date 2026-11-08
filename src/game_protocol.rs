@@ -370,12 +370,14 @@ mod tests {
         let crc = crc32_update(0, actual);
         let change = MapChange { name: "sample".into(), crc, size: actual.len() };
         let mut download = MapDownload::new(change.clone(), 100).unwrap();
-        let first = MapData::parse(&map_data_packet(0, crc, 0, &actual[..5])).unwrap();
+        let first_bytes = map_data_packet(0, crc, 0, &actual[..5]);
+        let first = MapData::parse(&first_bytes).unwrap();
         assert_eq!(download.ingest(first).unwrap(), MapProgress {
             received: 5, total: actual.len(), next_chunk: 1, complete: false,
         });
         assert_eq!(download.ingest(first), Err(MessageError::InvalidChunk));
-        let second = MapData::parse(&map_data_packet(1, crc, 1, &actual[5..])).unwrap();
+        let second_bytes = map_data_packet(1, crc, 1, &actual[5..]);
+        let second = MapData::parse(&second_bytes).unwrap();
         assert!(download.ingest(second).unwrap().complete);
         assert_eq!(download.into_map_data().unwrap(), actual);
         assert_eq!(MapDownload::new(change, 5).err(), Some(MessageError::MapSizeExceeded));
@@ -388,9 +390,11 @@ mod tests {
         let mut downloader = MapDownload::new(MapChange {
             name: "test".into(), crc, size: expected.len(),
         }, 100).unwrap();
-        let corrupted = MapData::parse(&map_data_packet(1, crc, 0, b"DATA-hallo")).unwrap();
+        let corrupted_bytes = map_data_packet(1, crc, 0, b"DATA-hallo");
+        let corrupted = MapData::parse(&corrupted_bytes).unwrap();
         assert_eq!(downloader.ingest(corrupted), Err(MessageError::MapCrcMismatch));
-        let valid = MapData::parse(&map_data_packet(1, crc, 0, expected)).unwrap();
+        let valid_bytes = map_data_packet(1, crc, 0, expected);
+        let valid = MapData::parse(&valid_bytes).unwrap();
         assert!(downloader.ingest(valid).unwrap().complete);
     }
 
