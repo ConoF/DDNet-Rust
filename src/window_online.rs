@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 
 use crate::graphics::{Camera, Framebuffer};
+#[cfg(feature = "gpu")]
+use crate::gpu_renderer::{GpuRenderer, OVERLAY_KEY};
 use crate::datafile::Datafile;
 use crate::window_assets::{WindowAssets, candidate_roots};
 use crate::game_audio::{attack_sound_for_weapon, try_start, GameAudio};
@@ -124,6 +126,27 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     window.set_input_callback(Box::new(TextInputCollector(Rc::clone(&chars))));
     let mut pixels = Framebuffer::new(WIDTH as u32, HEIGHT as u32)
         .map_err(|e| format!("framebuffer: {e:?}"))?;
+    #[cfg(feature = "gpu")]
+    let mut gpu = if std::env::var("DDNET_RENDERER").as_deref() == Ok("software") {
+        None
+    } else {
+        match GpuRenderer::new(&window, WIDTH as u32, HEIGHT as u32) {
+            Ok(mut renderer) => {
+                renderer.sync_map(None);
+                Some(renderer)
+            }
+            Err(error) => {
+                eprintln!("GPU backend unavailable ({error}); using software renderer");
+                None
+            }
+        }
+    };
+    #[cfg(feature = "gpu")]
+    let mut gpu_tee = Framebuffer::new(WIDTH as u32, HEIGHT as u32)
+        .map_err(|e| format!("GPU tee framebuffer: {e:?}"))?;
+    #[cfg(feature = "gpu")]
+    let mut gpu_hud = Framebuffer::new(WIDTH as u32, HEIGHT as u32)
+        .map_err(|e| format!("GPU HUD framebuffer: {e:?}"))?;
     let mut camera = Camera { center: Vec2::default(), scale: 1.5 };
     let mut assets = WindowAssets::default();
     let mut audio = try_start(&candidate_roots(None));
@@ -300,6 +323,10 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                             .and_then(|bytes| Datafile::parse(bytes).ok())
                             .map(|file| WindowAssets::from_datafile(&file, None))
                             .unwrap_or_default();
+                        #[cfg(feature = "gpu")]
+                        if let Some(renderer) = gpu.as_mut() {
+                            renderer.sync_map(assets.visual_map.as_ref());
+                        }
                     }
                     _ => {}
                 }
@@ -336,6 +363,10 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             current_snapshot = None;
             previous_snapshot = None;
             assets = WindowAssets::default();
+            #[cfg(feature = "gpu")]
+            if let Some(renderer) = gpu.as_mut() {
+                renderer.sync_map(None);
+            }
             // Reset event deduplication with the snapshot chain. Audio device
             // stays active and reusable across reconnects.
             accumulator = Duration::ZERO;
@@ -453,16 +484,40 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             game_ms: game_tick * 20.0,
             local_ms: map_loaded_at.elapsed().as_secs_f64() * 1000.0,
         };
-        if let Some(map) = session.loaded_map.as_ref() {
-            assets.draw_background_at(&mut pixels, map, camera, animation_times)?;
-        } else {
-            pixels.clear(crate::graphics::BACKGROUND);
+        #[cfg(feature = "gpu")]
+        let using_gpu = gpu.is_some();
+        #[cfg(not(feature = "gpu"))]
+        let using_gpu = false;
+        if !using_gpu {
+            if let Some(map) = session.loaded_map.as_ref() {
+                assets.draw_background_at(&mut pixels, map, camera, animation_times)?;
+            } else {
+                pixels.clear(crate::graphics::BACKGROUND);
+            }
         }
+        #[cfg(feature = "gpu")]
+        if using_gpu {
+            gpu_tee.clear(OVERLAY_KEY);
+            if assets.visual_map.is_none() {
+                // Maps without supported visual art still show collision
+                // geometry while keeping the native GPU surface active.
+                if let Some(map) = session.loaded_map.as_ref() {
+                    gpu_tee.render_map(map, camera)
+                        .map_err(|e| format!("GPU map fallback: {e:?}"))?;
+                }
+            }
+        }
+        #[cfg(feature = "gpu")]
+        let tee_frame = if using_gpu { &mut gpu_tee } else { &mut pixels };
+        #[cfg(not(feature = "gpu"))]
+        let tee_frame = &mut pixels;
         if let Some(snapshot) = display.as_ref() {
-            assets.draw_snapshot(&mut pixels, snapshot, camera,
+            assets.draw_snapshot(tee_frame, snapshot, camera,
                 current_snapshot.unwrap_or(0).max(0) as u64)?;
         }
-        assets.draw_foreground_at(&mut pixels, camera, animation_times)?;
+        if !using_gpu {
+            assets.draw_foreground_at(&mut pixels, camera, animation_times)?;
+        }
         let local_weapon = display.as_ref().and_then(|snapshot|
             local_character_id(snapshot).and_then(|id|
                 snapshot.find(CHARACTER_TYPE, id)
@@ -473,13 +528,29 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         } else {
             None
         };
+        #[cfg(feature = "gpu")]
+        if using_gpu { gpu_hud.clear(OVERLAY_KEY); }
+        #[cfg(feature = "gpu")]
+        let ui_frame = if using_gpu { &mut gpu_hud } else { &mut pixels };
+        #[cfg(not(feature = "gpu"))]
+        let ui_frame = &mut pixels;
         if let Some(snapshot) = display.as_ref() {
-            hud.draw_nameplates(&mut pixels, snapshot, camera);
+            hud.draw_nameplates(ui_frame, snapshot, camera);
         }
-        hud.render(&mut pixels, &format!("{:?}", session.stage),
+        hud.render(ui_frame, &format!("{:?}", session.stage),
             local_weapon, current_snapshot, scoreboard);
+        #[cfg(feature = "gpu")]
+        if let Some(renderer) = gpu.as_mut() {
+            renderer.render(assets.visual_map.as_ref(), camera, animation_times,
+                &gpu_tee, &gpu_hud)?;
+            window.update();
+        } else {
+            window.update_with_buffer(&pixels.pixels, WIDTH, HEIGHT)
+                .map_err(|e| format!("software present: {e}"))?;
+        }
+        #[cfg(not(feature = "gpu"))]
         window.update_with_buffer(&pixels.pixels, WIDTH, HEIGHT)
-            .map_err(|e| format!("present: {e}"))?;
+            .map_err(|e| format!("software present: {e}"))?;
         frames_in_sample += 1;
         accumulated_frame_ms += render_started.elapsed().as_secs_f32() * 1000.0;
         let sample_seconds = last_title.elapsed().as_secs_f32();
