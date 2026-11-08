@@ -1,3 +1,4 @@
+use ddnet_rust::datafile::Datafile;
 use ddnet_rust::physics::{Character, Input, JumpEvent, Tuning};
 use ddnet_rust::protocol::{decode_int, write_int};
 
@@ -13,6 +14,7 @@ fn main() {
         [arg] if arg == "--version" => println!("DDNet-Rust 0.1.0 (upstream 20.2.1)"),
         [arg] if arg == "--self-test" => self_test(),
         [arg] if arg == "--codec-vectors" => codec_vectors(),
+        [arg, path] if arg == "--inspect-map" => inspect_map(path),
         _ => {
             eprintln!("Unknown arguments. Run ddnet-rust --help.");
             std::process::exit(2);
@@ -22,9 +24,10 @@ fn main() {
 
 fn print_help() {
     println!("DDNet-Rust (work in progress; not yet a playable client)");
-    println!("  --self-test       Run isolated physics/protocol smoke tests");
-    println!("  --codec-vectors   Emit integer vectors for C++ differential testing");
-    println!("  --version         Print project and upstream versions");
+    println!("  --self-test         Run isolated physics/protocol smoke tests");
+    println!("  --codec-vectors     Emit integer vectors for C++ differential testing");
+    println!("  --inspect-map PATH  Parse and validate a v3/v4 DDNet map's metadata");
+    println!("  --version           Print project and upstream versions");
 }
 
 fn self_test() {
@@ -54,4 +57,22 @@ fn codec_vectors() {
         }
         println!();
     }
+}
+
+fn inspect_map(path: &str) {
+    let bytes = std::fs::read(path).unwrap_or_else(|error| {
+        eprintln!("Unable to open {path}: {error}");
+        std::process::exit(1);
+    });
+    let map = Datafile::parse(&bytes).unwrap_or_else(|error| {
+        eprintln!("Invalid DDNet datafile {path}: {error:?}");
+        std::process::exit(1);
+    });
+    println!(
+        "{path}: DATA v{}, {} item types, {} items, {} raw blocks",
+        map.version,
+        map.item_types.len(),
+        map.items.len(),
+        map.raw_blocks.len()
+    );
 }
