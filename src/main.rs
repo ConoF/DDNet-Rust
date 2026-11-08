@@ -233,7 +233,10 @@ fn connect_headless(endpoint: &str) {
                         }
                         GameAction::SnapshotReceived { tick, packed_bytes } => {
                             println!("Snapshot received: tick {tick}, {packed_bytes} packed bytes.");
-                            println!("Rendering and full gameplay state decoding are still missing.");
+                        }
+                        GameAction::SnapshotDecoded { tick, item_count } => {
+                            println!("Snapshot decoded: tick {tick}, {item_count} objects.");
+                            println!("Rendering and complete gameplay are still not implemented.");
                             return;
                         }
                         GameAction::Disconnected(reason) => {
