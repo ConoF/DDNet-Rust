@@ -5,13 +5,13 @@
 //! ACCEPT handshake, optional 0.6 security tokens, vital 10-bit sequences,
 //! ACK validation, duplicate filtering and bounded resend requests.
 //!
-//! Missing: Huffman compression, 0.7 tokens, full resend timing, snapshot and
-//! game protocol. A successful handshake is NOT a playable client session.
+//! Missing: 0.7 tokens, a complete configurable timeout/reconnect policy and
+//! full playable-client integration. A successful handshake is NOT a session.
 
 use std::collections::VecDeque;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::network::{
     encode_packet_06, parse_chunks_06, parse_packet_06, ChunkHeader, NetworkError, Packet,
@@ -28,6 +28,10 @@ const CTRL_CONNECTACCEPT: u8 = 2;
 const CTRL_ACCEPT: u8 = 3;
 const CTRL_CLOSE: u8 = 4;
 const HALF_SEQUENCE_SPACE: usize = (MAX_SEQUENCE / 2) as usize;
+// DDNet 20.2.1 network_conn.cpp retransmits the oldest vital chunk after 1s.
+// Unlike the original configurable timeout, the prototype currently uses 15s.
+const VITAL_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const VITAL_ACK_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -54,6 +58,7 @@ pub enum TransportError {
     InvalidControl,
     OversizedMessage,
     TooManyOutstanding,
+    UnacknowledgedTimeout,
 }
 impl From<NetworkError> for TransportError {
     fn from(value: NetworkError) -> Self {
@@ -77,6 +82,8 @@ pub enum Event {
 struct Unacked {
     sequence: u16,
     payload: Vec<u8>,
+    first_sent: Instant,
+    last_sent: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -183,9 +190,12 @@ impl Client06 {
         let wire = self.chunk_packet(flags, sequence, payload)?;
         if vital {
             self.sequence = next;
+            let now = Instant::now();
             self.outstanding.push_back(Unacked {
                 sequence: next,
                 payload: payload.to_vec(),
+                first_sent: now,
+                last_sent: now,
             });
         }
         Ok(wire)
@@ -219,9 +229,9 @@ impl Client06 {
         )
     }
 
-    fn retransmit(&self) -> Result<Vec<Event>, TransportError> {
-        // CNetConnection queues retransmissions with RESEND but does not change
-        // the original vital sequence numbers. Callers must rate-limit calls.
+    fn retransmit(&mut self) -> Result<Vec<Event>, TransportError> {
+        // Peer explicitly requested resends. Do not change vital sequence IDs
+        // or enqueue a second copy of any unacknowledged chunk.
         let mut output = Vec::with_capacity(self.outstanding.len());
         for chunk in &self.outstanding {
             output.push(Event::Outgoing(self.chunk_packet(
@@ -230,7 +240,45 @@ impl Client06 {
                 &chunk.payload,
             )?));
         }
+        let now = Instant::now();
+        for chunk in &mut self.outstanding {
+            chunk.last_sent = now;
+        }
         Ok(output)
+    }
+
+    /// Drive retransmission when no peer RESEND request arrives. Call this
+    /// regularly from an online session's main loop. The oldest vital chunk
+    /// is retried at most once per second, matching DDNet's baseline timing.
+    ///
+    /// `now` is supplied by the caller so timeout tests are deterministic.
+    /// A bounded 15-second unacknowledged queue closes the prototype session.
+    pub fn poll_retransmission(
+        &mut self, now: Instant,
+    ) -> Result<Option<Vec<u8>>, TransportError> {
+        if self.state != State::Online {
+            return Err(TransportError::InvalidState);
+        }
+        let Some(oldest) = self.outstanding.front() else {
+            return Ok(None);
+        };
+        if now.saturating_duration_since(oldest.first_sent) >= VITAL_ACK_TIMEOUT {
+            self.state = State::Closed;
+            self.outstanding.clear();
+            return Err(TransportError::UnacknowledgedTimeout);
+        }
+        if now.saturating_duration_since(oldest.last_sent) < VITAL_RETRY_INTERVAL {
+            return Ok(None);
+        }
+        let packet = self.chunk_packet(
+            CHUNK_VITAL | CHUNK_RESEND,
+            Some(oldest.sequence),
+            &oldest.payload,
+        )?;
+        if let Some(chunk) = self.outstanding.front_mut() {
+            chunk.last_sent = now;
+        }
+        Ok(Some(packet))
     }
 
     fn valid_ack(&self, ack: u16) -> bool {
@@ -520,6 +568,87 @@ mod tests {
             }
             _ => panic!("unexpected connectionless response"),
         }
+    }
+
+    #[test]
+    fn clock_driven_retransmission_recovers_when_no_resend_request_arrives() {
+        let token = 0x0102_0304u32;
+        let mut client = connected(Some(token));
+        let first = client.send_message(b"lost vital", true).unwrap();
+        assert_eq!(client.outstanding_count(), 1);
+        let initial = client.outstanding.front().unwrap().last_sent;
+        assert_eq!(
+            client.poll_retransmission(initial + Duration::from_millis(999)),
+            Ok(None),
+        );
+        let resent_at = initial + Duration::from_secs(1);
+        let retry = client.poll_retransmission(resent_at).unwrap().unwrap();
+        assert_ne!(retry, first); // RETRANSMISSION has CHUNK_RESEND.
+        let Packet::Connected { header, payload } = parse_packet_06(&retry).unwrap() else {
+            panic!("expected connected packet");
+        };
+        assert_eq!(header.ack, 0);
+        let chunks = parse_chunks_06(&payload[..payload.len() - 4], 1).unwrap();
+        assert_eq!(chunks[0].header.flags, CHUNK_VITAL | CHUNK_RESEND);
+        assert_eq!(chunks[0].header.sequence, Some(1));
+        assert_eq!(chunks[0].payload, b"lost vital");
+        assert_eq!(client.outstanding_count(), 1); // never double-queue
+        assert_eq!(
+            client.poll_retransmission(resent_at + Duration::from_millis(800)),
+            Ok(None),
+        );
+
+        // ACK arrives after retransmission, so no further sends are due.
+        let ack = packet(FLAG_CONTROL, 1, 0, &[CTRL_KEEPALIVE, 1, 2, 3, 4]);
+        assert_eq!(client.receive(&ack), Ok(Vec::new()));
+        assert_eq!(client.outstanding_count(), 0);
+        assert_eq!(
+            client.poll_retransmission(resent_at + Duration::from_secs(2)),
+            Ok(None),
+        );
+    }
+
+    #[test]
+    fn clock_driven_ack_timeout_closes_unrecoverable_connection() {
+        let mut client = connected(Some(0x0102_0304));
+        assert_eq!(client.poll_retransmission(Instant::now()), Ok(None));
+        client.send_message(b"never acknowledged", true).unwrap();
+        let oldest = client.outstanding.front().unwrap().first_sent;
+        assert_eq!(
+            client.poll_retransmission(oldest + VITAL_ACK_TIMEOUT),
+            Err(TransportError::UnacknowledgedTimeout),
+        );
+        assert_eq!(client.state, State::Closed);
+        assert_eq!(client.outstanding_count(), 0);
+        assert_eq!(
+            client.poll_retransmission(oldest + VITAL_ACK_TIMEOUT + Duration::from_secs(1)),
+            Err(TransportError::InvalidState),
+        );
+    }
+
+    #[test]
+    fn timer_retries_oldest_only_across_sequence_wraparound() {
+        let mut client = connected(None);
+        client.sequence = MAX_SEQUENCE - 2;
+        client.peer_ack = MAX_SEQUENCE - 2;
+        client.send_message(b"first", true).unwrap();
+        client.send_message(b"second", true).unwrap();
+        assert_eq!(client.sequence, 0);
+        let first_at = client.outstanding.front().unwrap().first_sent;
+        let retry = client.poll_retransmission(
+            first_at + VITAL_RETRY_INTERVAL,
+        ).unwrap().unwrap();
+        let Packet::Connected { payload, .. } = parse_packet_06(&retry).unwrap() else {
+            panic!("expected connected retry");
+        };
+        let chunk = parse_chunks_06(payload, 1).unwrap();
+        assert_eq!(chunk[0].header.sequence, Some(MAX_SEQUENCE - 1));
+        assert_eq!(chunk[0].payload, b"first");
+
+        // Wrapped ACK 0 confirms both original vital packets.
+        let keepalive = packet(FLAG_CONTROL, 0, 0, &[CTRL_KEEPALIVE]);
+        client.receive(&keepalive).unwrap();
+        assert_eq!(client.outstanding_count(), 0);
     }
 
     #[test]

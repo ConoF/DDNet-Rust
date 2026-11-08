@@ -135,6 +135,15 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             socket.send(&hello).map_err(|e| format!("resend CONNECT: {e}"))?;
             last_hello = Instant::now();
         }
+        if session.transport.state == State::Online {
+            match session.transport.poll_retransmission(Instant::now()) {
+                Ok(Some(retry)) => {
+                    socket.send(&retry).map_err(|e| format!("resend vital chunk: {e}"))?;
+                }
+                Ok(None) => {}
+                Err(e) => return Err(format!("reliable transport stopped: {e:?}")),
+            }
+        }
         if session.transport.state == State::Online &&
             last_keepalive.elapsed() >= Duration::from_secs(1)
         {

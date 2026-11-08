@@ -92,3 +92,14 @@ The Rust-only PCM engine ports the core stereo mix, master/channel volume, mono/
 ## Network snapshot display interpolation
 
 The experimental online window now blends character/hook coordinates between consecutive decoded 0.6 snapshots. Large position changes (over 256 world pixels), missing objects and hook transitions snap immediately. This does **not** modify server snapshots, prediction or input acknowledgements. The smoothing is diagnostic and is not yet a verified port of DDNet's full interpolation/prediction implementation.
+
+## Reliable transport maintenance (audit step 2)
+
+The native 0.6 transport now retries its **oldest** unacknowledged vital
+chunk after one second even without an explicit peer RESEND request. A
+15-second unacknowledged limit closes this prototype connection; upstream
+DDNet has a **configurable** connection timeout instead. The online window
+and headless CLI poll this retransmission timer. ACKed chunks are removed
+from the queue without duplicate inserts; sequence wraparound is covered
+by deterministic simulated-clock tests. Full reconnection, ACK recovery
+and packet timing parity with upstream are not yet complete.

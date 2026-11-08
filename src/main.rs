@@ -285,6 +285,21 @@ fn connect_headless(endpoint: &str, screenshot: Option<&str>) {
             let _ = socket.send(&hello);
             last_connect = Instant::now();
         }
+        if session.transport.state == ddnet_rust::transport::State::Online {
+            match session.transport.poll_retransmission(Instant::now()) {
+                Ok(Some(retry)) => {
+                    if let Err(error) = socket.send(&retry) {
+                        eprintln!("Vital resend failed: {error}");
+                        std::process::exit(1);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Reliable transport stopped: {error:?}");
+                    std::process::exit(1);
+                }
+            }
+        }
         if session.transport.state == ddnet_rust::transport::State::Online
             && last_keepalive.elapsed() >= Duration::from_secs(1)
         {
