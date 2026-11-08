@@ -13,6 +13,7 @@ pub mod network;
 pub mod reliable;
 pub mod transport;
 pub mod game_protocol;
+pub mod gameplay;
 pub mod input;
 pub mod session;
 pub mod snapshot;

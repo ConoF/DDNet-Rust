@@ -14,6 +14,10 @@ use crate::game_protocol::{
     NETMSG_SNAP, NETMSG_SNAPEMPTY, NETMSG_SNAPSINGLE,
 };
 use crate::map::{GameMap, MapError};
+use crate::gameplay::{
+    client_kill, client_say, client_set_team, decode_server_message,
+    ServerGameplayMessage,
+};
 use crate::transport::{Client06, Event, TransportError};
 use crate::snapshot::{SnapshotAssembler, SnapshotError, SnapshotPacket};
 use crate::snapshot_delta::{DeltaDecoder, SnapshotState};
@@ -47,6 +51,9 @@ pub enum GameAction {
     /// complete snapshot. The next NETMSG_INPUT carries ACK=-1.
     SnapshotRecoveryRequested { tick: i32, reason: SnapshotRecoveryReason },
     InputTiming { tick: i32, time_left_ms: i32 },
+    ChatReceived { team: i32, client_id: i32, text: String },
+    ServerBroadcast(String),
+    ServerMotd(String),
     Disconnected(String),
 }
 
@@ -212,11 +219,23 @@ impl GameSession06 {
             actions.push(GameAction::EnterGameSent);
             return Ok(());
         }
-        let MessageId::Regular { system: true, number } = message.id else {
-            // Vanilla game messages and UUID-based extensions will be
-            // handled by the future snapshot/game-protocol subsystem.
+        let MessageId::Regular { system, number } = message.id else {
+            // Unknown UUID extension: leave protocol extensions to their
+            // independent handlers instead of failing the game session.
             return Ok(());
         };
+        if !system {
+            match decode_server_message(number, message.payload)? {
+                Some(ServerGameplayMessage::Chat { team, client_id, text }) =>
+                    actions.push(GameAction::ChatReceived { team, client_id, text }),
+                Some(ServerGameplayMessage::Broadcast(text)) =>
+                    actions.push(GameAction::ServerBroadcast(text)),
+                Some(ServerGameplayMessage::Motd(text)) =>
+                    actions.push(GameAction::ServerMotd(text)),
+                None => {}
+            }
+            return Ok(());
+        }
         match number {
             NETMSG_MAP_CHANGE => {
                 if self.stage != Stage::WaitingMap && self.stage != Stage::Downloading {
@@ -411,6 +430,30 @@ impl GameSession06 {
             self.pending_input_ticks.pop_front();
         }
         Ok(bytes)
+    }
+
+    /// Send a vital 0.6 chat message (team=false for public chat).
+    pub fn send_chat(&mut self, team: bool, text: &str) -> Result<Vec<u8>, SessionError> {
+        if self.stage != Stage::EnterGameSent {
+            return Err(SessionError::UnexpectedStage);
+        }
+        Ok(self.transport.send_message(&client_say(team, text)?, true)?)
+    }
+
+    /// -1=spectators, 0=red/regular team, 1=blue (if server permits).
+    pub fn set_team(&mut self, team: i32) -> Result<Vec<u8>, SessionError> {
+        if self.stage != Stage::EnterGameSent {
+            return Err(SessionError::UnexpectedStage);
+        }
+        Ok(self.transport.send_message(&client_set_team(team)?, true)?)
+    }
+
+    /// Request a normal vanilla kill/respawn (server controls cooldown).
+    pub fn request_kill(&mut self) -> Result<Vec<u8>, SessionError> {
+        if self.stage != Stage::EnterGameSent {
+            return Err(SessionError::UnexpectedStage);
+        }
+        Ok(self.transport.send_message(&client_kill(), true)?)
     }
 
     pub fn snapshot_state(&self, tick: i32) -> Option<&SnapshotState> {
@@ -860,6 +903,50 @@ mod tests {
         session.try_decode_snapshot(&snapshot(107, -1, 300, 300), &mut actions);
         assert_eq!(session.snapshot_ack_tick(), 107);
         assert!(!session.is_snapshot_recovering());
+    }
+
+    #[test]
+    fn game_chat_and_team_commands_use_vital_udp_chunks() {
+        let mut client = GameSession06::new(String::new(), 1024, 1024);
+        assert_eq!(client.send_chat(false, "hello"), Err(SessionError::UnexpectedStage));
+        assert_eq!(client.request_kill(), Err(SessionError::UnexpectedStage));
+        feed_handshake(&mut client);
+        client.stage = Stage::EnterGameSent;
+        for packet in [
+            client.send_chat(true, "привет").unwrap(),
+            client.set_team(-1).unwrap(),
+            client.request_kill().unwrap(),
+        ] {
+            let crate::network::Packet::Connected { header, payload } =
+                crate::network::parse_packet_06(&packet).unwrap()
+            else { panic!("not connected packet"); };
+            assert_eq!(header.num_chunks, 1);
+            let chunks = crate::network::parse_chunks_06(
+                &payload[..payload.len() - 4], 1,
+            ).unwrap();
+            assert_eq!(chunks[0].header.flags & CHUNK_VITAL, CHUNK_VITAL);
+            assert!(!chunks[0].payload.is_empty());
+        }
+        assert!(client.transport.outstanding_count() >= 4);
+    }
+
+    #[test]
+    fn server_chat_broadcast_and_motd_are_dispatched_to_game() {
+        let mut session = GameSession06::new(String::new(), 1024, 1024);
+        feed_handshake(&mut session);
+        session.stage = Stage::EnterGameSent;
+        let mut chat = Vec::new();
+        write_int(0, &mut chat);
+        write_int(3, &mut chat);
+        write_string("Hi player", &mut chat).unwrap();
+        let events = session.receive(&server_game_message(3, &chat, 1, 1)).unwrap();
+        assert!(events.contains(&GameAction::ChatReceived {
+            team: 0, client_id: 3, text: "Hi player".into(),
+        }));
+        let events = session.receive(&server_game_message(2, b"New record!\0", 2, 1)).unwrap();
+        assert!(events.contains(&GameAction::ServerBroadcast("New record!".into())));
+        let events = session.receive(&server_game_message(1, b"Welcome\0", 3, 1)).unwrap();
+        assert!(events.contains(&GameAction::ServerMotd("Welcome".into())));
     }
 
     #[test]
