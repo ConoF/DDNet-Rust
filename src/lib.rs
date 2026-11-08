@@ -32,6 +32,7 @@ pub mod texture;
 pub mod map_visual;
 pub mod quad_render;
 pub mod envelope;
+pub mod frame_stats;
 pub mod gpu_scene;
 pub mod gpu_tees;
 #[cfg(feature = "gpu")]
