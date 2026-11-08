@@ -5,10 +5,11 @@
 use std::path::Path;
 
 use crate::datafile::{Datafile, DatafileError};
+use crate::envelope::{EnvelopeSet, EnvelopeTimes};
 use crate::graphics::{Camera, Framebuffer, RenderError, BACKGROUND};
 use crate::map::Tile;
 use crate::quad_render::{
-    decode_quads, draw_quads, QuadLayer, QUAD_BYTES, MAX_QUADS_PER_LAYER, MAX_TOTAL_QUADS,
+    decode_quads, QuadLayer, QUAD_BYTES, MAX_QUADS_PER_LAYER, MAX_TOTAL_QUADS,
 };
 use crate::texture::{Texture, TextureError};
 
@@ -66,6 +67,8 @@ pub struct TexturedLayer {
     pub tint: [u8; 4],
     pub transform: GroupTransform,
     pub tiles: Vec<Tile>,
+    pub color_env: i32,
+    pub color_env_offset: i32,
     /// Layers after the game layer render in front of players, like upstream.
     pub foreground: bool,
     /// Original map-layer index; used for exact tile/quad interleaving.
@@ -77,6 +80,7 @@ pub struct VisualMap {
     pub images: Vec<Texture>,
     pub layers: Vec<TexturedLayer>,
     pub quad_layers: Vec<QuadLayer>,
+    pub envelopes: EnvelopeSet,
 }
 
 fn field(payload: &[u8], at: usize) -> Result<i32, VisualError> {
@@ -187,6 +191,7 @@ impl VisualMap {
             .filter(|item| item.type_id == MAP_LAYER).collect();
         if layer_items.len() > MAX_LAYERS { return Err(VisualError::TooLarge); }
         let groups = collect_groups(file, layer_items.len())?;
+        let envelopes = EnvelopeSet::from_datafile(file)?;
         let mut layers = Vec::new();
         let mut quad_layers = Vec::new();
         let mut total = 0usize;
@@ -263,38 +268,57 @@ impl VisualMap {
             layers.push(TexturedLayer {
                 width, height, image: image_index,
                 tint, transform: groups[ordinal], tiles,
+                color_env: field(item.payload, 44)?,
+                color_env_offset: field(item.payload, 48)?,
                 foreground: game_layer_index.is_some_and(|game_index| ordinal > game_index),
                 order: ordinal,
             });
         }
-        Ok(Self { images, layers, quad_layers })
+        Ok(Self { images, layers, quad_layers, envelopes })
     }
 
-    /// Keep the legacy one-call map rendering API for previews and tests.
-    /// Interactive game windows use two passes so foreground tiles cover tees.
+    /// Static frame for CLI previews. Live clients provide explicit clocks.
     pub fn render(
         &self, frame: &mut Framebuffer, camera: Camera,
     ) -> Result<usize, VisualError> {
-        let background_count = self.render_background(frame, camera)?;
-        let foreground_count = self.render_foreground(frame, camera)?;
-        Ok(background_count + foreground_count)
+        self.render_at(frame, camera, EnvelopeTimes::default())
+    }
+
+    pub fn render_at(
+        &self, frame: &mut Framebuffer, camera: Camera, times: EnvelopeTimes,
+    ) -> Result<usize, VisualError> {
+        let bg = self.render_background_at(frame, camera, times)?;
+        let fg = self.render_foreground_at(frame, camera, times)?;
+        Ok(bg + fg)
     }
 
     pub fn render_background(
         &self, frame: &mut Framebuffer, camera: Camera,
     ) -> Result<usize, VisualError> {
-        self.render_pass(frame, camera, false, true)
+        self.render_background_at(frame, camera, EnvelopeTimes::default())
+    }
+
+    pub fn render_background_at(
+        &self, frame: &mut Framebuffer, camera: Camera, times: EnvelopeTimes,
+    ) -> Result<usize, VisualError> {
+        self.render_pass(frame, camera, false, true, times)
     }
 
     pub fn render_foreground(
         &self, frame: &mut Framebuffer, camera: Camera,
     ) -> Result<usize, VisualError> {
-        self.render_pass(frame, camera, true, false)
+        self.render_foreground_at(frame, camera, EnvelopeTimes::default())
+    }
+
+    pub fn render_foreground_at(
+        &self, frame: &mut Framebuffer, camera: Camera, times: EnvelopeTimes,
+    ) -> Result<usize, VisualError> {
+        self.render_pass(frame, camera, true, false, times)
     }
 
     fn render_pass(
         &self, frame: &mut Framebuffer, camera: Camera,
-        foreground: bool, clear: bool,
+        foreground: bool, clear: bool, times: EnvelopeTimes,
     ) -> Result<usize, VisualError> {
         if !(0.05..=16.0).contains(&camera.scale) || !camera.scale.is_finite()
             || !camera.center.x.is_finite() || !camera.center.y.is_finite()
@@ -315,13 +339,15 @@ impl VisualMap {
                 let layer = &self.layers[tile_index];
                 tile_index += 1;
                 if layer.foreground == foreground {
-                    drawn += self.render_tile_layer(frame, camera, layer)?;
+                    drawn += self.render_tile_layer(frame, camera, layer, times)?;
                 }
             } else {
                 let layer = &self.quad_layers[quad_index];
                 quad_index += 1;
                 if layer.foreground == foreground {
-                    drawn += draw_quads(layer, &self.images, frame, camera)?;
+                    drawn += crate::quad_render::draw_quads_at(
+                        layer, &self.images, frame, camera, &self.envelopes, times,
+                    )?;
                 }
             }
         }
@@ -329,10 +355,17 @@ impl VisualMap {
     }
 
     fn render_tile_layer(
-        &self, frame: &mut Framebuffer, camera: Camera, layer: &TexturedLayer,
+        &self, frame: &mut Framebuffer, camera: Camera,
+        layer: &TexturedLayer, times: EnvelopeTimes,
     ) -> Result<usize, VisualError> {
         let mut drawn = 0usize;
         let texture = self.images.get(layer.image).ok_or(VisualError::MissingImage)?;
+        let color = self.envelopes.evaluate(
+            layer.color_env, layer.color_env_offset, times, [1.0; 4],
+        );
+        let tint: [u8; 4] = std::array::from_fn(|i| {
+            (f32::from(layer.tint[i]) * color[i]).clamp(0.0, 255.0) as u8
+        });
 
             let cell_w = texture.width as usize / 16;
             let cell_h = texture.height as usize / 16;
@@ -365,7 +398,7 @@ impl VisualMap {
                     let end_y = (((y + 1) as f32 * 32.0 - cy) * camera.scale
                         + frame.height as f32 * 0.5).round() as i64;
                     if end_x <= start_x || end_y <= start_y { continue; }
-                    blit_tile(frame, texture, tile, layer.tint,
+                    blit_tile(frame, texture, tile, tint,
                         (start_x, start_y, end_x, end_y), (cell_w, cell_h));
                     drawn += 1;
                 }
@@ -590,10 +623,12 @@ mod tests {
             tint: if foreground { [0, 0, 255, 255] } else { [255, 0, 0, 255] },
             transform: GroupTransform::default(),
             tiles: vec![Tile { index: 1, flags: 0, skip: 0, reserved: 0 }],
+            color_env: -1, color_env_offset: 0,
             foreground, order: usize::from(foreground),
         };
         let map = VisualMap {
-            images: vec![image], layers: vec![layer(false), layer(true)], quad_layers: vec![],
+            images: vec![image], layers: vec![layer(false), layer(true)],
+            quad_layers: vec![], envelopes: EnvelopeSet::default(),
         };
         let camera = Camera { center: Vec2::new(16.0,16.0), scale: 1.0 };
         let mut frame = Framebuffer::new(32, 32).unwrap();
@@ -672,7 +707,10 @@ mod tests {
 
     #[test]
     fn invalid_camera_is_detected_before_render() {
-        let map = VisualMap { images: vec![], layers: vec![], quad_layers: vec![] };
+        let map = VisualMap {
+            images: vec![], layers: vec![], quad_layers: vec![],
+            envelopes: EnvelopeSet::default(),
+        };
         let mut frame = Framebuffer::new(16, 16).unwrap();
         assert_eq!(map.render(&mut frame, Camera {
             center: Vec2::default(), scale: f32::NAN,
