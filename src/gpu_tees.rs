@@ -37,8 +37,9 @@ struct TeeBuilder {
 impl TeeBuilder {
     fn push(
         &mut self, atlas: usize, uv: [[f32; 2]; 4], center: (f32, f32),
-        size: (f32, f32), angle: f32, flip_y: bool, color: [u8; 4],
+        size: (f32, f32), orientation: (f32, bool), color: [u8; 4],
     ) {
+        let (angle, flip_y) = orientation;
         if !center.0.is_finite() || !center.1.is_finite()
             || !size.0.is_finite() || !size.1.is_finite() || !angle.is_finite()
             || size.0 <= 0.0 || size.1 <= 0.0
@@ -93,7 +94,7 @@ impl TeeBuilder {
 
     fn sprite(
         &mut self, atlas: usize, grid: (usize, usize), region: Sprite,
-        center: (f32, f32), size: (f32, f32), angle: f32, flip_y: bool,
+        center: (f32, f32), size: (f32, f32), orientation: (f32, bool),
     ) {
         if region.w == 0 || region.h == 0
             || region.x.checked_add(region.w).is_none_or(|v| v > grid.0)
@@ -106,7 +107,7 @@ impl TeeBuilder {
         let v0 = region.y as f32 / grid.1 as f32;
         let v1 = (region.y + region.h) as f32 / grid.1 as f32;
         self.push(atlas, [[u0,v0],[u1,v0],[u0,v1],[u1,v1]],
-            center, size, angle, flip_y, [255; 4]);
+            center, size, orientation, [255; 4]);
     }
 
     fn line(&mut self, start: (f32,f32), end: (f32,f32), color: u32) {
@@ -117,7 +118,7 @@ impl TeeBuilder {
         self.push(self.slots.white, [[0.0,0.0],[1.0,0.0],
             [0.0,1.0],[1.0,1.0]],
             ((start.0 + end.0)*0.5, (start.1 + end.1)*0.5),
-            (length, 1.0), dy.atan2(dx), false, [
+            (length, 1.0), (dy.atan2(dx), false), [
                 ((color>>16)&255) as u8,
                 ((color>>8)&255) as u8,
                 (color&255) as u8,
@@ -156,10 +157,10 @@ impl TeeBuilder {
             let center = self.screen(camera, x, y);
             self.sprite(self.slots.game, GRID_GAME, HOOK_CHAIN, center,
                 (13.0 * camera.scale, 16.0 * camera.scale),
-                angle + std::f32::consts::FRAC_PI_2, false);
+                (angle + std::f32::consts::FRAC_PI_2, false));
         }
         self.sprite(self.slots.game, GRID_GAME, HOOK_HEAD, tip,
-            (24.0 * camera.scale, 12.0 * camera.scale), angle, false);
+            (24.0 * camera.scale, 12.0 * camera.scale), (angle, false));
     }
 
     fn tee(
@@ -186,17 +187,17 @@ impl TeeBuilder {
         ] {
             let foot = (center.0 + offset_x * scale, center.1 + offset_y * scale);
             self.sprite(self.slots.skin, GRID_SKIN, FOOT, foot,
-                (15.0 * scale, 12.0 * scale), 0.0, false);
+                (15.0 * scale, 12.0 * scale), (0.0, false));
         }
         self.sprite(self.slots.skin, GRID_SKIN, BODY, center,
-            (34.0 * scale, 32.0 * scale), 0.0, false);
+            (34.0 * scale, 32.0 * scale), (0.0, false));
         let emote = words.get(20).copied().unwrap_or(0);
         let facing = if character.direction < 0 { -1.0 } else { 1.0 };
         let blink = emote == 5 || tick % 201 < 3;
         self.sprite(self.slots.skin, GRID_SKIN, skin_eye(emote),
             (center.0 + facing * 6.0 * scale, center.1 - 3.0 * scale),
             (13.0 * scale, if blink { 3.0 * scale } else { 11.0 * scale }),
-            0.0, facing < 0.0);
+            (0.0, facing < 0.0));
         if !game { return; }
         let weapon = words.get(19).copied().unwrap_or(-1);
         let Some(sprite) = weapon_sprite(weapon) else { return; };
@@ -218,7 +219,7 @@ impl TeeBuilder {
             else if weapon == 1 { (30.0,17.0) }
             else { (38.0,19.0) };
         self.sprite(self.slots.game, GRID_GAME, sprite, weapon_center,
-            (w*scale,h*scale), angle, mirrored);
+            (w*scale,h*scale), (angle, mirrored));
         if attack > 0 && (0..=2).contains(&age) {
             if let Some(muzzle) = muzzle_sprite(weapon) {
                 let at = (
@@ -226,7 +227,7 @@ impl TeeBuilder {
                     weapon_center.1 + aim_y * w * 0.56 * scale,
                 );
                 self.sprite(self.slots.game, GRID_GAME, muzzle, at,
-                    (22.0*scale,14.0*scale), angle, mirrored);
+                    (22.0*scale,14.0*scale), (angle, mirrored));
             }
         }
     }
@@ -341,7 +342,7 @@ mod tests {
         let skin=tex(80,40);let game=tex(320,160);
         for weapon in 0..=5 {
             let mut state=snap(weapon,false);
-            state.items[0].words[6]=-1;
+            state.items[0].words[6] = -1;
             state.items[0].words[5]=(std::f32::consts::PI*256.0) as i32;
             let scene=build_gpu_tees(&state,camera(),99,(200,200),
                 Some(&skin),Some(&game),slots()).unwrap();
