@@ -602,7 +602,7 @@ mod tests {
                 Item { type_id: 6, id: 0, payload: &points },
             ],
             raw_blocks: vec![
-                RawBlock { encoded: b"synthetic\\0", uncompressed_size: None },
+                RawBlock { encoded: b"synthetic\0", uncompressed_size: None },
                 RawBlock { encoded: &atlas, uncompressed_size: None },
                 RawBlock { encoded: &tiles, uncompressed_size: None },
             ],
