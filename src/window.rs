@@ -270,6 +270,9 @@ fn play_offline_impl(
                     skin: assets.default_skin.as_ref(),
                     game: assets.game_sprites.as_ref(),
                 }, &gpu_tee, &gpu_hud)?;
+            if gpu_smoke && renderer.last_native_tee_vertices() == 0 {
+                return Err("GPU smoke presented a frame without native tee sprites".into());
+            }
             window.update();
         } else {
             window.update_with_buffer(&pixels.pixels, SCREEN_W, SCREEN_H)

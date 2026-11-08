@@ -47,6 +47,7 @@ pub struct GpuRenderer {
     images: Vec<ImageBind>,
     map_image_count: usize,
     skin_ready: bool,
+    last_sprite_vertices: usize,
     overlay_tee: ImageBind,
     overlay_hud: ImageBind,
     vertices: wgpu::Buffer,
@@ -203,6 +204,7 @@ impl GpuRenderer {
         Ok(Self {
             surface, device, queue, config, pipeline, layout, sampler,
             images: Vec::new(), map_image_count: 0, skin_ready: false,
+            last_sprite_vertices: 0,
             overlay_tee, overlay_hud,
             vertices, capacity: INITIAL_VERTICES, overlay_vertices,
         })
@@ -295,6 +297,12 @@ impl GpuRenderer {
         self.skin_ready
     }
 
+    /// Non-zero only if the most recent GPU frame actually submitted sprite
+    /// geometry. Used by the real-map smoke test, not an estimated FPS metric.
+    pub fn last_native_tee_vertices(&self) -> usize {
+        self.last_sprite_vertices
+    }
+
     fn upload_overlay(queue: &wgpu::Queue, image: &wgpu::Texture, frame: &Framebuffer) {
         let data = rgba_overlay(frame);
         queue.write_texture(
@@ -359,6 +367,7 @@ impl GpuRenderer {
         } else {
             GpuTeeScene::default()
         };
+        self.last_sprite_vertices = sprite.vertices.len();
         let tee_base = u32::try_from(scene.vertices.len())
             .map_err(|_| String::from("GPU tee vertex offset overflow"))?;
         for batch in &mut sprite.batches {

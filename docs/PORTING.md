@@ -594,3 +594,22 @@ GPU-presented frames from original DDNet `ctf1.map`.
 **Not complete:** original DDNet's GPU tee/weapon/hook rendering,
 proper Unicode glyph atlases, GPU tile caching/instancing and
 synchronized UI; measure p50/p95 frame times on real CachyOS hardware.
+
+
+## GPU sprite batches for DDNet tees and hooks
+
+The native wgpu frame now draws hooks, skin feet/body/eyes, weapon and
+muzzle sprites as textured GPU triangles, **between** the background and
+foreground DDNet map passes. It shares sprite-atlas regions with the
+previous CPU renderer and uses the same deterministic foot-motion,
+eye-expression and recoil approximation. On map changes, the default
+skin and game.png are uploaded to GPU textures once alongside mapres
+atlases. The intermediate full-screen CPU tee overlay is skipped when
+the map has visual layers and a valid skin is present.
+
+The old CPU silhouette renderer remains a fallback for missing assets,
+missing visual layers, or `DDNET_RENDERER=software`. HUD and text still
+use the CPU bitmap overlay, and custom per-player skin, original DDNet
+animation-state fidelity, Vulkan-vs-original pixel-diff comparisons and
+real-hardware p50/p95 frame benchmarks remain outstanding. The GPU
+smoke test now rejects frames that don't produce native tee vertices.

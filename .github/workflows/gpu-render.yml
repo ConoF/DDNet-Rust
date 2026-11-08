@@ -7,6 +7,8 @@ on:
       - Cargo.lock
       - src/gpu_renderer.rs
       - src/gpu_scene.rs
+      - src/gpu_tees.rs
+      - src/sprite_render.rs
       - src/gpu_shader.wgsl
       - src/main.rs
       - src/window_online.rs
