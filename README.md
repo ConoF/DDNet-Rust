@@ -89,3 +89,18 @@ preview archive. The server browser also offers 0.6 server selection.
 Chat is sent as UTF-8, but the current bitmap HUD displays non-Latin
 glyphs as fallback characters. Live gameplay remains experimental and does
 not yet provide parity with original DDNet physics and server extensions.
+
+
+### Optional GPU map renderer
+
+`cargo run --release --features gpu -- --play-online HOST:PORT` enables
+native wgpu GPU map drawing (Vulkan/DX12/Metal/GLES depending on OS).
+The prebuilt CachyOS archive includes this feature. Map tile/quad
+geometry is batched, culled against the camera and drawn from VRAM-resident
+atlas textures. This is **GPU presentation to the real window**, not a
+GPU-to-CPU PNG preview. CPU tee sprites and UI are uploaded as RGBA
+overlays until their own GPU paths are ported.
+
+If no GPU adapter is available, the client falls back to CPU rendering.
+Force CPU for A/B comparison using `DDNET_RENDERER=software`.
+No measured FPS improvement is claimed without a same-machine benchmark.

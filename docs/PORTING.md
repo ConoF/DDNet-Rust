@@ -572,3 +572,25 @@ background/tee/foreground ordering.
 Limitations: UUID-based DDNet Bezier control points are still not decoded,
 render-time synchronization is approximate, and CPU rasterization is
 not a replacement for GPU batching. Static screenshot APIs use time zero.
+
+
+## Stage: batched native GPU map backend
+
+A separate `gpu` feature adds wgpu 0.20 and direct rendering to the
+existing minifb window surface on Linux/Windows. Each frame, the Rust
+map builder emits viewport-culled triangles for visible tile atlases and
+animated quads in original layer order. Matching image bindings are
+batched, and source RGBA atlases remain on the GPU until map changes.
+
+The renderer composites background GPU batches, then a provisional
+CPU-drawn tee overlay, then foreground GPU batches, and finally a
+CPU-drawn chat/HUD overlay. Legacy overlays are submitted as RGBA
+textures with a chroma-key transparency fallback. This transitional
+blend is not pixel-perfect at anti-aliased edges. GPU failed startup
+falls back to the CPU renderer; the old smoke-screenshot path remains
+unchanged. A separate Xvfb smoke test attempts thirty actual
+GPU-presented frames from original DDNet `ctf1.map`.
+
+**Not complete:** original DDNet's GPU tee/weapon/hook rendering,
+proper Unicode glyph atlases, GPU tile caching/instancing and
+synchronized UI; measure p50/p95 frame times on real CachyOS hardware.

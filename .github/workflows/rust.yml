@@ -147,7 +147,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --all-targets --locked --features window
-      - run: cargo clippy --all-targets --locked --features window -- -D warnings
-      - run: cargo build --release --locked --features window
+      - run: cargo test --all-targets --locked --features gpu
+      - run: cargo clippy --all-targets --locked --features gpu -- -D warnings
+      - run: cargo build --release --locked --features gpu
       - run: cargo run -- --self-test

@@ -23,13 +23,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libx11-dev libxext-dev \
-            libxrandr-dev libxinerama-dev libxcursor-dev pkg-config xvfb xauth
+            libxrandr-dev libxinerama-dev libxcursor-dev pkg-config xvfb xauth libvulkan1 mesa-vulkan-drivers
       - name: Compile native release
-        run: cargo build --release --locked --features window
+        run: cargo build --release --locked --features gpu
       - name: Verify compiler and unit tests
         run: |
-          cargo test --locked --all-targets --features window
-          cargo clippy --locked --all-targets --features window -- -D warnings
+          cargo test --locked --all-targets --features gpu
+          cargo clippy --locked --all-targets --features gpu -- -D warnings
       - name: Package runnable folder and upstream game assets
         shell: bash
         run: |
@@ -67,6 +67,8 @@ jobs:
           "$bundle/run.sh" --self-test
           xvfb-run -a "$bundle/ddnet-rust" --play-offline-smoke \
             "$bundle/data/maps/ctf1.map" "$PWD/target/bundle-offline.png"
+          xvfb-run -a "$bundle/run.sh" --gpu-offline-smoke \
+            "$bundle/data/maps/ctf1.map"
           xvfb-run -a "$bundle/ddnet-rust" --browse-servers-smoke \
             "$PWD/tests/fixtures/master.json" "$PWD/target/bundle-browser.png"
           xvfb-run -a "$bundle/run.sh" --play-demo-smoke \

@@ -48,3 +48,21 @@ with upstream licensing and attribution. See LICENSE-DDNET.txt,
 LICENSE-RUST.txt and data/maps/license.txt.
 
 Demo controls: Space pause/resume; Left/Right frame step; PageUp/PageDown +10/-10 seconds; Up/Down speed; Home/End beginning/end; click timeline to seek; mouse wheel zoom; R restart; Esc quit. Audio replay is not yet implemented.
+
+
+## Hardware GPU backend (experimental)
+
+This package is compiled with `--features gpu`: its online and offline
+game map layers use native wgpu (Vulkan first, with other supported backends).
+Run `./run.sh --play-online HOST:PORT` or `./run.sh --play-offline data/maps/ctf1.map`.
+The client automatically falls back to the software renderer if GPU
+initialization fails. To force the software renderer for comparison:
+
+```bash
+DDNET_RENDERER=software ./run.sh --play-online HOST:PORT
+```
+
+The game still has CPU-rendered tee sprites and HUD uploaded as
+separate transparent overlays; this is not the original DDNet GPU
+sprite/GUI implementation. The original GPU-render smoke is checked in
+CI using `--gpu-offline-smoke data/maps/ctf1.map`.
