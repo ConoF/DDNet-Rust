@@ -126,8 +126,10 @@ impl Hook {
 
         let mut event = HookEvent::None;
         if self.state == HookState::Idle {
+            // Upstream CCharacterCore::Tick launches even if the input
+            // target is (0, 0): normalize(0) is (0, 0), so the hook
+            // remains at the tee until released.
             let direction = normalize(input.aim);
-            if direction == Vec2::default() { return Ok(event); }
             self.state = HookState::Flying;
             self.position = sum(pos, scaled(direction, t.physical_size * 1.5));
             self.direction = direction;
@@ -149,9 +151,13 @@ impl Hook {
                     next = sum(pos, scaled(normalize(difference(next, pos)), t.length));
                     self.state = HookState::RetractStart;
                 }
-                let (hit, collision_pos) = intersect_static(map, self.position, next);
-                self.position = collision_pos;
+                // Upstream can switch to HOOK_RETRACT_START *before*
+                // the collision trace, when the new tip exceeds HookLength.
+                // In that case m_HookPos is not advanced to the clamped
+                // end point (even if it happens to touch a wall there).
                 if self.state == HookState::Flying {
+                    let (hit, collision_pos) = intersect_static(map, self.position, next);
+                    self.position = collision_pos;
                     match hit {
                         RayHit::Solid => {
                             self.state = HookState::Grabbed;
@@ -256,6 +262,93 @@ mod tests {
             tee, &mut vel, &map, t),
             Ok(HookEvent::Released));
         assert_eq!(hook.state, HookState::Idle);
+    }
+
+    #[test]
+    fn zero_aim_still_launches_and_stays_in_flying_state() {
+        // This follows CCharacterCore::Tick: HOOK_IDLE -> HOOK_FLYING
+        // even when normalize(vec2(0, 0)) evaluates to (0, 0).
+        let map = wall(1);
+        let mut hook = Hook::default();
+        let mut velocity = Vec2::default();
+        let tee = Vec2::new(100.0, 80.0);
+        let controls = HookInput {
+            held: true, aim: Vec2::default(), movement: 0,
+        };
+        assert_eq!(
+            hook.tick(controls, tee, &mut velocity, &map, HookTuning::default()),
+            Ok(HookEvent::Launch),
+        );
+        assert_eq!(hook.state, HookState::Flying);
+        assert_eq!(hook.position, tee);
+        assert_eq!(hook.direction, Vec2::default());
+        assert_eq!(
+            hook.tick(controls, tee, &mut velocity, &map, HookTuning::default()),
+            Ok(HookEvent::None),
+        );
+        assert_eq!(hook.state, HookState::Flying);
+        assert_eq!(hook.position, tee);
+        assert_eq!(
+            hook.tick(HookInput { held: false, ..controls },
+                tee, &mut velocity, &map, HookTuning::default()),
+            Ok(HookEvent::Released),
+        );
+        assert_eq!(hook.state, HookState::Idle);
+    }
+
+    #[test]
+    fn range_limit_retracts_without_moving_tip_to_clamped_position() {
+        let map = GameMap::from_tile_bytes(20, 6, &[0; 20 * 6 * 4]).unwrap();
+        let mut hook = Hook::default();
+        let tee = Vec2::new(100.0, 80.0);
+        let mut velocity = Vec2::default();
+        let controls = HookInput {
+            held: true, aim: Vec2::new(1.0, 0.0), movement: 0,
+        };
+        let tuning = HookTuning::default();
+        for expected_x in [222.0, 302.0, 382.0, 462.0] {
+            hook.tick(controls, tee, &mut velocity, &map, tuning).unwrap();
+            assert_eq!(hook.state, HookState::Flying);
+            assert_eq!(hook.position.x, expected_x);
+        }
+        // Next step computes x=542 but clamps to x=480, at the
+        // 380px length cap. C++ leaves m_HookPos at x=462.
+        assert_eq!(
+            hook.tick(controls, tee, &mut velocity, &map, tuning),
+            Ok(HookEvent::None),
+        );
+        assert_eq!(hook.state, HookState::RetractStart);
+        assert_eq!(hook.position.x, 462.0);
+        assert_eq!(velocity, Vec2::default());
+    }
+
+    #[test]
+    fn wall_exactly_at_length_cap_must_not_attach() {
+        let mut bytes = vec![0u8; 20 * 6 * 4];
+        for y in 0..6 {
+            bytes[(y * 20 + 15) * 4] = 1; // wall begins at x=480
+        }
+        let map = GameMap::from_tile_bytes(20, 6, &bytes).unwrap();
+        let mut hook = Hook::default();
+        let tee = Vec2::new(100.0, 80.0);
+        let mut velocity = Vec2::default();
+        let controls = HookInput {
+            held: true, aim: Vec2::new(1.0, 0.0), movement: 0,
+        };
+        for _ in 0..4 {
+            hook.tick(controls, tee, &mut velocity, &map, HookTuning::default()).unwrap();
+        }
+        assert_eq!(hook.position.x, 462.0);
+        assert_eq!(
+            hook.tick(controls, tee, &mut velocity, &map, HookTuning::default()),
+            Ok(HookEvent::None),
+        );
+        assert_eq!(hook.state, HookState::RetractStart);
+        assert_eq!(hook.position.x, 462.0);
+        for expected in [HookState::RetractMid, HookState::RetractEnd, HookState::Retracted] {
+            hook.tick(controls, tee, &mut velocity, &map, HookTuning::default()).unwrap();
+            assert_eq!(hook.state, expected);
+        }
     }
 
     #[test]

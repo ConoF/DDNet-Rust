@@ -127,3 +127,15 @@ ground contact resets the consumed air-jump bit like the original
 the ramp, bouncy landing and invalid tuning. Complete physics parity
 requires follow-on work on interaction, switches, teleports and player
 prediction; these tests do not establish full game-level equivalence.
+
+## Stage 3 / hook physics audit, part 2
+
+Verified the isolated static-tile hook against DDNet 20.2.1
+\`CCharacterCore::Tick\` and \`IntersectLineTeleHook\` for two edge cases:
+zero target input still launches a stationary flying hook, and exceeding
+the configured hook length changes the state to retract **without**
+advancing the hook tip to the clamped endpoint, even if a solid wall
+lies at that endpoint. Three regression tests cover launch, the 380px
+range cutoff and boundary-wall behavior. This remains *partial* physics:
+hooking other characters, teleporting hooks, through/front tiles and
+DDNet-specific movement restrictions are still unimplemented.
