@@ -168,7 +168,7 @@ fn valid_map_filename(s: &str) -> bool {
         })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MapData<'a> {
     pub last: bool,
     pub crc: u32,
