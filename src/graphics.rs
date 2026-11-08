@@ -201,6 +201,38 @@ impl Framebuffer {
         self.circle_screen(center.0, center.1, (11.0 * camera.scale).round() as i64, TEE);
     }
 
+    /// Encode the headless debug framebuffer as a standards-compliant
+    /// RGB8 PNG using Rust zlib, without a graphics/window dependency.
+    pub fn png_bytes(&self) -> std::io::Result<Vec<u8>> {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let stride = (self.width as usize) * 3;
+        let mut scanlines = Vec::with_capacity((stride + 1) * self.height as usize);
+        for row in self.pixels.chunks_exact(self.width as usize) {
+            scanlines.push(0); // PNG filter 0: preserve exact framebuffer pixels
+            for &color in row {
+                scanlines.push((color >> 16) as u8);
+                scanlines.push((color >> 8) as u8);
+                scanlines.push(color as u8);
+            }
+        }
+        let mut writer = ZlibEncoder::new(Vec::new(), Compression::default());
+        writer.write_all(&scanlines)?;
+        let compressed = writer.finish()?;
+
+        let mut output = vec![137, 80, 78, 71, 13, 10, 26, 10];
+        let mut ihdr = Vec::with_capacity(13);
+        ihdr.extend_from_slice(&self.width.to_be_bytes());
+        ihdr.extend_from_slice(&self.height.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]); // RGB, 8-bit, no interlace
+        append_png_chunk(&mut output, b"IHDR", &ihdr)?;
+        append_png_chunk(&mut output, b"IDAT", &compressed)?;
+        append_png_chunk(&mut output, b"IEND", &[])?;
+        Ok(output)
+    }
+
     /// Portable PPM image format for deterministic offline visual tests.
     pub fn ppm_bytes(&self) -> Vec<u8> {
         let mut bytes = format!("P6\n{} {}\n255\n", self.width, self.height).into_bytes();
@@ -211,6 +243,22 @@ impl Framebuffer {
         }
         bytes
     }
+}
+
+fn append_png_chunk(
+    output: &mut Vec<u8>, kind: &[u8; 4], data: &[u8],
+) -> std::io::Result<()> {
+    let length = u32::try_from(data.len()).map_err(|_| std::io::Error::other(
+        "PNG chunk exceeds 32-bit size",
+    ))?;
+    output.extend_from_slice(&length.to_be_bytes());
+    output.extend_from_slice(kind);
+    output.extend_from_slice(data);
+    let crc = crate::game_protocol::crc32_update(0, &output[
+        output.len() - data.len() - kind.len()..
+    ]);
+    output.extend_from_slice(&crc.to_be_bytes());
+    Ok(())
 }
 
 #[cfg(test)]
@@ -271,6 +319,43 @@ mod tests {
             center: Vec2::default(), scale: f32::NAN
         }), Err(RenderError::InvalidCamera));
         assert_eq!(frame.ppm_bytes().len(), "P6\n16 16\n255\n".len() + 16*16*3);
+    }
+
+    #[test]
+    fn png_is_lossless_and_has_valid_chunk_checksums() {
+        use std::io::Read;
+
+        let mut frame = Framebuffer::new(2, 2).unwrap();
+        frame.pixels = vec![0xff0000, 0x00ff00, 0x0000ff, 0x123456];
+        let image = frame.png_bytes().unwrap();
+        assert_eq!(&image[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+
+        let mut cursor = 8;
+        let mut decoded = Vec::new();
+        let mut chunks = Vec::new();
+        while cursor < image.len() {
+            let size = u32::from_be_bytes(image[cursor..cursor + 4].try_into().unwrap()) as usize;
+            let first = cursor + 4;
+            let end = first + 4 + size;
+            let kind = &image[first..first + 4];
+            let crc = u32::from_be_bytes(image[end..end + 4].try_into().unwrap());
+            assert_eq!(crc, crate::game_protocol::crc32_update(0, &image[first..end]));
+            chunks.push(kind.to_vec());
+            if kind == b"IHDR" {
+                assert_eq!(&image[first + 4..first + 17],
+                    &[0, 0, 0, 2, 0, 0, 0, 2, 8, 2, 0, 0, 0]);
+            }
+            if kind == b"IDAT" {
+                let mut decoder = flate2::read::ZlibDecoder::new(&image[first + 4..end]);
+                decoder.read_to_end(&mut decoded).unwrap();
+            }
+            cursor = end + 4;
+        }
+        assert_eq!(chunks, vec![b"IHDR".to_vec(), b"IDAT".to_vec(), b"IEND".to_vec()]);
+        assert_eq!(decoded, vec![
+            0, 255, 0, 0, 0, 255, 0,
+            0, 0, 0, 255, 0x12, 0x34, 0x56,
+        ]);
     }
 
     #[test]
