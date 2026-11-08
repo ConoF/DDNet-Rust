@@ -7,6 +7,9 @@ publish = false
 license-file = "LICENSE"
 description = "Incremental Rust port of vanilla DDNet 20.2.1"
 
+[dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
 [lib]
 name = "ddnet_rust"
 path = "src/lib.rs"

@@ -2,7 +2,7 @@
 //!
 //! Reference: upstream/ddnet/src/engine/shared/datafile.cpp, release 20.2.1.
 //! Supports little-endian DATA v3/v4 structure, item table and raw block spans.
-//! v4 raw block *decompression* is deliberately not implemented here yet.
+//! v4 zlib raw blocks are decoded with a strict caller-provided memory budget.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatafileError {
@@ -13,6 +13,10 @@ pub enum DatafileError {
     InvalidOffset,
     InvalidItem,
     InvalidItemType,
+    MissingRawBlock,
+    OutputTooLarge,
+    DecompressionFailed,
+    DecompressedSizeMismatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,6 +221,41 @@ impl<'a> Datafile<'a> {
         Ok(Self { version: version as u32, item_types, items, raw_blocks })
     }
 
+    /// Extract a raw block with a strict memory budget. v3 blocks are uncompressed;
+    /// v4 blocks use zlib and must match the expected uncompressed length.
+    /// No partial output is returned on an error.
+    pub fn raw_data(&self, index: usize, max_output: usize) -> Result<Vec<u8>, DatafileError> {
+        use std::io::Read;
+
+        let block = self.raw_blocks.get(index).ok_or(DatafileError::MissingRawBlock)?;
+        let Some(expected) = block.uncompressed_size else {
+            if block.encoded.len() > max_output {
+                return Err(DatafileError::OutputTooLarge);
+            }
+            return Ok(block.encoded.to_vec());
+        };
+        if expected > max_output {
+            return Err(DatafileError::OutputTooLarge);
+        }
+        if expected == 0 {
+            return Err(DatafileError::DecompressedSizeMismatch);
+        }
+        let max_read = u64::try_from(expected)
+            .map_err(|_| DatafileError::OutputTooLarge)?
+            .checked_add(1)
+            .ok_or(DatafileError::OutputTooLarge)?;
+        let decoder = flate2::read::ZlibDecoder::new(block.encoded);
+        let mut output = Vec::new();
+        decoder
+            .take(max_read)
+            .read_to_end(&mut output)
+            .map_err(|_| DatafileError::DecompressionFailed)?;
+        if output.len() != expected {
+            return Err(DatafileError::DecompressedSizeMismatch);
+        }
+        Ok(output)
+    }
+
     pub fn find_item(&self, type_id: u16, id: u16) -> Option<Item<'a>> {
         self.items.iter().copied().find(|item| item.type_id == type_id && item.id == id)
     }
@@ -293,6 +332,47 @@ mod tests {
         let mut bad = sample(3);
         bad[60..64].copy_from_slice(&(-1i32).to_le_bytes()); // item payload size
         assert_eq!(Datafile::parse(&bad), Err(DatafileError::InvalidItem));
+    }
+
+    #[test]
+    fn decompress_v4_raw_data_and_bound_memory() {
+        use flate2::{Compression, write::ZlibEncoder};
+        use std::io::Write;
+
+        let mut compressor = ZlibEncoder::new(Vec::new(), Compression::default());
+        compressor.write_all(b"abc").unwrap();
+        let compressed = compressor.finish().unwrap();
+
+        let mut bytes = sample(4);
+        bytes.truncate(bytes.len() - 3);
+        bytes.extend_from_slice(&compressed);
+        let data_size = i32::try_from(compressed.len()).unwrap();
+        bytes[32..36].copy_from_slice(&data_size.to_le_bytes());
+        let file_size = i32::try_from(bytes.len() - 16).unwrap();
+        bytes[8..12].copy_from_slice(&file_size.to_le_bytes());
+
+        let map = Datafile::parse(&bytes).unwrap();
+        assert_eq!(map.raw_data(0, 3).unwrap(), b"abc");
+        assert_eq!(map.raw_data(0, 2), Err(DatafileError::OutputTooLarge));
+        assert_eq!(map.raw_data(1, 100), Err(DatafileError::MissingRawBlock));
+
+        bytes[56..60].copy_from_slice(&4i32.to_le_bytes());
+        let changed = Datafile::parse(&bytes).unwrap();
+        assert_eq!(changed.raw_data(0, 100), Err(DatafileError::DecompressedSizeMismatch));
+    }
+
+    #[test]
+    fn reject_invalid_zlib_stream() {
+        let baseline = sample(4);
+        let file = Datafile::parse(&baseline).unwrap();
+        assert!(matches!(
+            file.raw_data(0, 128),
+            Err(DatafileError::DecompressionFailed | DatafileError::DecompressedSizeMismatch)
+        ));
+        let version3 = sample(3);
+        let file = Datafile::parse(&version3).unwrap();
+        assert_eq!(file.raw_data(0, 3).unwrap(), [1, 2, 3]);
+        assert_eq!(file.raw_data(0, 2), Err(DatafileError::OutputTooLarge));
     }
 
     #[test]
