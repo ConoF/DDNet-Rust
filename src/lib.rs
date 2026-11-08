@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod datafile;
+pub mod network;
 pub mod physics;
 pub mod protocol;
 

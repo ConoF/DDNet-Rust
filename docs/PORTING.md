@@ -14,13 +14,15 @@ The Rust executable does not use any C++ code or FFI.
 | Rust crate/CLI | Initial scaffold | Build, smoke test in CI |
 | Signed Teeworlds variable integers | Implemented | Reference vectors, 165k+ round trips, C++ differential test |
 | UTF-8 NUL-terminated strings | Partial, strict | Invalid-input and bounds tests |
-| Teeworlds datafile v3/v4 metadata and item/block indexing | Partial | Synthetic fixtures, truncation tests, mutation simulations |
+| Teeworlds datafile v3/v4 metadata and item/block indexing | Partial | Synthetic fixtures, truncation/fuzz simulation and real DDNet map files |
 | v4 zlib-compressed data blocks / map layer decoding | Not implemented | None |
+| 0.6 packet and chunk header packing/validation | Partial | Fixed vectors, roundtrips, rejected malformed inputs |
+| UDP connection, tokens, reliability, Huffman, 0.7 networking | Not implemented | None |
 | Gravity, directional movement, ground/air jump | Partial | 50 Hz tick-state simulation tests |
 | Velocity ramp and projectile position | Math functions only | Unit tests |
 | Collision, tiles, freeze, switches, teleports | Not implemented | None |
 | Hook, player interactions, full prediction | Not implemented | None |
-| Network packets, handshake, snapshots | Not implemented | None |
+| Handshake, snapshot decoding, live server communication | Not implemented | None |
 | Map download, graphics, input devices, UI, audio | Not implemented | None |
 | Server browser, gameplay, editor and demos | Not implemented | None |
 
@@ -29,8 +31,8 @@ Passing CI here **does not** mean the game itself is operational.
 ## Required porting order
 
 1. Keep stable C++ 20.2.1 as a reproducible source of truth.
-2. Port packet header, handshake, reliable UDP sequencing and generated net messages;
-   test against real server traces and invalid packets.
+2. Finish network reliability, Huffman, tokens, handshake and generated net messages;
+   test against actual server traces and malformed packets.
 3. Finish v4 zlib decompression and DDNet map/tile/layer decoding; then collision,
    movement restrictions, freeze, tune zones and full deterministic character core.
 4. Implement an actual Rust game loop, asset manager, renderer, windowing and audio.
@@ -47,6 +49,7 @@ cd DDNet-Rust
 git -C upstream/ddnet rev-parse HEAD
 cargo test
 cargo run -- --self-test
+cargo run -- --inspect-map upstream/ddnet/data/maps/ctf1.map
 ```
 
 The Linux CI compiles a small C++ test from the **original DDNet header** and
