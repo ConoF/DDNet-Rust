@@ -5,11 +5,13 @@
 //! missing full renderer, authoritative prediction parity, editor, custom
 //! skins and some 0.6/0.7 protocol extensions.
 
+use std::cell::RefCell;
 use std::io::ErrorKind;
+use std::rc::Rc;
 use std::net::{ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
-use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
+use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 
 use crate::graphics::{Camera, Framebuffer};
 use crate::datafile::Datafile;
@@ -19,7 +21,12 @@ use crate::sound_assets::GameSound;
 use crate::server_browser::ClientSettings;
 use crate::netobjects::CHARACTER_TYPE;
 use crate::interpolation::interpolate_snapshots;
-use crate::input::{correct_next_input_tick, FireCounter, InputFrame, PlayerInput, PLAYERFLAG_PLAYING};
+use crate::input::{
+    correct_next_input_tick, FireCounter, InputFrame, PlayerInput,
+    PLAYERFLAG_CHATTING, PLAYERFLAG_PLAYING,
+};
+use crate::gameplay::WeaponControls;
+use crate::online_ui::{OnlineHud, TextInputCollector};
 use crate::netobjects::CharacterCoreNet;
 use crate::physics::Vec2;
 use crate::prediction::{apply_visual_prediction, local_character_id, LocalPredictor};
@@ -39,7 +46,16 @@ fn preferred_character(snapshot: &SnapshotState) -> Option<Vec2> {
     local.or(first).map(|c| Vec2::new(c.x as f32, c.y as f32))
 }
 
-fn movement_input(direction: i32, jump: bool, hook: bool, fire: i32, target: Vec2) -> PlayerInput {
+fn movement_input(
+    direction: i32, jump: bool, hook: bool, fire: i32,
+    target: Vec2, weapons: WeaponControls, chatting: bool,
+) -> PlayerInput {
+    if chatting {
+        return PlayerInput {
+            fire, player_flags: PLAYERFLAG_CHATTING,
+            ..PlayerInput::default()
+        };
+    }
     PlayerInput {
         direction: direction.clamp(-1, 1),
         target_x: target.x.round().clamp(-10000.0, 10000.0) as i32,
@@ -48,7 +64,9 @@ fn movement_input(direction: i32, jump: bool, hook: bool, fire: i32, target: Vec
         fire,
         player_flags: PLAYERFLAG_PLAYING,
         hook: i32::from(hook),
-        wanted_weapon: 1,
+        wanted_weapon: weapons.wanted_weapon,
+        next_weapon: weapons.next_weapon,
+        prev_weapon: weapons.prev_weapon,
         ..PlayerInput::default()
     }
 }
@@ -100,6 +118,8 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         WIDTH, HEIGHT, WindowOptions::default(),
     ).map_err(|e| format!("window: {e}"))?;
     window.set_target_fps(60);
+    let chars = Rc::new(RefCell::new(Vec::new()));
+    window.set_input_callback(Box::new(TextInputCollector(Rc::clone(&chars))));
     let mut pixels = Framebuffer::new(WIDTH as u32, HEIGHT as u32)
         .map_err(|e| format!("framebuffer: {e:?}"))?;
     let mut camera = Camera { center: Vec2::default(), scale: 1.5 };
@@ -129,11 +149,69 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     let mut fire_counter = FireCounter::default();
     let mut input_time_left_ms = None::<i32>;
     let mut predictor = LocalPredictor::new();
+    let mut hud = OnlineHud::new();
+    let mut weapons = WeaponControls::default();
+    let mut exit_requested = false;
 
-    while window.is_open() && !window.is_key_down(Key::Escape) {
+    while window.is_open() && !exit_requested {
         let now = Instant::now();
         accumulator += (now - last_frame).min(Duration::from_millis(100));
         last_frame = now;
+
+        // Minifb receives actual Unicode characters through its callback;
+        // physical key codes are used only for gameplay actions and editing.
+        // Discard the same-frame T/Y opener character when entering chat.
+        let was_typing = hud.is_typing();
+        let typed = std::mem::take(&mut *chars.borrow_mut());
+        if was_typing { hud.append_typed(&typed); }
+        let keys = window.get_keys_pressed(if was_typing {
+            KeyRepeat::Yes
+        } else {
+            KeyRepeat::No
+        });
+        for key in keys {
+            if hud.is_typing() {
+                match key {
+                    Key::Escape => hud.cancel_chat(),
+                    Key::Backspace => hud.backspace(),
+                    Key::Enter => {
+                        if let Some((team, text)) = hud.submit_chat() {
+                            match session.send_chat(team, &text) {
+                                Ok(wire) => {
+                                    socket.send(&wire).map_err(|e|
+                                        format!("send chat: {e}")
+                                    )?;
+                                }
+                                Err(error) => hud.chat_line(
+                                    "[client] ", &format!("Chat failed: {error:?}"),
+                                ),
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            } else {
+                match key {
+                    Key::Escape => exit_requested = true,
+                    Key::T => hud.open_chat(false),
+                    Key::Y => hud.open_chat(true),
+                    Key::Key1 => { weapons.select(1); }
+                    Key::Key2 => { weapons.select(2); }
+                    Key::Key3 => { weapons.select(3); }
+                    Key::Key4 => { weapons.select(4); }
+                    Key::Key5 => { weapons.select(5); }
+                    Key::F7 | Key::F8 | Key::F10 if session.stage == Stage::EnterGameSent => {
+                        let wire = match key {
+                            Key::F7 => session.set_team(-1),
+                            Key::F8 => session.set_team(0),
+                            _ => session.request_kill(),
+                        }.map_err(|e| format!("game action: {e:?}"))?;
+                        socket.send(&wire).map_err(|e| format!("game action send: {e}"))?;
+                    }
+                    _ => {}
+                }
+            }
+        }
         // Bound the datagrams processed in a single render frame.
         for _ in 0..256 {
             let count = match socket.recv(&mut packet) {
@@ -180,6 +258,16 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                             intended_tick, session.snapshot_ack_tick(), time_left_ms,
                         );
                         input_time_left_ms = Some(time_left_ms);
+                    }
+                    GameAction::ChatReceived { team, client_id, text } => {
+                        let label = if team != 0 { "team" } else { "all" };
+                        hud.chat_line(&format!("[{label} #{client_id}] "), &text);
+                    }
+                    GameAction::ServerBroadcast(text) => {
+                        hud.announcement(&text);
+                    }
+                    GameAction::ServerMotd(text) => {
+                        hud.chat_line("[MOTD] ", &text);
                     }
                     GameAction::Disconnected(reason) => {
                         return Err(format!("Server disconnected: {reason}"));
@@ -237,6 +325,9 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             fire_counter = FireCounter::default();
             input_time_left_ms = None;
             predictor.reset();
+            hud = OnlineHud::new();
+            weapons = WeaponControls::default();
+            chars.borrow_mut().clear();
             continue;
         }
         if session.stage == Stage::Connecting &&
@@ -255,22 +346,34 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         }
 
         if let Some((_, wheel)) = window.get_scroll_wheel() {
-            if wheel > 0.0 { camera.scale = (camera.scale * 1.15).min(8.0); }
-            if wheel < 0.0 { camera.scale = (camera.scale / 1.15).max(0.1); }
+            if !hud.is_typing() && wheel.abs() >= 1.0 {
+                weapons.scroll(wheel.round() as i32);
+            }
+        }
+        if !hud.is_typing() {
+            if window.is_key_down(Key::Equal) {
+                camera.scale = (camera.scale * 1.02).min(8.0);
+            }
+            if window.is_key_down(Key::Minus) {
+                camera.scale = (camera.scale / 1.02).max(0.1);
+            }
         }
         let mouse = window.get_mouse_pos(MouseMode::Discard)
             .unwrap_or((WIDTH as f32 * 0.75, HEIGHT as f32 * 0.5));
+        let typing = hud.is_typing();
         let control = movement_input(
             i32::from(window.is_key_down(Key::D) || window.is_key_down(Key::Right)) -
             i32::from(window.is_key_down(Key::A) || window.is_key_down(Key::Left)),
             window.is_key_down(Key::Space) || window.is_key_down(Key::W)
                 || window.is_key_down(Key::Up),
             window.get_mouse_down(MouseButton::Right) || window.is_key_down(Key::E),
-            fire_counter.sample(window.get_mouse_down(MouseButton::Left)),
+            fire_counter.sample(!typing && window.get_mouse_down(MouseButton::Left)),
             Vec2::new(
                 (mouse.0 - WIDTH as f32 / 2.0) / camera.scale,
                 (mouse.1 - HEIGHT as f32 / 2.0) / camera.scale,
             ),
+            weapons,
+            typing,
         );
         for _ in 0..5 {
             if accumulator < TICK { break; }
@@ -330,6 +433,13 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             assets.draw_snapshot(&mut pixels, snapshot, camera,
                 current_snapshot.unwrap_or(0).max(0) as u64)?;
         }
+        let local_weapon = display.as_ref().and_then(|snapshot|
+            local_character_id(snapshot).and_then(|id|
+                snapshot.find(CHARACTER_TYPE, id)
+            )
+        ).and_then(|obj| obj.words.get(19).copied());
+        hud.render(&mut pixels, &format!("{:?}", session.stage),
+            local_weapon, current_snapshot);
         if last_title.elapsed() > Duration::from_secs(1) {
             window.set_title(&format!(
                 "DDNet-Rust 0.6 prototype | {peer} | {:?} | tick {:?} | ACK {} | recovery {} | input {:?}ms",
@@ -382,7 +492,10 @@ mod tests {
 
     #[test]
     fn outgoing_player_input_stays_inside_valid_ranges() {
-        let input = movement_input(-10, true, true, 3, Vec2::new(30000.0, -20000.0));
+        let mut weapons = WeaponControls::default();
+        weapons.select(3);
+        let input = movement_input(-10, true, true, 3,
+            Vec2::new(30000.0, -20000.0), weapons, false);
         assert_eq!(input.direction, -1);
         assert_eq!(input.target_x, 10000);
         assert_eq!(input.target_y, -10000);
@@ -390,7 +503,15 @@ mod tests {
         assert_eq!(input.hook, 1);
         assert_eq!(input.fire, 3);
         assert_eq!(input.player_flags, PLAYERFLAG_PLAYING);
-        assert_eq!(input.wanted_weapon, 1);
+        assert_eq!(input.wanted_weapon, 3);
         assert!(input.validate().is_ok());
+        let chat = movement_input(1, true, true, 4,
+            Vec2::new(100.0, 80.0), weapons, true);
+        assert_eq!(chat.direction, 0);
+        assert_eq!(chat.jump, 0);
+        assert_eq!(chat.hook, 0);
+        assert_eq!(chat.fire, 4);
+        assert_eq!(chat.player_flags, PLAYERFLAG_CHATTING);
+        assert_eq!(chat.wanted_weapon, 0);
     }
 }

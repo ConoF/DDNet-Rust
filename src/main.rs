@@ -314,6 +314,11 @@ fn connect_headless(endpoint: &str, screenshot: Option<&str>) {
                         GameAction::InputTiming { tick, time_left_ms } => {
                             println!("Input timing: tick {tick}, {time_left_ms:+} ms");
                         }
+                        GameAction::ChatReceived { team, client_id, text } => {
+                            println!("Chat team {team} client #{client_id}: {text}");
+                        }
+                        GameAction::ServerBroadcast(text) => println!("Broadcast: {text}"),
+                        GameAction::ServerMotd(text) => println!("MOTD: {text}"),
                         GameAction::Disconnected(reason) => {
                             eprintln!("Server closed connection: {reason}");
                             std::process::exit(1);

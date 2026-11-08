@@ -477,3 +477,28 @@ isolation from authoritative snapshots.
 prediction: weapon recoil, hook interactions, switches, teleport/speedup/tune
 zones, other players and full clock synchronization still need server-side
 parity verification. Do not use this to claim public-server compatibility.
+
+
+## Stage: gameplay interactions for a usable online 0.6 client
+
+The online window now sends original **vital game messages** for public/team
+chat (`Cl_Say`), team/spectator switching (`Cl_SetTeam`) and normal
+respawn/kill (`Cl_Kill`). It decodes and displays incoming `Sv_Chat`,
+`Sv_Broadcast` and `Sv_Motd` messages. The underlying protocol validates
+wire field order, client slots, message sizes and UTF-8, while leaving unknown
+DDNet extensions untouched. The headless CLI also reports server chat.
+
+Input has functional weapon switching rather than the previous hard-coded
+hammer: number keys 1–5 select hammer/gun/shotgun/grenade/laser, mouse wheel
+sends original next/previous weapon **transition counters**; +/- changes
+camera zoom instead. In-game chat uses T (public), Y (team), Enter (send),
+Esc (cancel) and Backspace, capturing Unicode text via the minifb callback.
+F7 enters spectators, F8 joins team 0 and F10 requests a normal kill/respawn.
+While typing, movement/hook/fire are disabled and player flags say CHATTING.
+
+**Limitations:** 0.6 only; this bitmap HUD renders non-Latin characters as
+fallback glyphs even though UTF-8 chat is sent correctly. Server-authoritative
+weapons, team restrictions, cooldowns and join status still apply. There is
+no full DDNet chat UI, voting, console, scoreboard, tuning-zone or server
+integration acceptance test yet. This does not establish public-server
+compatibility or complete playability.
