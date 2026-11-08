@@ -335,8 +335,8 @@ fn blit_tile(
             // Most terrain tiles on ordinary DDNet maps take this path.
             if alpha == 255 {
                 frame.pixels[at] =
-                    (u32::from(texture.rgba[src]) * u32::from(tint[0]) / 255 << 16)
-                    | (u32::from(texture.rgba[src + 1]) * u32::from(tint[1]) / 255 << 8)
+                    ((u32::from(texture.rgba[src]) * u32::from(tint[0]) / 255) << 16)
+                    | ((u32::from(texture.rgba[src + 1]) * u32::from(tint[1]) / 255) << 8)
                     | (u32::from(texture.rgba[src + 2]) * u32::from(tint[2]) / 255);
                 continue;
             }
