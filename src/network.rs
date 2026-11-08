@@ -132,7 +132,7 @@ impl ChunkHeader {
         if vital != self.sequence.is_some() {
             return Err(NetworkError::InvalidChunkHeader);
         }
-        let mut first = ((self.flags & 3) << 6) | ((self.size >> 4) as u8 & 0x3f);
+        let first = ((self.flags & 3) << 6) | ((self.size >> 4) as u8 & 0x3f);
         let mut second = (self.size & 0x0f) as u8;
         if vital {
             let sequence = self.sequence.ok_or(NetworkError::InvalidChunkHeader)?;
