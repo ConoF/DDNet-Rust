@@ -158,9 +158,9 @@ fn triangle(
             ];
             if w.iter().any(|&weight| weight < -0.000001) { continue; }
             // In triangles (TL, TR, BL) and (TR, BR, BL), the shared edge
-            // is between TR and BL: w[0] == 0 in the first and w[2] == 0
+            // is between TR and BL: w[0] == 0 in the first and w[1] == 0
             // in the second. Give shared pixels to triangle one.
-            if second && w[2].abs() <= 0.000001 { continue; }
+            if second && w[1].abs() <= 0.000001 { continue; }
             let (rgb, alpha) = sample_color(verts, w, tex);
             if alpha == 0 { continue; }
             let index = y * frame.width as usize + x;
