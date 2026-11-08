@@ -484,6 +484,100 @@ mod tests {
         assert!((blended >> 8 & 255) > (blended >> 16 & 255));
     }
 
+    fn raw_quad(color: [i32; 4]) -> Vec<u8> {
+        let mut bytes = vec![0u8; QUAD_BYTES];
+        let positions = [(0, 0), (32, 0), (0, 32), (32, 32), (16, 16)];
+        for (index, (x, y)) in positions.into_iter().enumerate() {
+            bytes[index * 8..index * 8 + 4]
+                .copy_from_slice(&(x * 1024i32).to_le_bytes());
+            bytes[index * 8 + 4..index * 8 + 8]
+                .copy_from_slice(&(y * 1024i32).to_le_bytes());
+        }
+        for i in 0..4 {
+            for (channel, value) in color.into_iter().enumerate() {
+                let start = 40 + i * 16 + channel * 4;
+                bytes[start..start + 4].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        bytes[136..140].copy_from_slice(&(-1i32).to_le_bytes());
+        bytes[144..148].copy_from_slice(&(-1i32).to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn loads_quads_from_map_file_with_original_game_layer_z_order() {
+        // Quad background (red), physics Game layer (not visible as visual
+        // art), quad foreground (blue): geometry comes from raw CQuad data.
+        let first_layer = words(&[0, QUADMAP, 0, 1, 1, 0, -1]);
+        let game = words(&[0, TILEMAP, 0, 2, 1, 1, 1]);
+        let last_layer = words(&[0, QUADMAP, 0, 1, 1, 1, -1]);
+        let red = raw_quad([255, 0, 0, 255]);
+        let blue = raw_quad([0, 0, 255, 255]);
+        let file = Datafile {
+            version: 3, item_types: vec![],
+            items: vec![
+                Item { type_id: MAP_LAYER, id: 0, payload: &first_layer },
+                Item { type_id: MAP_LAYER, id: 1, payload: &game },
+                Item { type_id: MAP_LAYER, id: 2, payload: &last_layer },
+            ],
+            raw_blocks: vec![
+                RawBlock { encoded: &red, uncompressed_size: None },
+                RawBlock { encoded: &blue, uncompressed_size: None },
+            ],
+        };
+        let map = VisualMap::from_datafile(&file, Path::new(".")).unwrap();
+        assert!(map.layers.is_empty());
+        assert_eq!(map.quad_layers.len(), 2);
+        assert!(!map.quad_layers[0].foreground);
+        assert!(map.quad_layers[1].foreground);
+        assert_eq!(map.quad_layers[0].order, 0);
+        assert_eq!(map.quad_layers[1].order, 2);
+        let mut frame = Framebuffer::new(32, 32).unwrap();
+        let camera = Camera { center: Vec2::new(16.0, 16.0), scale: 1.0 };
+        assert_eq!(map.render_background(&mut frame, camera), Ok(1));
+        assert_eq!(frame.pixel(8, 8), Some(0xff0000));
+        frame.pixels[8 * 32 + 8] = 0x00ff00;
+        assert_eq!(map.render_foreground(&mut frame, camera), Ok(1));
+        assert_eq!(frame.pixel(8, 8), Some(0x0000ff));
+        assert_eq!(map.render(&mut frame, camera), Ok(2));
+    }
+
+    #[test]
+    fn preserves_original_tile_and_quad_interleaving() {
+        // A solid quad first, then an ordinary green image-backed tile.
+        // Rendering quads in a separate post-pass would incorrectly cover it.
+        let image = words(&[1, 16, 16, 0, 0, 2]);
+        let quad_layer = words(&[0, QUADMAP, 0, 1, 1, 0, -1]);
+        let tile_layer = words(&[
+            0, TILEMAP, 0, 2, 1, 1, 0,
+            255, 255, 255, 255, -1, 0, 0, 1,
+        ]);
+        let rgba = vec![0u8, 255, 0, 255].repeat(16 * 16);
+        let quad = raw_quad([255, 0, 0, 255]);
+        let tile = [1u8, 0, 0, 0];
+        let file = Datafile {
+            version: 3, item_types: vec![],
+            items: vec![
+                Item { type_id: MAP_IMAGE, id: 0, payload: &image },
+                Item { type_id: MAP_LAYER, id: 0, payload: &quad_layer },
+                Item { type_id: MAP_LAYER, id: 1, payload: &tile_layer },
+            ],
+            raw_blocks: vec![
+                RawBlock { encoded: &quad, uncompressed_size: None },
+                RawBlock { encoded: &tile, uncompressed_size: None },
+                RawBlock { encoded: b"green\0", uncompressed_size: None },
+                RawBlock { encoded: &rgba, uncompressed_size: None },
+            ],
+        };
+        let map = VisualMap::from_datafile(&file, Path::new(".")).unwrap();
+        assert_eq!(map.layers.len(), 1);
+        assert_eq!(map.quad_layers.len(), 1);
+        let camera = Camera { center: Vec2::new(16.0, 16.0), scale: 1.0 };
+        let mut frame = Framebuffer::new(32, 32).unwrap();
+        assert_eq!(map.render_background(&mut frame, camera), Ok(2));
+        assert_eq!(frame.pixel(8, 8), Some(0x00ff00));
+    }
+
     #[test]
     fn game_layer_splits_background_and_foreground_renders() {
         let atlas = vec![255u8; 16 * 16 * 4];
