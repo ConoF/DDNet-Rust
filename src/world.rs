@@ -255,14 +255,17 @@ impl World {
             let grounded = next.players[i].tee.move_core(map)?;
             let new_pos = next.players[i].tee.position;
             let rule = next.players[i].rules;
-            if self.player_collision && !rule.collision_disabled {
-                let colliders = next.players.iter().enumerate()
-                    .filter(|(j, p)| *j != i
-                        && can_collide(rule, p.rules, next.player_collision))
-                    .map(|(_, p)| p.tee.position);
+            // Super mode overrides both the global collision setting and
+            // per-tee collision disabling in original CCharacterCore::Move.
+            let colliders: Vec<_> = next.players.iter().enumerate()
+                .filter(|(j, p)| *j != i
+                    && can_collide(rule, p.rules, next.player_collision))
+                .map(|(_, p)| p.tee.position)
+                .collect();
+            if !colliders.is_empty() {
                 let position = stop_at_players(
                     old, new_pos, next.players[i].tee.hook_tuning.physical_size,
-                    colliders,
+                    colliders.into_iter(),
                 );
                 next.players[i].tee.position = position;
             }
@@ -369,6 +372,31 @@ mod tests {
         world.step(&map, &[(0, SimInput { hook: false, ..control })]).unwrap();
         let step = world.step(&map, &[(0, control)]).unwrap();
         assert_ne!(step.steps[0].1.hook, HookEvent::AttachPlayer);
+    }
+
+    #[test]
+    fn super_player_still_blocks_movement_when_normal_collision_is_off() {
+        let map = flat_map();
+        let mut ordinary = World::default();
+        ordinary.player_collision = false;
+        let mut moving = player(1, 100.0);
+        moving.rules.collision_disabled = true;
+        moving.tee.character.velocity.x = 80.0;
+        ordinary.insert(moving).unwrap();
+        ordinary.insert(player(2, 155.0)).unwrap();
+
+        let mut super_world = ordinary.clone();
+        super_world.players[0].rules.super_mode = true;
+
+        let input = [(1, SimInput { direction: 1, ..SimInput::default() })];
+        ordinary.step(&map, &input).unwrap();
+        super_world.step(&map, &input).unwrap();
+
+        let unblocked = ordinary.get(1).unwrap().tee.position.x;
+        let blocked = super_world.get(1).unwrap().tee.position.x;
+        assert!(unblocked > 130.0, "normal collision is disabled: {unblocked}");
+        assert!(blocked < 130.0, "super tee should hit other player: {blocked}");
+        assert!(blocked < unblocked);
     }
 
     #[test]
