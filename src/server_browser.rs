@@ -215,6 +215,9 @@ impl Default for KeyBindings {
     }
 }
 impl KeyBindings {
+    pub fn uses(&self, key: &str) -> bool {
+        self.slots.iter().any(|binding|binding == key)
+    }
     pub fn validate(&self) -> bool {
         let mut used = std::collections::HashSet::new();
         self.slots.iter().all(|name|
@@ -623,6 +626,8 @@ mod tests {
         assert!(!binds.set(2, "Escape"));
         assert!(!binds.set(99, "F1"));
         assert!(binds.validate());
+        assert!(binds.uses("D"));
+        assert!(!binds.uses("Key1"));
         assert!(binds.set(4, "F12"));
         assert_eq!(binds.slots[4], "F12");
         assert!(binds.validate());

@@ -263,7 +263,9 @@ fn play_offline_impl(
             accumulator += frame_duration;
         }
         previous = now;
-        if !menu.is_open() && window.is_key_down(Key::R) {
+        if !menu.is_open() && window.is_key_down(Key::R)
+            && !settings.bindings.uses("R")
+        {
             simulator = TeeSimulator::new(spawn);
             accumulator = Duration::ZERO;
         }
@@ -280,12 +282,18 @@ fn play_offline_impl(
                 - i32::from(sampled_bindings.held(0))
         };
         let previous_weapon = selected_weapon;
-        if !menu.is_open() && window.is_key_down(Key::Key1) { selected_weapon = 0; }
-        if !menu.is_open() && window.is_key_down(Key::Key2) { selected_weapon = 1; }
-        if !menu.is_open() && window.is_key_down(Key::Key3) { selected_weapon = 2; }
-        if !menu.is_open() && window.is_key_down(Key::Key4) { selected_weapon = 3; }
-        if !menu.is_open() && window.is_key_down(Key::Key5) { selected_weapon = 4; }
-        if !menu.is_open() && window.is_key_down(Key::Key6) { selected_weapon = 5; }
+        if !menu.is_open() && !settings.bindings.uses("Key1")
+            && window.is_key_down(Key::Key1) { selected_weapon = 0; }
+        if !menu.is_open() && !settings.bindings.uses("Key2")
+            && window.is_key_down(Key::Key2) { selected_weapon = 1; }
+        if !menu.is_open() && !settings.bindings.uses("Key3")
+            && window.is_key_down(Key::Key3) { selected_weapon = 2; }
+        if !menu.is_open() && !settings.bindings.uses("Key4")
+            && window.is_key_down(Key::Key4) { selected_weapon = 3; }
+        if !menu.is_open() && !settings.bindings.uses("Key5")
+            && window.is_key_down(Key::Key5) { selected_weapon = 4; }
+        if !menu.is_open() && !settings.bindings.uses("Key6")
+            && window.is_key_down(Key::Key6) { selected_weapon = 5; }
         if selected_weapon != previous_weapon {
             if let Some(out) = audio.as_mut().filter(|_| settings.sound_enabled) {
                 out.play(GameSound::WeaponSwitch, None);

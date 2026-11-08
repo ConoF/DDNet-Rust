@@ -255,14 +255,19 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                     menu_actions.push(action);
                 }
             } else {
+                // Explicit user bindings override fixed convenience hotkeys,
+                // so rebinding movement to a number or F-key never changes
+                // weapon, team, or kills the player as a side effect.
+                let assigned = connection.bindings.uses(&format!("{key:?}"));
                 match key {
                     Key::Escape => menu.toggle(),
-                    Key::Key1 => { weapons.select(1); }
-                    Key::Key2 => { weapons.select(2); }
-                    Key::Key3 => { weapons.select(3); }
-                    Key::Key4 => { weapons.select(4); }
-                    Key::Key5 => { weapons.select(5); }
-                    Key::F7 | Key::F8 | Key::F10 if session.stage == Stage::EnterGameSent => {
+                    Key::Key1 if !assigned => { weapons.select(1); }
+                    Key::Key2 if !assigned => { weapons.select(2); }
+                    Key::Key3 if !assigned => { weapons.select(3); }
+                    Key::Key4 if !assigned => { weapons.select(4); }
+                    Key::Key5 if !assigned => { weapons.select(5); }
+                    Key::F7 | Key::F8 | Key::F10
+                        if !assigned && session.stage == Stage::EnterGameSent => {
                         let wire = match key {
                             Key::F7 => session.set_team(-1),
                             Key::F8 => session.set_team(0),
