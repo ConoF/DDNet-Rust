@@ -414,8 +414,9 @@ mod tests {
 
     #[test]
     fn change_info_reuses_start_info_fields_with_correct_message_id() {
-        let mut info = StartInfo::default();
-        info.name = "ConoF".into();
+        let mut info = StartInfo {
+            name: "ConoF".into(), ..StartInfo::default()
+        };
         let encoded = info.pack_change().unwrap();
         let message = decode_message(&encoded).unwrap();
         assert_eq!(message.id, MessageId::Regular { system: false, number: 21 });
@@ -424,7 +425,7 @@ mod tests {
         assert_eq!(reader.read_string(), Ok(""));
         assert_eq!(reader.read_int(), Ok(-1));
         assert_eq!(reader.read_string(), Ok("default"));
-        assert_eq!(reader.remaining() > 0, true);
+        assert!(reader.remaining() > 0);
         info.name = "abcdefghijklmnop".into();
         assert!(info.pack_change().is_err());
     }
