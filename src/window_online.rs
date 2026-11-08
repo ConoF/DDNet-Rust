@@ -20,7 +20,9 @@ use crate::game_audio::{attack_sound_for_weapon, try_start, GameAudio};
 use crate::sound_assets::GameSound;
 use crate::server_browser::ClientSettings;
 use crate::netobjects::CHARACTER_TYPE;
-use crate::interpolation::interpolate_snapshots;
+use crate::interpolation::{
+    camera_follow_fraction, interpolate_snapshots, online_interpolation_fraction,
+};
 use crate::input::{
     correct_next_input_tick, FireCounter, InputFrame, PlayerInput,
     PLAYERFLAG_CHATTING, PLAYERFLAG_PLAYING,
@@ -145,6 +147,10 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     let mut last_snapshot_at = Instant::now();
     let mut last_title = Instant::now();
     let mut reconnect_attempts = 0u8;
+    let mut frames_in_sample = 0u32;
+    let mut accumulated_frame_ms = 0.0f32;
+    let mut displayed_fps = 0.0f32;
+    let mut displayed_frame_ms = 0.0f32;
     let mut fire_counter = FireCounter::default();
     let mut input_time_left_ms = None::<i32>;
     let mut predictor = LocalPredictor::new();
@@ -154,7 +160,8 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
 
     while window.is_open() && !exit_requested {
         let now = Instant::now();
-        accumulator += (now - last_frame).min(Duration::from_millis(100));
+        let frame_duration = (now - last_frame).min(Duration::from_millis(100));
+        accumulator += frame_duration;
         last_frame = now;
 
         // Minifb receives actual Unicode characters through its callback;
@@ -409,7 +416,10 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                 if let Some(previous) = previous_snapshot
                     .and_then(|tick| session.snapshot_state(tick))
                 {
-                    let progress = last_snapshot_at.elapsed().as_secs_f32() / 0.02;
+                    let progress = online_interpolation_fraction(
+                        previous_snapshot.unwrap_or(tick), tick,
+                        last_snapshot_at.elapsed(),
+                    );
                     interpolate_snapshots(previous, newest, progress)
                 } else {
                     newest.clone()
@@ -429,10 +439,12 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         if let Some(snapshot) = display.as_ref() {
             if let Some(pos) = preferred_character(snapshot) {
                 if let Some(out) = audio.as_ref() { out.listener(pos); }
-                camera.center.x += (pos.x - camera.center.x) * 0.3;
-                camera.center.y += (pos.y - camera.center.y) * 0.3;
+                let follow = camera_follow_fraction(frame_duration);
+                camera.center.x += (pos.x - camera.center.x) * follow;
+                camera.center.y += (pos.y - camera.center.y) * follow;
             }
         }
+        let render_started = Instant::now();
         if let Some(map) = session.loaded_map.as_ref() {
             assets.draw_background(&mut pixels, map, camera)?;
         } else {
@@ -455,16 +467,24 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         };
         hud.render(&mut pixels, &format!("{:?}", session.stage),
             local_weapon, current_snapshot, scoreboard);
-        if last_title.elapsed() > Duration::from_secs(1) {
-            window.set_title(&format!(
-                "DDNet-Rust 0.6 prototype | {peer} | {:?} | tick {:?} | ACK {} | recovery {} | input {:?}ms",
-                session.stage, current_snapshot, session.snapshot_ack_tick(),
-                session.is_snapshot_recovering(), input_time_left_ms,
-            ));
-            last_title = Instant::now();
-        }
         window.update_with_buffer(&pixels.pixels, WIDTH, HEIGHT)
             .map_err(|e| format!("present: {e}"))?;
+        frames_in_sample += 1;
+        accumulated_frame_ms += render_started.elapsed().as_secs_f32() * 1000.0;
+        let sample_seconds = last_title.elapsed().as_secs_f32();
+        if sample_seconds >= 1.0 {
+            displayed_fps = frames_in_sample as f32 / sample_seconds;
+            displayed_frame_ms = accumulated_frame_ms / frames_in_sample as f32;
+            window.set_title(&format!(
+                "DDNet-Rust | {peer} | FPS {:.0} | frame {:.1} ms | tick {:?} | ACK {} | recovery {} | input {:?}ms",
+                displayed_fps, displayed_frame_ms, current_snapshot,
+                session.snapshot_ack_tick(), session.is_snapshot_recovering(),
+                input_time_left_ms,
+            ));
+            frames_in_sample = 0;
+            accumulated_frame_ms = 0.0;
+            last_title = Instant::now();
+        }
     }
     Ok(())
 }

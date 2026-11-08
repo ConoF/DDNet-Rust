@@ -12,6 +12,7 @@ use crate::graphics::{Camera, Framebuffer};
 use crate::hook::HookState;
 use crate::map::GameMap;
 use crate::physics::Vec2;
+use crate::interpolation::camera_follow_fraction;
 use crate::simulator::{SimInput, TeeSimulator};
 use crate::snapshot_delta::{SnapshotObject, SnapshotState};
 use crate::window_assets::{WindowAssets, candidate_roots};
@@ -103,7 +104,8 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let now = Instant::now();
-        accumulator += (now - previous).min(Duration::from_millis(100));
+        let frame_duration = (now - previous).min(Duration::from_millis(100));
+        accumulator += frame_duration;
         previous = now;
         if window.is_key_down(Key::R) {
             simulator = TeeSimulator::new(spawn);
@@ -171,8 +173,9 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
         }
 
         if let Some(out) = audio.as_ref() { out.listener(simulator.position); }
-        camera.center.x += (simulator.position.x - camera.center.x) * 0.2;
-        camera.center.y += (simulator.position.y - camera.center.y) * 0.2;
+        let follow = camera_follow_fraction(frame_duration);
+        camera.center.x += (simulator.position.x - camera.center.x) * follow;
+        camera.center.y += (simulator.position.y - camera.center.y) * follow;
         assets.draw_background(&mut pixels, &map, camera)?;
         let entity = &mut snapshot.items[0].words;
         entity[1] = simulator.position.x.round() as i32;

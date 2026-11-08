@@ -4,7 +4,31 @@
 //! intentionally smooths only compatible character and hook coordinates.
 //! Teleports, missing references and discontinuities snap immediately.
 
+use std::time::Duration;
 use crate::snapshot_delta::SnapshotState;
+
+/// DDNet's network game ticks run at 50Hz. A snapshot's tick distance,
+/// not window render FPS or an assumed one-tick packet period, determines
+/// how long it should be interpolated after arrival.
+pub fn online_interpolation_fraction(
+    previous_tick: i32, current_tick: i32, elapsed: Duration,
+) -> f32 {
+    let Some(tick_delta) = current_tick.checked_sub(previous_tick) else {
+        return 1.0;
+    };
+    if tick_delta <= 0 { return 1.0; }
+    let span_seconds = f64::from(tick_delta) / 50.0;
+    (elapsed.as_secs_f64() / span_seconds).clamp(0.0, 1.0) as f32
+}
+
+/// Frame-time invariant exponential camera easing. At 60 FPS this matches
+/// the old 0.3-per-frame response, but at low or high FPS it follows the
+/// same motion over real time.
+pub fn camera_follow_fraction(frame_duration: Duration) -> f32 {
+    let frame_seconds = frame_duration.as_secs_f32().min(0.25);
+    1.0 - 0.7f32.powf(frame_seconds * 60.0)
+}
+
 
 pub const MAX_SMOOTH_DISTANCE: i64 = 256;
 
@@ -131,6 +155,35 @@ mod tests {
         SnapshotState { items: vec![SnapshotObject {
             type_id: 9, id, words,
         }] }
+    }
+
+    #[test]
+    fn network_interpolation_uses_actual_server_tick_spacing() {
+        assert!((online_interpolation_fraction(
+            100, 102, Duration::from_millis(20)
+        ) - 0.5).abs() < 1.0e-6);
+        assert_eq!(online_interpolation_fraction(
+            100, 102, Duration::from_millis(40)
+        ), 1.0);
+        assert_eq!(online_interpolation_fraction(
+            200, 198, Duration::from_millis(1)
+        ), 1.0);
+        assert_eq!(online_interpolation_fraction(
+            300, 300, Duration::ZERO
+        ), 1.0);
+        assert_eq!(online_interpolation_fraction(
+            100, 101, Duration::ZERO
+        ), 0.0);
+    }
+
+    #[test]
+    fn camera_easing_is_independent_of_render_fps() {
+        let full_frame = camera_follow_fraction(Duration::from_millis(100));
+        let half_frame = camera_follow_fraction(Duration::from_millis(50));
+        let composed = 1.0 - (1.0 - half_frame) * (1.0 - half_frame);
+        assert!((full_frame - composed).abs() < 1.0e-6);
+        assert_eq!(camera_follow_fraction(Duration::ZERO), 0.0);
+        assert!((camera_follow_fraction(Duration::from_secs(1)) - 1.0).abs() < 1.0e-4);
     }
 
     #[test]

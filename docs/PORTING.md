@@ -514,3 +514,15 @@ and diagnostics. Opaque tile pixels use a direct RGB write instead of
 blending. This improves layer correctness and reduces work on typical
 opaque map art but still uses a CPU framebuffer. Quad/envelope rendering,
 full DDNet UI and GPU tile batching are not implemented yet.
+
+
+## Frame pacing and diagnostics (official 20.2.1 comparison)
+
+Corrected online interpolation to use the **server tick gap** (tick delta
+times 20 ms) rather than always assuming a new snapshot every 20 ms.
+Camera easing now uses elapsed frame time, so moving from 30 to 60 FPS
+does not change the camera's response speed. The online window title
+reports recent FPS and CPU frame+present milliseconds to expose real
+performance regressions. These are client-side improvements; DDNet's
+full smooth-time prediction, GPU rendering and tune-zone support still
+need porting.
