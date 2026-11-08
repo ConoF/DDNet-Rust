@@ -555,7 +555,7 @@ mod tests {
             0, TILEMAP, 0, 2, 1, 1, 0,
             255, 255, 255, 255, -1, 0, 0, 1,
         ]);
-        let rgba = vec![0u8, 255, 0, 255].repeat(16 * 16);
+        let rgba = [0u8, 255, 0, 255].repeat(16 * 16);
         let quad = raw_quad([255, 0, 0, 255]);
         let tile = [1u8, 0, 0, 0];
         let file = Datafile {
