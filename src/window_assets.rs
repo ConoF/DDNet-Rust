@@ -74,7 +74,7 @@ impl WindowAssets {
             }
             if assets.visual_map.is_none() {
                 if let Ok(visual) = VisualMap::from_datafile(file, &root) {
-                    if !visual.layers.is_empty() {
+                    if !visual.layers.is_empty() || !visual.quad_layers.is_empty() {
                         assets.visual_map = Some(visual);
                     }
                 }

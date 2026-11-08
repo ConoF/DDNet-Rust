@@ -7,12 +7,16 @@ use std::path::Path;
 use crate::datafile::{Datafile, DatafileError};
 use crate::graphics::{Camera, Framebuffer, RenderError, BACKGROUND};
 use crate::map::Tile;
+use crate::quad_render::{
+    decode_quads, draw_quads, QuadLayer, QUAD_BYTES, MAX_QUADS_PER_LAYER, MAX_TOTAL_QUADS,
+};
 use crate::texture::{Texture, TextureError};
 
 const MAP_IMAGE: u16 = 2;
 const MAP_GROUP: u16 = 4;
 const MAP_LAYER: u16 = 5;
 const TILEMAP: i32 = 2;
+const QUADMAP: i32 = 3;
 const MAX_IMAGES: usize = 64;
 const MAX_LAYERS: usize = 1024;
 const MAX_LAYER_CELLS: usize = 2_000_000;
@@ -64,12 +68,15 @@ pub struct TexturedLayer {
     pub tiles: Vec<Tile>,
     /// Layers after the game layer render in front of players, like upstream.
     pub foreground: bool,
+    /// Original map-layer index; used for exact tile/quad interleaving.
+    pub order: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct VisualMap {
     pub images: Vec<Texture>,
     pub layers: Vec<TexturedLayer>,
+    pub quad_layers: Vec<QuadLayer>,
 }
 
 fn field(payload: &[u8], at: usize) -> Result<i32, VisualError> {
@@ -181,13 +188,53 @@ impl VisualMap {
         if layer_items.len() > MAX_LAYERS { return Err(VisualError::TooLarge); }
         let groups = collect_groups(file, layer_items.len())?;
         let mut layers = Vec::new();
+        let mut quad_layers = Vec::new();
         let mut total = 0usize;
+        let mut total_quads = 0usize;
         let game_layer_index = layer_items.iter().position(|item| {
             field(item.payload, 4).ok() == Some(TILEMAP)
                 && field(item.payload, 24).ok()
                     .is_some_and(|flags| flags & 1 != 0)
         });
         for (ordinal, item) in layer_items.iter().enumerate() {
+            if item.payload.len() < 8 { return Err(VisualError::InvalidMap); }
+            if field(item.payload, 4)? == QUADMAP {
+                // CMapItemLayerQuads: base layer (12), version (4),
+                // quad count (4), data index (4), image index (4).
+                if item.payload.len() < 28 { return Err(VisualError::InvalidMap); }
+                let version = field(item.payload, 12)?;
+                if !(1..=2).contains(&version) {
+                    return Err(VisualError::InvalidMap);
+                }
+                let count = index(field(item.payload, 16)?)?;
+                if count > MAX_QUADS_PER_LAYER { return Err(VisualError::TooLarge); }
+                total_quads = total_quads.checked_add(count).ok_or(VisualError::TooLarge)?;
+                if total_quads > MAX_TOTAL_QUADS { return Err(VisualError::TooLarge); }
+                let image = match field(item.payload, 24)? {
+                    -1 => None,
+                    value if value >= 0 => {
+                        let index = index(value)?;
+                        if index >= images.len() { return Err(VisualError::MissingImage); }
+                        Some(index)
+                    }
+                    _ => return Err(VisualError::InvalidImage),
+                };
+                if count > 0 {
+                    let raw_bytes = file.raw_data(index(field(item.payload, 20)?)?,
+                        count.checked_mul(QUAD_BYTES).ok_or(VisualError::TooLarge)?)?;
+                    if raw_bytes.len() != count * QUAD_BYTES {
+                        return Err(VisualError::InvalidMap);
+                    }
+                    quad_layers.push(QuadLayer {
+                        order: ordinal,
+                        foreground: game_layer_index.is_some_and(|index| ordinal > index),
+                        transform: groups[ordinal],
+                        image,
+                        quads: decode_quads(&raw_bytes)?,
+                    });
+                }
+                continue;
+            }
             if field(item.payload, 4)? != TILEMAP { continue; }
             if item.payload.len() < 60 { return Err(VisualError::InvalidMap); }
             // Flags mark physics layers (game/front/switch/tele/...).
@@ -217,9 +264,10 @@ impl VisualMap {
                 width, height, image: image_index,
                 tint, transform: groups[ordinal], tiles,
                 foreground: game_layer_index.is_some_and(|game_index| ordinal > game_index),
+                order: ordinal,
             });
         }
-        Ok(Self { images, layers })
+        Ok(Self { images, layers, quad_layers })
     }
 
     /// Keep the legacy one-call map rendering API for previews and tests.
@@ -254,10 +302,38 @@ impl VisualMap {
             return Err(VisualError::Render(RenderError::InvalidCamera));
         }
         if clear { frame.clear(BACKGROUND); }
+        let mut tile_index = 0usize;
+        let mut quad_index = 0usize;
         let mut drawn = 0usize;
-        for layer in &self.layers {
-            if layer.foreground != foreground { continue; }
-            let texture = self.images.get(layer.image).ok_or(VisualError::MissingImage)?;
+        // Both lists are sorted by their original map-layer ordinal. Merge
+        // without per-frame allocations so alpha quads and tile art retain
+        // the same z-order as the upstream layer list.
+        while tile_index < self.layers.len() || quad_index < self.quad_layers.len() {
+            let next_tile = self.layers.get(tile_index).map_or(usize::MAX, |layer| layer.order);
+            let next_quad = self.quad_layers.get(quad_index).map_or(usize::MAX, |layer| layer.order);
+            if next_tile <= next_quad {
+                let layer = &self.layers[tile_index];
+                tile_index += 1;
+                if layer.foreground == foreground {
+                    drawn += self.render_tile_layer(frame, camera, layer)?;
+                }
+            } else {
+                let layer = &self.quad_layers[quad_index];
+                quad_index += 1;
+                if layer.foreground == foreground {
+                    drawn += draw_quads(layer, &self.images, frame, camera)?;
+                }
+            }
+        }
+        Ok(drawn)
+    }
+
+    fn render_tile_layer(
+        &self, frame: &mut Framebuffer, camera: Camera, layer: &TexturedLayer,
+    ) -> Result<usize, VisualError> {
+        let mut drawn = 0usize;
+        let texture = self.images.get(layer.image).ok_or(VisualError::MissingImage)?;
+
             let cell_w = texture.width as usize / 16;
             let cell_h = texture.height as usize / 16;
             if cell_w == 0 || cell_h == 0
@@ -293,9 +369,7 @@ impl VisualMap {
                         (start_x, start_y, end_x, end_y), (cell_w, cell_h));
                     drawn += 1;
                 }
-            }
-        }
-        Ok(drawn)
+            Ok(drawn)
     }
 }
 
@@ -418,9 +492,11 @@ mod tests {
             tint: if foreground { [0, 0, 255, 255] } else { [255, 0, 0, 255] },
             transform: GroupTransform::default(),
             tiles: vec![Tile { index: 1, flags: 0, skip: 0, reserved: 0 }],
-            foreground,
+            foreground, order: usize::from(foreground),
         };
-        let map = VisualMap { images: vec![image], layers: vec![layer(false), layer(true)] };
+        let map = VisualMap {
+            images: vec![image], layers: vec![layer(false), layer(true)], quad_layers: vec![],
+        };
         let camera = Camera { center: Vec2::new(16.0,16.0), scale: 1.0 };
         let mut frame = Framebuffer::new(32, 32).unwrap();
         assert_eq!(map.render_background(&mut frame, camera).unwrap(), 1);
@@ -498,7 +574,7 @@ mod tests {
 
     #[test]
     fn invalid_camera_is_detected_before_render() {
-        let map = VisualMap { images: vec![], layers: vec![] };
+        let map = VisualMap { images: vec![], layers: vec![], quad_layers: vec![] };
         let mut frame = Framebuffer::new(16, 16).unwrap();
         assert_eq!(map.render(&mut frame, Camera {
             center: Vec2::default(), scale: f32::NAN,

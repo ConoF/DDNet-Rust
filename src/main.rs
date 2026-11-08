@@ -419,8 +419,8 @@ fn render_textured_map(path: &str, asset_root: &str, output: &str) {
             eprintln!("Cannot load map textures {path}: {error:?}");
             std::process::exit(1);
         });
-    if visual.layers.is_empty() {
-        eprintln!("No regular image-backed tile layers in {path}");
+    if visual.layers.is_empty() && visual.quad_layers.is_empty() {
+        eprintln!("No visual tile or quad layers in {path}");
         std::process::exit(1);
     }
     // Use a meaningful map coordinate window instead of fitting a huge

@@ -536,3 +536,21 @@ left input, and visible tees have simple client-name plates above their
 heads. Rendering is deliberately clipped to visible characters. This is
 a **layout correction only**: the bitmap font still lacks proper Unicode,
 outlined proportional glyphs, and all the original DDNet menu/HUD art.
+
+
+## Static 0.6 CQuad layers (visual parity step)
+
+The CPU map reader now decodes CMapItemLayerQuads (type 3, v1/v2):
+strict 152-byte CQuad records with 22.10 fixed-point corners, UVs,
+per-vertex RGBA (four signed i32 channels), optional atlas index and
+position/color envelope references. Both untextured colored quads and
+textured quads render with alpha blending, screen clipping, group
+parallax and their **original ordering with tile layers**. Quad layers
+before the physics Game layer render behind tees; later quad layers
+render in front. Per-layer and total quad limits cap memory use.
+
+The offline map preview and online window use this shared renderer.
+**Not yet supported:** animation envelope evaluation, group clipping,
+GPU batching, smooth texture filtering and the official renderer's
+exact quad-to-GPU blending rules. Large animated maps will still
+look different and may perform poorly with software rendering.
