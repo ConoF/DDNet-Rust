@@ -509,7 +509,10 @@ mod tests {
         // Quad background (red), physics Game layer (not visible as visual
         // art), quad foreground (blue): geometry comes from raw CQuad data.
         let first_layer = words(&[0, QUADMAP, 0, 1, 1, 0, -1]);
-        let game = words(&[0, TILEMAP, 0, 2, 1, 1, 1]);
+        let game = words(&[
+            0, TILEMAP, 0, 2, 1, 1, 1,
+            255, 255, 255, 255, -1, 0, -1, 0,
+        ]);
         let last_layer = words(&[0, QUADMAP, 0, 1, 1, 1, -1]);
         let red = raw_quad([255, 0, 0, 255]);
         let blue = raw_quad([0, 0, 255, 255]);
