@@ -149,8 +149,6 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     let mut reconnect_attempts = 0u8;
     let mut frames_in_sample = 0u32;
     let mut accumulated_frame_ms = 0.0f32;
-    let mut displayed_fps = 0.0f32;
-    let mut displayed_frame_ms = 0.0f32;
     let mut fire_counter = FireCounter::default();
     let mut input_time_left_ms = None::<i32>;
     let mut predictor = LocalPredictor::new();
