@@ -9,7 +9,7 @@ description = "Incremental Rust port of vanilla DDNet 20.2.1"
 
 [features]
 default = []
-window = ["dep:minifb", "dep:cpal"]
+window = ["dep:minifb", "dep:cpal", "dep:font8x8"]
 
 [dependencies]
 minifb = { version = "0.29", default-features = false, features = ["x11"], optional = true }
@@ -17,6 +17,10 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # Pure Rust WavPack decoder; no external C/C++ or FFI.
 wavicle = { version = "=0.1.0", default-features = false, features = ["decode"] }
 cpal = { version = "=0.16.0", optional = true }
+# TLS-only native HTTP browser for the official master list.
+ureq = { version = "=2.12.1", default-features = false, features = ["tls"] }
+serde_json = "1.0"
+font8x8 = { version = "0.3.1", optional = true }
 
 [lib]
 name = "ddnet_rust"

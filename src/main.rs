@@ -13,6 +13,7 @@ use ddnet_rust::session::{GameAction, GameSession06, Stage};
 use ddnet_rust::huffman::{reference_inputs, Huffman};
 use ddnet_rust::audio::{AudioMixer, Sample, VoiceOptions, MAX_BLOCK_FRAMES};
 use ddnet_rust::sound_assets::decode_wavpack;
+use ddnet_rust::server_browser::{ClientSettings, fetch_master, parse_master, matches_filter};
 
 const CODEC_VECTORS: &[i32] = &[
     i32::MIN, -65536, -65, -64, -2, -1, 0, 1, 63, 64, 255, 65535, i32::MAX,
@@ -39,6 +40,13 @@ fn main() {
         [arg, map] if arg == "--play-offline" => play_offline(map),
         [arg, map, output] if arg == "--play-offline-smoke" => play_offline_smoke(map, output),
         [arg, host] if arg == "--play-online" => play_online(host),
+        [arg] if arg == "--servers" => servers_list(None, None),
+        [arg, query] if arg == "--servers" => servers_list(None, Some(query)),
+        [arg, file] if arg == "--servers-file" => servers_list(Some(file), None),
+        [arg, file, query] if arg == "--servers-file" => servers_list(Some(file), Some(query)),
+        [arg] if arg == "--settings" => print_client_settings(),
+        [arg, name] if arg == "--set-name" => set_client_name(name),
+        [arg] if arg == "--browse-servers" => browse_servers(),
         [arg, output] if arg == "--audio-smoke" => audio_smoke(output),
         [arg, file, output] if arg == "--audio-wv-preview" => audio_wv_preview(file, output),
         _ => {
@@ -65,6 +73,11 @@ fn print_help() {
     println!("  --play-online HOST   Experimental 0.6 UDP snapshot window (feature: window)");
     println!("  --audio-smoke OUT.wav   Export a synthetic PCM mixer test");
     println!("  --audio-wv-preview SOUND.wv OUT.wav   Decode a real DDNet sound to stereo WAV");
+    println!("  --servers [FILTER]  Fetch official master 0.6 servers (name/map/mode)");
+    println!("  --servers-file JSON [FILTER]  Offline master JSON fixture");
+    println!("  --browse-servers    Native window browser (feature: window)");
+    println!("  --set-name NICK     Save nickname for 0.6 login (max 15 bytes)");
+    println!("  --settings          Show saved nickname/filter/last server");
     println!("  --version           Print project and upstream versions");
 }
 
@@ -521,4 +534,75 @@ fn audio_wv_preview(path: &str, output: &str) {
         std::process::exit(1);
     });
     println!("Decoded real DDNet .wv: {frames} frames, {channels} channel(s), 48000 Hz -> {output}");
+}
+
+fn servers_list(file: Option<&str>, query: Option<&str>) {
+    let (servers, source) = if let Some(path) = file {
+        let data = std::fs::read(path).unwrap_or_else(|e| {
+            eprintln!("Cannot open master list {path}: {e}");
+            std::process::exit(1)
+        });
+        (parse_master(&data).unwrap_or_else(|e| {
+            eprintln!("Invalid master JSON {path}: {e:?}");
+            std::process::exit(1)
+        }), path.to_owned())
+    } else {
+        let (entries, url) = fetch_master().unwrap_or_else(|e| {
+            eprintln!("Official DDNet master unavailable: {e:?}");
+            std::process::exit(1)
+        });
+        (entries, url.to_owned())
+    };
+    let settings = ClientSettings::load(&ClientSettings::default_path())
+        .unwrap_or_default();
+    let search = query.unwrap_or(&settings.search);
+    let filtered: Vec<_> = servers.iter()
+        .filter(|s| matches_filter(s, search, settings.hide_empty))
+        .collect();
+    println!("DDNet master: {source}; {} compatible 0.6 servers; {} matching",
+        servers.len(), filtered.len());
+    for s in filtered.into_iter().take(50) {
+        println!("{:>2}/{:<2} {:<12} {:<22} {:<47} {}",
+            s.players, s.max_players, s.game_type, s.map, s.name, s.endpoint);
+    }
+}
+
+fn print_client_settings() {
+    let path = ClientSettings::default_path();
+    let s = ClientSettings::load(&path).unwrap_or_else(|e| {
+        eprintln!("Cannot read settings {}: {e:?}", path.display());
+        std::process::exit(1)
+    });
+    println!("Config: {}", path.display());
+    println!("Nickname: {}", s.nickname);
+    println!("Filter: {}", s.search);
+    println!("Hide empty: {}", s.hide_empty);
+    println!("Last 0.6 endpoint: {}", s.last_server);
+}
+
+fn set_client_name(name: &str) {
+    let path = ClientSettings::default_path();
+    let mut s = ClientSettings::load(&path).unwrap_or_else(|e| {
+        eprintln!("Settings error: {e:?}");
+        std::process::exit(1)
+    });
+    s.nickname = name.to_owned();
+    s.save(&path).unwrap_or_else(|e| {
+        eprintln!("Invalid nickname or settings path: {e:?}");
+        std::process::exit(1)
+    });
+    println!("Saved nickname: {}", s.nickname);
+}
+
+#[cfg(feature = "window")]
+fn browse_servers() {
+    if let Err(e) = ddnet_rust::server_menu::browse_servers() {
+        eprintln!("Server browser failed: {e}");
+        std::process::exit(1);
+    }
+}
+#[cfg(not(feature = "window"))]
+fn browse_servers() {
+    eprintln!("The windowed browser requires cargo run --features window -- --browse-servers");
+    std::process::exit(2);
 }

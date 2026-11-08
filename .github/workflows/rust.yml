@@ -18,8 +18,19 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev pkg-config
+      - name: Temporary server-browser lockfile refresh
+        run: |
+          cargo generate-lockfile
+          printf 'DDNET_BROWSER_LOCKFILE_BASE64:'
+          base64 -w0 Cargo.lock
+          printf '\n'
       - name: Build
         run: cargo build --release --locked --features window
+      - name: Validate master JSON fixture using browser CLI
+        run: |
+          cargo run --locked -- --servers-file tests/fixtures/master.json
+          cargo run --locked -- --servers-file tests/fixtures/master.json "sunny"
+          python3 -c "import subprocess; p=subprocess.check_output(['target/debug/ddnet-rust','--servers-file','tests/fixtures/master.json','sunny']).decode(); assert '127.0.0.1:8303' in p and '[::1]' not in p"
       - name: Unit tests and tick simulation
         run: cargo test --all-targets --locked --features window
       - name: Clippy

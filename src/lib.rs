@@ -26,6 +26,9 @@ pub mod map_visual;
 pub mod window_assets;
 pub mod audio;
 pub mod sound_assets;
+pub mod server_browser;
+#[cfg(feature = "window")]
+pub mod server_menu;
 #[cfg(feature = "window")]
 pub mod audio_device;
 #[cfg(feature = "window")]

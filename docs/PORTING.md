@@ -301,3 +301,25 @@ Linux and Windows CI build and test the CPAL integration but do not
 guarantee functional hardware playback on end-user machines. CPAL's
 Linux backend uses the system ALSA library (installed in CI); the Rust
 client does not link original DDNet C++ code.
+
+## Stage 6 / official master server browser (increment 1)
+
+The Rust \`server_browser.rs\` module now downloads DDNet's public
+\`/ddnet/15/servers.json\` via native HTTPS with four official mirror
+fallbacks and bounded response/timeouts. It parses genuine master
+\`addresses\`, \`info\`, player counts, map names and game type.
+**Only** validated \`tw-0.6+udp://\` endpoints are listed as joinable;
+0.7-only servers are not silently passed to a 0.6-only transport.
+Malformed individual entries are skipped, duplicate IP:ports removed,
+results sorted by populated players. Case-insensitive filtering covers
+server name, map, mode, region and address.
+
+CLI: \`cargo run -- --servers [FILTER]\`. For deterministic offline
+validation: \`cargo run -- --servers-file tests/fixtures/master.json\`.
+\`--settings\` and \`--set-name NICK\` manage a small, local JSON
+settings file (nickname, filter, hide-empty, last chosen endpoint).
+Windowed \`--browse-servers\` provides a clickable/connectable listing.
+
+The **master is discovery only**. Listed server addresses have not been
+verified as connectable, and DDNet 0.7, full DDNet extension negotiation,
+server join compatibility and full game menus still require porting.

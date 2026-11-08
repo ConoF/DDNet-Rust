@@ -1,0 +1,30 @@
+{
+  "servers": [
+    {
+      "addresses": ["tw-0.7+udp://127.0.0.8:8303", "tw-0.6+udp://127.0.0.1:8303"],
+      "location": "eu",
+      "info": {
+        "name": "DDNet Practice 0.6",
+        "map": {"name": "Sunny"},
+        "game_type": "DDRace",
+        "num_players": 12,
+        "max_players": 64,
+        "passworded": false
+      }
+    },
+    {
+      "addresses": ["tw-0.6+udp://[::1]:8304"],
+      "info": {
+        "name": "Empty race",
+        "map": "Kobra",
+        "game_type": "DDRace",
+        "num_players": 0,
+        "max_players": 64
+      }
+    },
+    {
+      "addresses": ["tw-0.7+udp://127.0.0.2:8305"],
+      "info": {"name": "0.7 only", "map": "Map", "num_players": 4}
+    }
+  ]
+}
