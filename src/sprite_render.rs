@@ -9,24 +9,24 @@ use crate::netobjects::{CharacterCoreNet, CHARACTER_TYPE};
 use crate::snapshot_delta::SnapshotState;
 use crate::texture::Texture;
 
-const MAX_HOOK_DISTANCE: f32 = 2048.0;
-const GRID_SKIN: (usize, usize) = (8, 4);
-const GRID_GAME: (usize, usize) = (32, 16);
+pub(crate) const MAX_HOOK_DISTANCE: f32 = 2048.0;
+pub(crate) const GRID_SKIN: (usize, usize) = (8, 4);
+pub(crate) const GRID_GAME: (usize, usize) = (32, 16);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Sprite {
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
+pub(crate) struct Sprite {
+    pub(crate) x: usize,
+    pub(crate) y: usize,
+    pub(crate) w: usize,
+    pub(crate) h: usize,
 }
 
-const BODY: Sprite = Sprite { x: 0, y: 0, w: 3, h: 3 };
-const FOOT: Sprite = Sprite { x: 6, y: 1, w: 2, h: 1 };
-const HOOK_CHAIN: Sprite = Sprite { x: 2, y: 0, w: 1, h: 1 };
-const HOOK_HEAD: Sprite = Sprite { x: 3, y: 0, w: 2, h: 1 };
+pub(crate) const BODY: Sprite = Sprite { x: 0, y: 0, w: 3, h: 3 };
+pub(crate) const FOOT: Sprite = Sprite { x: 6, y: 1, w: 2, h: 1 };
+pub(crate) const HOOK_CHAIN: Sprite = Sprite { x: 2, y: 0, w: 1, h: 1 };
+pub(crate) const HOOK_HEAD: Sprite = Sprite { x: 3, y: 0, w: 2, h: 1 };
 
-fn weapon_sprite(weapon: i32) -> Option<Sprite> {
+pub(crate) fn weapon_sprite(weapon: i32) -> Option<Sprite> {
     match weapon {
         0 => Some(Sprite { x: 2, y: 1, w: 4, h: 3 }), // hammer
         1 => Some(Sprite { x: 2, y: 4, w: 4, h: 2 }), // gun
@@ -38,7 +38,7 @@ fn weapon_sprite(weapon: i32) -> Option<Sprite> {
     }
 }
 
-fn muzzle_sprite(weapon: i32) -> Option<Sprite> {
+pub(crate) fn muzzle_sprite(weapon: i32) -> Option<Sprite> {
     match weapon {
         1 => Some(Sprite { x: 8, y: 4, w: 4, h: 2 }),
         2 => Some(Sprite { x: 12, y: 6, w: 4, h: 2 }),
@@ -47,7 +47,7 @@ fn muzzle_sprite(weapon: i32) -> Option<Sprite> {
     }
 }
 
-fn skin_eye(emote: i32) -> Sprite {
+pub(crate) fn skin_eye(emote: i32) -> Sprite {
     // EMOTE_NORMAL=0, PAIN=1, HAPPY=2, SURPRISE=3, ANGRY=4, BLINK=5.
     let x = match emote {
         1 => 4, 2 => 5, 3 => 7, 4 => 3, _ => 2,
@@ -55,7 +55,7 @@ fn skin_eye(emote: i32) -> Sprite {
     Sprite { x, y: 3, w: 1, h: 1 }
 }
 
-fn valid_sheet(tex: &Texture, grid: (usize, usize)) -> bool {
+pub(crate) fn valid_sheet(tex: &Texture, grid: (usize, usize)) -> bool {
     tex.width as usize >= grid.0 && tex.height as usize >= grid.1
         && (tex.width as usize).is_multiple_of(grid.0)
         && (tex.height as usize).is_multiple_of(grid.1)
