@@ -7,6 +7,8 @@
 pub mod datafile;
 pub mod demo;
 pub mod demo_playback;
+#[cfg(feature = "window")]
+pub mod demo_window;
 pub mod network;
 pub mod reliable;
 pub mod transport;

@@ -33,6 +33,8 @@ fn main() {
         [arg, path] if arg == "--inspect-map" => inspect_map(path),
         [arg, path] if arg == "--inspect-demo" => inspect_demo(path),
         [arg, path] if arg == "--demo-timeline" => inspect_demo_timeline(path),
+        [arg, path] if arg == "--play-demo" => play_demo(path),
+        [arg, map, png] if arg == "--play-demo-smoke" => play_demo_smoke(map, png),
         [arg, path, tick, image] if arg == "--demo-frame" => export_demo_frame(path, tick, image),
         [arg, path] if arg == "--inspect-game-map" => inspect_game_map(path),
         [arg, path, output] if arg == "--render-debug-map" => render_debug_map(path, output, false),
@@ -75,6 +77,8 @@ fn print_help() {
     println!("  --codec-vectors     Emit integer vectors for C++ differential testing");
     println!("  --huffman-vectors   Compare compressed output against upstream C++");
     println!("  --demo-timeline FILE.demo  Inspect ticks and keyframes");
+    println!("  --play-demo FILE.demo  Watch recording with pause, seek and speed");
+    println!("  --play-demo-smoke MAP OUT.png  Test native replay window (Xvfb)");
     println!("  --demo-frame FILE.demo TICK OUT.png  Render snapshot preview");
     println!("  --inspect-map PATH  Parse and validate a v3/v4 DDNet map's metadata");
     println!("  --inspect-demo FILE.demo  Inspect DDNet demo v3-v6 metadata");
@@ -831,4 +835,29 @@ fn export_demo_frame(path: &str, requested: &str, output: &str) {
     });
     println!("Demo preview: tick {actual_tick}, {} snapshot items, {tees} tee(s) -> {output}",
         snapshot.items.len());
+}
+
+#[cfg(feature = "window")]
+fn play_demo(path: &str) {
+    if let Err(e) = ddnet_rust::demo_window::play_demo(Path::new(path)) {
+        eprintln!("Demo playback failed: {e}");
+        std::process::exit(1);
+    }
+}
+#[cfg(not(feature = "window"))]
+fn play_demo(_path: &str) {
+    eprintln!("Demo playback needs the window feature");
+    std::process::exit(2);
+}
+#[cfg(feature = "window")]
+fn play_demo_smoke(map: &str, screenshot: &str) {
+    if let Err(e) = ddnet_rust::demo_window::smoke_demo(Path::new(map), Path::new(screenshot)) {
+        eprintln!("Demo smoke failed: {e}");
+        std::process::exit(1);
+    }
+}
+#[cfg(not(feature = "window"))]
+fn play_demo_smoke(_map: &str, _screenshot: &str) {
+    eprintln!("Demo smoke needs the window feature");
+    std::process::exit(2);
 }
