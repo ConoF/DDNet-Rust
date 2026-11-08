@@ -303,7 +303,16 @@ mod tests {
         sim.movement_tuning.velramp_curvature = f32::NAN;
         let before = sim;
         assert_eq!(sim.step(&map, SimInput::default()), Err(SimError::InvalidTuning));
-        assert_eq!(sim, before);
+        // IEEE-754 NaN != NaN, so compare preserved simulation state
+        // and the exact tuning bit pattern rather than PartialEq on Tuning.
+        assert_eq!(sim.tick, before.tick);
+        assert_eq!(sim.position, before.position);
+        assert_eq!(sim.character, before.character);
+        assert_eq!(sim.hook, before.hook);
+        assert_eq!(
+            sim.movement_tuning.velramp_curvature.to_bits(),
+            before.movement_tuning.velramp_curvature.to_bits(),
+        );
     }
 
     #[test]
