@@ -330,6 +330,9 @@ mod tests {
         let shift = Camera { center: Vec2::new(100.0, 8.0), scale: 1.0 };
         frame.clear(0);
         draw_quads(&scene, &[], &mut frame, shift).unwrap();
-        assert_ne!(frame.pixel(1, 1), Some(0));
+        // Zero X parallax keeps world position fixed as the camera moves;
+        // compared with the earlier centered view, the quad shifts right.
+        assert_eq!(frame.pixel(1, 1), Some(0));
+        assert_ne!(frame.pixel(10, 1), Some(0));
     }
 }
