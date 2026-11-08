@@ -47,7 +47,7 @@ fn word(source: &[u8], byte_index: usize) -> Result<i32, VisualError> {
 }
 
 pub fn decode_quads(bytes: &[u8]) -> Result<Vec<MapQuad>, VisualError> {
-    if bytes.len() % QUAD_BYTES != 0
+    if !bytes.len().is_multiple_of(QUAD_BYTES)
         || bytes.len() / QUAD_BYTES > MAX_QUADS_PER_LAYER
     {
         return Err(VisualError::TooLarge);
@@ -105,9 +105,9 @@ fn sample_color(
     texture: Option<&Texture>,
 ) -> ([u32; 3], u32) {
     let mut c = [0.0f32; 4];
-    for channel in 0..4 {
+    for (channel, value) in c.iter_mut().enumerate() {
         for j in 0..3 {
-            c[channel] += f32::from(vertices[j].color[channel]) * weights[j];
+            *value += f32::from(vertices[j].color[channel]) * weights[j];
         }
     }
     let sample = texture.map(|image| {
