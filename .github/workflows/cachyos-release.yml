@@ -69,6 +69,8 @@ jobs:
             "$bundle/data/maps/ctf1.map" "$PWD/target/bundle-offline.png"
           xvfb-run -a "$bundle/run.sh" --gpu-offline-smoke \
             "$bundle/data/maps/ctf1.map"
+          xvfb-run -a "$bundle/run.sh" --play-offline-menu-smoke \
+            "$bundle/data/maps/ctf1.map" "$PWD/target/bundle-menu.png"
           xvfb-run -a "$bundle/ddnet-rust" --browse-servers-smoke \
             "$PWD/tests/fixtures/master.json" "$PWD/target/bundle-browser.png"
           xvfb-run -a "$bundle/run.sh" --play-demo-smoke \
@@ -76,7 +78,7 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           for path in ("target/bundle-offline.png", "target/bundle-browser.png",
-                       "target/bundle-demo.png"):
+                       "target/bundle-demo.png", "target/bundle-menu.png"):
               file = Path(path)
               assert file.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
               assert file.stat().st_size > 1500
@@ -97,6 +99,7 @@ jobs:
           name: ddnet-rust-cachyos-preview-images
           path: |
             target/bundle-offline.png
+            target/bundle-menu.png
             target/bundle-browser.png
             target/bundle-demo.png
           if-no-files-found: error

@@ -46,6 +46,8 @@ fn main() {
         [arg, addr, out] if arg == "--capture-headless" => connect_headless(addr, Some(out)),
         [arg, map] if arg == "--play-offline" => play_offline(map),
         [arg, map, output] if arg == "--play-offline-smoke" => play_offline_smoke(map, output),
+        [arg, map, output] if arg == "--play-offline-menu-smoke" =>
+            play_offline_menu_smoke(map, output),
         #[cfg(feature = "gpu")]
         [arg, map] if arg == "--gpu-offline-smoke" => gpu_offline_smoke(map),
         [arg, host] if arg == "--play-online" => play_online(host),
@@ -92,6 +94,7 @@ fn print_help() {
     println!("  --capture-headless HOST[:PORT] OUT.png  Capture first decoded snapshot");
     println!("  --play-offline MAP   Offline window: cargo run --features window -- --play-offline MAP");
     println!("  --play-offline-smoke MAP PNG   Run scripted window test under Xvfb");
+    println!("  --play-offline-menu-smoke MAP PNG   Screenshot real Esc settings menu");
     #[cfg(feature = "gpu")]
     println!("  --gpu-offline-smoke MAP    Test 30 actual GPU-presented frames under Xvfb");
     println!("  --play-online HOST   Experimental 0.6 UDP snapshot window (feature: window)");
@@ -516,6 +519,20 @@ fn gpu_offline_smoke(map: &str) {
         eprintln!("GPU offline smoke failed: {error}");
         std::process::exit(1);
     }
+}
+
+#[cfg(feature = "window")]
+fn play_offline_menu_smoke(map: &str, output: &str) {
+    if let Err(error) = ddnet_rust::window::smoke_offline_menu(map, output) {
+        eprintln!("Offline Esc menu screenshot failed: {error}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(not(feature = "window"))]
+fn play_offline_menu_smoke(_map: &str, _output: &str) {
+    eprintln!("This command requires --features window");
+    std::process::exit(2);
 }
 
 #[cfg(feature = "window")]
