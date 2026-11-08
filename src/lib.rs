@@ -11,6 +11,7 @@ pub mod transport;
 pub mod game_protocol;
 pub mod session;
 pub mod snapshot;
+pub mod snapshot_delta;
 pub mod huffman;
 pub mod layers;
 pub mod map;
