@@ -523,14 +523,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_compression_and_truncated_token() {
+    fn rejects_wrong_security_token_even_in_compressed_packet() {
         let mut c = connected(Some(0x01020304));
         assert_eq!(
             c.receive(&packet(0, 0, 1, &[0, 0])),
             Err(TransportError::InvalidToken),
         );
         let compressed_wrong_token = c.huffman.compress(
-            &[0u8, 0, 1, 2, 3, 4], MAX_PACKET_SIZE
+            &[0u8, 0, 0, 2, 3, 4], MAX_PACKET_SIZE
         ).unwrap();
         assert_eq!(
             c.receive(&packet(FLAG_COMPRESSION, 0, 1, &compressed_wrong_token)),
