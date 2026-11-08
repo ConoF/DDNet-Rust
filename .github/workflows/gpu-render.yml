@@ -1,0 +1,37 @@
+name: GPU Backend / Cargo Lock
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - src/gpu_renderer.rs
+      - src/gpu_scene.rs
+      - src/window_online.rs
+      - src/window.rs
+      - .github/workflows/gpu-render.yml
+
+jobs:
+  gpu:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install graphical build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libx11-dev libxkbcommon-dev libwayland-dev libvulkan1 mesa-vulkan-drivers
+      - name: Resolve and check GPU feature
+        run: |
+          cargo check --all-targets --features gpu
+          cargo test --lib --features gpu
+      - name: Save dependency lockfile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-cargo-lock
+          path: Cargo.lock
