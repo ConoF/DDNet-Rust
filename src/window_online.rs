@@ -104,10 +104,12 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     let mut camera = Camera { center: Vec2::default(), scale: 1.5 };
     let mut assets = WindowAssets::default();
     let mut audio = try_start(&candidate_roots(None));
+    let connection = ClientSettings::load(&ClientSettings::default_path())
+        .unwrap_or_default();
+    let reconnect_limit = connection.reconnect_attempts;
+    let receive_timeout = Duration::from_secs(connection.connect_timeout_secs);
     let mut session = GameSession06::new(String::new(), 64 * 1024 * 1024, 16_777_216);
-    if let Ok(settings) = ClientSettings::load(&ClientSettings::default_path()) {
-        session.start_info.name = settings.nickname;
-    }
+    session.start_info.name = connection.nickname;
     let mut hello = session.connect().map_err(|e| format!("handshake: {e:?}"))?;
     socket.send(&hello).map_err(|e| format!("CONNECT: {e}"))?;
 
@@ -191,15 +193,15 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                 Err(e) => failed = Some(format!("reliable transport stopped: {e:?}")),
             }
         }
-        if failed.is_none() && last_receive.elapsed() > Duration::from_secs(20) {
+        if failed.is_none() && last_receive.elapsed() > receive_timeout {
             failed = Some("No valid server packets for 20 seconds".into());
         }
         if let Some(reason) = failed {
-            if reconnect_attempts >= 3 {
-                return Err(format!("{reason}; maximum 3 reconnects exhausted"));
+            if reconnect_attempts >= reconnect_limit {
+                return Err(format!("{reason}; maximum {reconnect_limit} reconnects exhausted"));
             }
             reconnect_attempts += 1;
-            eprintln!("Connection lost ({reason}); reconnect attempt {reconnect_attempts}/3");
+            eprintln!("Connection lost ({reason}); reconnect attempt {reconnect_attempts}/{reconnect_limit}");
             hello = session.restart_connection()
                 .map_err(|e| format!("reconnect state: {e:?}"))?;
             socket.send(&hello).map_err(|e| format!("reconnect UDP: {e}"))?;

@@ -9,7 +9,7 @@ use minifb::{Key, KeyRepeat, Window, WindowOptions};
 use crate::graphics::Framebuffer;
 use crate::server_browser::{
     ClientSettings, ServerEntry, fetch_master,
-    matches_filter, parse_master,
+    visible_indices, parse_master,
 };
 
 const W: usize = 960;
@@ -53,24 +53,23 @@ fn draw_text(frame: &mut Framebuffer, x: usize, y: usize, message: &str,
 
 fn paint(
     frame: &mut Framebuffer, servers: &[ServerEntry],
-    filter: &str, hide_empty: bool, selected: usize, source: &str,
-    nickname: &str,
+    settings: &ClientSettings, selected: usize, source: &str,
 ) -> Vec<usize> {
     frame.clear(BG);
     rect(frame, 0, 0, W, 56, PANEL);
     rect(frame, 0, 52, W, 3, ACCENT);
     draw_text(frame, 20, 15, "DDNET-RUST   SERVER BROWSER / 0.6", TEXT, 2, 49);
-    draw_text(frame, 20, 70, &format!("SEARCH: {filter}_"), ACCENT, 1, 98);
+    draw_text(frame, 20, 70, &format!("SEARCH: {}_", settings.search), ACCENT, 1, 98);
     draw_text(frame, 20, 88, &format!(
-        "NICK: {nickname} | F5 REFRESH | F6 HIDE EMPTY: {}",
-        if hide_empty { "ON" } else { "OFF" }
-    ), MUTED, 1, 100);
+        "NICK: {} | F2 FAVORITES: {} | F6 HIDE EMPTY: {} | F5 REFRESH",
+        settings.nickname,
+        if settings.show_favorites { "ONLY" } else { "ALL" },
+        if settings.hide_empty { "ON" } else { "OFF" },
+    ), MUTED, 1, 110);
     rect(frame, 14, 108, 932, 20, PANEL);
     draw_text(frame, 21, 114, "PLAYERS   MODE          MAP               SERVER", MUTED, 1, 85);
 
-    let matching: Vec<usize> = servers.iter().enumerate()
-        .filter(|(_, s)| matches_filter(s, filter, hide_empty))
-        .map(|(i, _)| i).collect();
+    let matching = visible_indices(servers, settings);
     let visible_rows = 16;
     let start = selected.saturating_sub(visible_rows / 2)
         .min(matching.len().saturating_sub(visible_rows));
@@ -84,8 +83,9 @@ fn paint(
         } else if on_screen % 2 == 0 {
             rect(frame, 14, row_y, 932, 21, PANEL);
         }
+        let marker = if settings.is_favorite(&server.endpoint) { "+" } else { " " };
         let line = format!(
-            "{:>2}/{:<2}     {:<12} {:<18} {:<50}",
+            "{marker} {:>2}/{:<2}  {:<12} {:<18} {:<49}",
             server.players, server.max_players,
             server.game_type, server.map, server.name,
         );
@@ -93,7 +93,7 @@ fn paint(
     }
     rect(frame, 0, 503, W, 37, PANEL);
     draw_text(frame, 20, 509, &format!(
-        "{}/{} SERVERS  |  UP/DOWN SELECT  |  ENTER JOIN  |  ESC EXIT",
+        "{}/{} SERVERS | UP/DOWN | ENTER JOIN | F FAVORITE | F2 FAVORITES | ESC",
         matching.len(), servers.len(),
     ), TEXT, 1, 107);
     draw_text(frame, 20, 523, &format!("SOURCE: {source}"), MUTED, 1, 105);
@@ -151,6 +151,23 @@ fn show(
                         settings.hide_empty = !settings.hide_empty;
                         selected = 0;
                     }
+                    Key::F2 => {
+                        settings.show_favorites = !settings.show_favorites;
+                        selected = 0;
+                    }
+                    Key::F => {
+                        let matching = visible_indices(&servers, &settings);
+                        if let Some(index) = matching.get(selected) {
+                            let endpoint = servers[*index].endpoint.clone();
+                            let favorite = !settings.is_favorite(&endpoint);
+                            settings.set_favorite(&endpoint, favorite)
+                                .map_err(|e| format!("favorite: {e:?}"))?;
+                            settings.save(&path)
+                                .map_err(|e| format!("save favorites: {e:?}"))?;
+                            selected = selected.min(visible_indices(&servers, &settings)
+                                .len().saturating_sub(1));
+                        }
+                    }
                     Key::F5 => {
                         match fetch_master() {
                             Ok((new_list, _url)) => {
@@ -160,11 +177,10 @@ fn show(
                         }
                     }
                     Key::Enter => {
-                        let matching: Vec<_> = servers.iter()
-                            .filter(|s| matches_filter(s, &settings.search, settings.hide_empty))
-                            .collect();
+                        let matching = visible_indices(&servers, &settings);
                         if !matching.is_empty() {
-                            let host = matching[selected.min(matching.len() - 1)].endpoint.clone();
+                            let idx = matching[selected.min(matching.len() - 1)];
+                            let host = servers[idx].endpoint.clone();
                             settings.last_server = host.clone();
                             settings.save(&path).map_err(|e| format!("save settings: {e:?}"))?;
                             drop(window);
@@ -180,8 +196,7 @@ fn show(
             }
         }
         let matching = paint(
-            &mut frame, &servers, &settings.search, settings.hide_empty, selected,
-            source, &settings.nickname,
+            &mut frame, &servers, &settings, selected, source,
         );
         selected = selected.min(matching.len().saturating_sub(1));
         window.update_with_buffer(&frame.pixels, W, H)
@@ -236,5 +251,24 @@ mod tests {
             handle_filter_key(Key::B, &mut filter);
         }
         assert_eq!(filter.len(), 64);
+    }
+
+    #[test]
+    fn favorites_view_filter_and_selection_refer_to_same_master_rows() {
+        let listing = r#"{"servers":[
+            {"addresses":["tw-0.6+udp://127.0.0.1:8303"],
+             "info":{"name":"One","num_players":10,"map":"Sunny"}},
+            {"addresses":["tw-0.6+udp://127.0.0.1:8304"],
+             "info":{"name":"Two","num_players":2,"map":"Kobra"}}
+        ]}"#;
+        let servers = parse_master(listing.as_bytes()).unwrap();
+        let mut settings = ClientSettings::default();
+        settings.set_favorite("127.0.0.1:8304", true).unwrap();
+        settings.show_favorites = true;
+        let shown = visible_indices(&servers, &settings);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(servers[shown[0]].endpoint, "127.0.0.1:8304");
+        let mut frame = Framebuffer::new(W as u32, H as u32).unwrap();
+        assert_eq!(paint(&mut frame, &servers, &settings, 0, "fixture").len(), 1);
     }
 }

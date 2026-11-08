@@ -323,3 +323,31 @@ Windowed \`--browse-servers\` provides a clickable/connectable listing.
 The **master is discovery only**. Listed server addresses have not been
 verified as connectable, and DDNet 0.7, full DDNet extension negotiation,
 server join compatibility and full game menus still require porting.
+
+## Stage 6 / favorites and connection preferences
+
+The \`ClientSettings\` JSON store now persists up to 128 unique validated
+\`IP:PORT\` favorite 0.6 endpoints, a favorite-only browser flag, a
+receive timeout of 5–60 seconds (default 20) and an automatic reconnect
+limit of 0–10 attempts (default 3). Existing settings files load
+without a migration; invalid favorites and out-of-range options are
+ignored on load. Saving rejects malformed endpoints, duplicates and
+invalid options. Favorite state is kept independently of the master
+list, so \`--favorites\` can inspect it without network access.
+
+In the native browser, press **F** to toggle favorite on the selected
+server and **F2** to show only favorites; **F6** continues to hide
+empty servers. The row prefix \`+\` identifies a favorite.
+The same centralized \`visible_indices\` filter drives both drawing
+and Enter selection. Commands:
+\`--favorites\`,
+\`--favorite add 127.0.0.1:8303\`,
+\`--favorite remove 127.0.0.1:8303\`,
+\`--set-connection 20 3\`,
+\`--connect-last\`.
+The native 0.6 client actually uses the persisted timeout and retry
+count. No saved password/token is added.
+
+Limitations: selecting a saved favorite whose address is absent from the
+current master list is not yet possible in the window. The CLI can list
+it. Real public-server handshake compatibility remains experimental.

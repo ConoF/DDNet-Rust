@@ -21,6 +21,10 @@ pub const MASTER_URLS: [&str; 4] = [
 pub const MAX_MASTER_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_SERVERS: usize = 20_000;
 const MAX_SETTINGS_BYTES: u64 = 16 * 1024;
+pub const MAX_FAVORITES: usize = 128;
+pub const MIN_CONNECT_TIMEOUT_SECS: u64 = 5;
+pub const MAX_CONNECT_TIMEOUT_SECS: u64 = 60;
+pub const MAX_RECONNECT_ATTEMPTS: u8 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrowserError {
@@ -174,6 +178,11 @@ pub struct ClientSettings {
     pub search: String,
     pub hide_empty: bool,
     pub last_server: String,
+    /// Saved 0.6 IP:port favorites, independent of the master listing.
+    pub favorites: Vec<String>,
+    pub show_favorites: bool,
+    pub connect_timeout_secs: u64,
+    pub reconnect_attempts: u8,
 }
 
 impl Default for ClientSettings {
@@ -183,11 +192,68 @@ impl Default for ClientSettings {
             search: String::new(),
             hide_empty: false,
             last_server: String::new(),
+            favorites: Vec::new(),
+            show_favorites: false,
+            connect_timeout_secs: 20,
+            reconnect_attempts: 3,
         }
     }
 }
 
+/// Strict IP:port validation for settings and command-line favorites.
+/// Domains and port zero are rejected instead of silently resolving them.
+pub fn normalize_endpoint(text: &str) -> Option<String> {
+    let address: SocketAddr = text.parse().ok()?;
+    if address.port() == 0 { return None; }
+    Some(address.to_string())
+}
+
+/// Sorted master results are retained, but favorite-only filters apply
+/// after text/empty filtering. No heuristic address guessing is used.
+pub fn visible_indices(servers: &[ServerEntry], settings: &ClientSettings) -> Vec<usize> {
+    servers.iter().enumerate()
+        .filter(|(_, server)| {
+            matches_filter(server, &settings.search, settings.hide_empty)
+                && (!settings.show_favorites || settings.is_favorite(&server.endpoint))
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
 impl ClientSettings {
+    pub fn is_favorite(&self, endpoint: &str) -> bool {
+        self.favorites.iter().any(|favorite| favorite == endpoint)
+    }
+
+    /// Returns true when the favorite set changed; no duplicate entries.
+    pub fn set_favorite(&mut self, endpoint: &str, add: bool) -> Result<bool, BrowserError> {
+        let normalized = normalize_endpoint(endpoint).ok_or(BrowserError::InvalidSchema)?;
+        if add {
+            if self.is_favorite(&normalized) { return Ok(false); }
+            if self.favorites.len() >= MAX_FAVORITES { return Err(BrowserError::TooLarge); }
+            self.favorites.push(normalized);
+            self.favorites.sort_unstable();
+            Ok(true)
+        } else {
+            let count_before = self.favorites.len();
+            self.favorites.retain(|item| item != &normalized);
+            Ok(self.favorites.len() != count_before)
+        }
+    }
+
+    pub fn set_connection_options(
+        &mut self, timeout_secs: u64, reconnects: u8,
+    ) -> Result<(), BrowserError> {
+        if !(MIN_CONNECT_TIMEOUT_SECS..=MAX_CONNECT_TIMEOUT_SECS).contains(&timeout_secs)
+            || reconnects > MAX_RECONNECT_ATTEMPTS
+        {
+            return Err(BrowserError::InvalidSchema);
+        }
+        self.connect_timeout_secs = timeout_secs;
+        self.reconnect_attempts = reconnects;
+        Ok(())
+    }
+
     /// If DDNET_RUST_CONFIG is set, use exactly that path (useful in CI).
     /// Otherwise use standard Windows %APPDATA% / XDG directories.
     pub fn default_path() -> PathBuf {
@@ -229,8 +295,33 @@ impl ClientSettings {
         }
         if let Some(server) = obj.get("last_server").and_then(Value::as_str) {
             // The selected endpoint is saved only if it is a valid IP:port.
-            if server.parse::<SocketAddr>().is_ok() {
-                settings.last_server = server.to_owned();
+            if let Some(endpoint) = normalize_endpoint(server) {
+                settings.last_server = endpoint;
+            }
+        }
+        if let Some(favorites) = obj.get("favorites").and_then(Value::as_array) {
+            for favorite in favorites {
+                if let Some(addr) = favorite.as_str().and_then(normalize_endpoint) {
+                    // Treat invalid or oversized on-disk lists as incomplete.
+                    // Loading must not expose unvalidated endpoints.
+                    if !settings.is_favorite(&addr) && settings.favorites.len() < MAX_FAVORITES {
+                        settings.favorites.push(addr);
+                    }
+                }
+            }
+            settings.favorites.sort_unstable();
+        }
+        if let Some(value) = obj.get("show_favorites").and_then(Value::as_bool) {
+            settings.show_favorites = value;
+        }
+        if let Some(value) = obj.get("connect_timeout_secs").and_then(Value::as_u64) {
+            if (MIN_CONNECT_TIMEOUT_SECS..=MAX_CONNECT_TIMEOUT_SECS).contains(&value) {
+                settings.connect_timeout_secs = value;
+            }
+        }
+        if let Some(value) = obj.get("reconnect_attempts").and_then(Value::as_u64) {
+            if value <= u64::from(MAX_RECONNECT_ATTEMPTS) {
+                settings.reconnect_attempts = value as u8;
             }
         }
         Ok(settings)
@@ -241,7 +332,16 @@ impl ClientSettings {
             || self.nickname.chars().any(char::is_control)
             || self.search.chars().count() > 64
             || (!self.last_server.is_empty()
-                && self.last_server.parse::<SocketAddr>().is_err())
+                && normalize_endpoint(&self.last_server).is_none())
+            || self.favorites.len() > MAX_FAVORITES
+            || self.favorites.iter().any(|s| normalize_endpoint(s).as_deref() != Some(s))
+            || {
+                let mut unique = std::collections::HashSet::new();
+                self.favorites.iter().any(|s| !unique.insert(s))
+            }
+            || !(MIN_CONNECT_TIMEOUT_SECS..=MAX_CONNECT_TIMEOUT_SECS)
+                .contains(&self.connect_timeout_secs)
+            || self.reconnect_attempts > MAX_RECONNECT_ATTEMPTS
         {
             return Err(BrowserError::InvalidSchema);
         }
@@ -250,6 +350,10 @@ impl ClientSettings {
             "search": self.search,
             "hide_empty": self.hide_empty,
             "last_server": self.last_server,
+            "favorites": self.favorites,
+            "show_favorites": self.show_favorites,
+            "connect_timeout_secs": self.connect_timeout_secs,
+            "reconnect_attempts": self.reconnect_attempts,
         });
         let data = serde_json::to_vec_pretty(&json)
             .map_err(|_| BrowserError::InvalidSchema)?;
@@ -313,6 +417,70 @@ mod tests {
         assert_eq!(endpoint_06("tw-0.6+udp://[::1]:8303"), Some("[::1]:8303".into()));
     }
 
+
+    #[test]
+    fn favorites_are_unique_bounded_and_consistent_with_visible_servers() {
+        let servers = parse_master(FIXTURE.as_bytes()).unwrap();
+        let mut settings = ClientSettings::default();
+        settings.set_favorite("[::1]:8304", true).unwrap();
+        assert!(!settings.set_favorite("[::1]:8304", true).unwrap());
+        settings.show_favorites = true;
+        assert_eq!(visible_indices(&servers, &settings), vec![1]);
+        settings.hide_empty = true;
+        assert!(visible_indices(&servers, &settings).is_empty());
+        settings.hide_empty = false;
+        settings.search = "Sunny".into();
+        assert!(visible_indices(&servers, &settings).is_empty());
+        settings.search.clear();
+        assert_eq!(settings.favorites.len(), 1);
+        assert_eq!(settings.set_favorite("[::1]:8304", false), Ok(true));
+        assert_eq!(settings.set_favorite("[::1]:8304", false), Ok(false));
+        assert!(settings.favorites.is_empty());
+        assert_eq!(settings.set_favorite("example.com:8303", true), Err(BrowserError::InvalidSchema));
+        assert_eq!(settings.set_favorite("127.0.0.1:0", true), Err(BrowserError::InvalidSchema));
+        assert_eq!(normalize_endpoint("[::1]:8304"), Some("[::1]:8304".into()));
+    }
+
+    #[test]
+    fn invalid_connection_options_are_rejected_transactionally() {
+        let mut settings = ClientSettings::default();
+        settings.set_connection_options(5, 0).unwrap();
+        assert_eq!(settings.connect_timeout_secs, 5);
+        assert_eq!(settings.reconnect_attempts, 0);
+        let baseline = settings.clone();
+        assert_eq!(settings.set_connection_options(4, 3), Err(BrowserError::InvalidSchema));
+        assert_eq!(settings.set_connection_options(20, 11), Err(BrowserError::InvalidSchema));
+        assert_eq!(settings, baseline);
+        assert!(settings.set_connection_options(60, 10).is_ok());
+        settings.favorites = (1..=MAX_FAVORITES)
+            .map(|port| format!("127.0.0.1:{}", port + 4000))
+            .collect();
+        assert_eq!(settings.set_favorite("127.0.0.1:9000", true), Err(BrowserError::TooLarge));
+        assert_eq!(settings.favorites.len(), MAX_FAVORITES);
+    }
+
+    #[test]
+    fn settings_from_old_versions_have_backward_compatible_defaults() {
+        let path = std::env::temp_dir().join(format!(
+            "ddnet-rust-browser-settings-{}-compat.json", std::process::id(),
+        ));
+        fs::write(&path, r#"{"nickname":"ConoF","search":"race","hide_empty":true,
+            "last_server":"127.0.0.1:8303"}"#).unwrap();
+        let loaded = ClientSettings::load(&path).unwrap();
+        assert_eq!(loaded.nickname, "ConoF");
+        assert_eq!(loaded.connect_timeout_secs, 20);
+        assert_eq!(loaded.reconnect_attempts, 3);
+        assert!(loaded.favorites.is_empty());
+        assert!(!loaded.show_favorites);
+        fs::write(&path, r#"{"favorites":["127.0.0.1:8303","bad","127.0.0.1:8303",
+            "[::1]:8305"],"connect_timeout_secs":999,"reconnect_attempts":99}"#).unwrap();
+        let loaded = ClientSettings::load(&path).unwrap();
+        assert_eq!(loaded.favorites, ["127.0.0.1:8303", "[::1]:8305"]);
+        assert_eq!(loaded.connect_timeout_secs, 20);
+        assert_eq!(loaded.reconnect_attempts, 3);
+        fs::remove_file(&path).unwrap();
+    }
+
     #[test]
     fn settings_roundtrip_and_bad_endpoint_are_sanitized() {
         let path = std::env::temp_dir().join(format!(
@@ -323,6 +491,10 @@ mod tests {
             search: "DDRace".into(),
             hide_empty: true,
             last_server: "127.0.0.1:8303".into(),
+            favorites: vec!["127.0.0.1:8303".into()],
+            show_favorites: true,
+            connect_timeout_secs: 12,
+            reconnect_attempts: 2,
         };
         settings.save(&path).unwrap();
         assert_eq!(ClientSettings::load(&path), Ok(settings.clone()));

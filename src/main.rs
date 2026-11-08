@@ -45,6 +45,12 @@ fn main() {
         [arg, file] if arg == "--servers-file" => servers_list(Some(file), None),
         [arg, file, query] if arg == "--servers-file" => servers_list(Some(file), Some(query)),
         [arg] if arg == "--settings" => print_client_settings(),
+        [arg] if arg == "--favorites" => print_favorites(),
+        [arg, op, endpoint] if arg == "--favorite" =>
+            change_favorite(op, endpoint),
+        [arg, secs, retries] if arg == "--set-connection" =>
+            set_connection_settings(secs, retries),
+        [arg] if arg == "--connect-last" => connect_last(),
         [arg, name] if arg == "--set-name" => set_client_name(name),
         [arg] if arg == "--browse-servers" => browse_servers(),
         [arg, fixture, screenshot] if arg == "--browse-servers-smoke" =>
@@ -80,7 +86,11 @@ fn print_help() {
     println!("  --browse-servers    Native window browser (feature: window)");
     println!("  --browse-servers-smoke MASTER.json OUT.png  X11 browser screenshot");
     println!("  --set-name NICK     Save nickname for 0.6 login (max 15 bytes)");
-    println!("  --settings          Show saved nickname/filter/last server");
+    println!("  --settings          Show saved nickname, filter and connection options");
+    println!("  --favorites         Show saved 0.6 server endpoints");
+    println!("  --favorite add|remove IP:PORT   Manage favorite servers");
+    println!("  --set-connection TIMEOUT RETRIES   Set 5-60s timeout and 0-10 retries");
+    println!("  --connect-last      Connect to last chosen server (window feature)");
     println!("  --version           Print project and upstream versions");
 }
 
@@ -581,6 +591,9 @@ fn print_client_settings() {
     println!("Filter: {}", s.search);
     println!("Hide empty: {}", s.hide_empty);
     println!("Last 0.6 endpoint: {}", s.last_server);
+    println!("Favorites: {} (filter active: {})", s.favorites.len(), s.show_favorites);
+    println!("Receive timeout: {} seconds; reconnects: {}",
+        s.connect_timeout_secs, s.reconnect_attempts);
 }
 
 fn set_client_name(name: &str) {
@@ -621,4 +634,79 @@ fn browse_servers_smoke(fixture: &str, screenshot: &str) {
 fn browse_servers_smoke(_fixture: &str, _screenshot: &str) {
     eprintln!("Browser screenshot requires feature: window");
     std::process::exit(2);
+}
+
+fn print_favorites() {
+    let path = ClientSettings::default_path();
+    let settings = ClientSettings::load(&path).unwrap_or_else(|error| {
+        eprintln!("Cannot load favorites: {error:?}");
+        std::process::exit(1)
+    });
+    println!("{} favorite 0.6 server(s):", settings.favorites.len());
+    for favorite in settings.favorites {
+        println!("{favorite}");
+    }
+}
+
+fn change_favorite(operation: &str, address: &str) {
+    let add = match operation {
+        "add" => true,
+        "remove" => false,
+        _ => {
+            eprintln!("Use --favorite add|remove IP:PORT");
+            std::process::exit(2)
+        }
+    };
+    let path = ClientSettings::default_path();
+    let mut settings = ClientSettings::load(&path).unwrap_or_else(|error| {
+        eprintln!("Cannot load settings: {error:?}");
+        std::process::exit(1)
+    });
+    let changed = settings.set_favorite(address, add).unwrap_or_else(|error| {
+        eprintln!("Invalid favorite: {error:?}");
+        std::process::exit(2)
+    });
+    settings.save(&path).unwrap_or_else(|error| {
+        eprintln!("Cannot save favorite: {error:?}");
+        std::process::exit(1)
+    });
+    println!("Favorite updated: {changed} ({} total)", settings.favorites.len());
+}
+
+fn set_connection_settings(seconds: &str, retries: &str) {
+    let timeout = seconds.parse::<u64>().unwrap_or_else(|_| {
+        eprintln!("Timeout must be a whole number of seconds (5-60)");
+        std::process::exit(2)
+    });
+    let count = retries.parse::<u8>().unwrap_or_else(|_| {
+        eprintln!("Retries must be a whole number (0-10)");
+        std::process::exit(2)
+    });
+    let path = ClientSettings::default_path();
+    let mut settings = ClientSettings::load(&path).unwrap_or_else(|error| {
+        eprintln!("Cannot read settings: {error:?}");
+        std::process::exit(1)
+    });
+    settings.set_connection_options(timeout, count).unwrap_or_else(|error| {
+        eprintln!("Invalid connection options: {error:?}");
+        std::process::exit(2)
+    });
+    settings.save(&path).unwrap_or_else(|error| {
+        eprintln!("Cannot save settings: {error:?}");
+        std::process::exit(1)
+    });
+    println!("Connection: timeout {timeout}s, retries {count}");
+}
+
+fn connect_last() {
+    let path = ClientSettings::default_path();
+    let settings = ClientSettings::load(&path).unwrap_or_else(|error| {
+        eprintln!("Cannot read settings: {error:?}");
+        std::process::exit(1)
+    });
+    if settings.last_server.is_empty() {
+        eprintln!("No last server; choose one in --browse-servers first.");
+        std::process::exit(2)
+    }
+    play_online(&settings.last_server);
 }
