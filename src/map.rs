@@ -1,0 +1,242 @@
+//! Vanilla DDNet game-layer extraction and elementary collision queries.
+//!
+//! Source of truth: game/mapitems.h, game/layers.cpp and game/collision.cpp in
+//! upstream DDNet 20.2.1. This is not the full DDNet collision system:
+//! front tiles, doors, tune zones, teleporters, movement restrictions and
+//! map entities need separate implementations.
+
+use crate::datafile::{Datafile, DatafileError};
+use crate::physics::Vec2;
+
+const MAPITEMTYPE_LAYER: u16 = 5;
+const LAYERTYPE_TILES: i32 = 2;
+const TILESLAYERFLAG_GAME: i32 = 1;
+const TILE_SOLID: u8 = 1;
+const TILE_NOHOOK: u8 = 3;
+const TILE_NOLASER: u8 = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapError {
+    MissingGameLayer,
+    InvalidTileLayer,
+    InvalidDimensions,
+    InvalidTileData,
+    Datafile(DatafileError),
+}
+
+impl From<DatafileError> for MapError {
+    fn from(value: DatafileError) -> Self {
+        Self::Datafile(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Tile {
+    pub index: u8,
+    pub flags: u8,
+    pub skip: u8,
+    pub reserved: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GameMap {
+    pub width: usize,
+    pub height: usize,
+    pub tiles: Vec<Tile>,
+}
+
+fn layer_int(payload: &[u8], offset: usize) -> Option<i32> {
+    let bytes: [u8; 4] = payload.get(offset..offset + 4)?.try_into().ok()?;
+    Some(i32::from_le_bytes(bytes))
+}
+
+impl GameMap {
+    /// Extract the official physics game tile layer.
+    /// `max_tiles` prevents untrusted map files from allocating huge grids.
+    pub fn from_datafile(file: &Datafile<'_>, max_tiles: usize) -> Result<Self, MapError> {
+        let item = file
+            .items
+            .iter()
+            .find(|item| {
+                item.type_id == MAPITEMTYPE_LAYER
+                    && layer_int(item.payload, 4) == Some(LAYERTYPE_TILES)
+                    && layer_int(item.payload, 24)
+                        .is_some_and(|flags| flags & TILESLAYERFLAG_GAME != 0)
+            })
+            .ok_or(MapError::MissingGameLayer)?;
+
+        if item.payload.len() < 60 {
+            return Err(MapError::InvalidTileLayer);
+        }
+        let width = usize::try_from(
+            layer_int(item.payload, 16).ok_or(MapError::InvalidTileLayer)?,
+        )
+        .map_err(|_| MapError::InvalidDimensions)?;
+        let height = usize::try_from(
+            layer_int(item.payload, 20).ok_or(MapError::InvalidTileLayer)?,
+        )
+        .map_err(|_| MapError::InvalidDimensions)?;
+        let tile_count = width.checked_mul(height).ok_or(MapError::InvalidDimensions)?;
+        if width == 0 || height == 0 || tile_count > max_tiles {
+            return Err(MapError::InvalidDimensions);
+        }
+
+        // The first 60 bytes use CMapItemLayerTilemap_v2 layout even for v3+
+        // and legacy DDRace extensions. m_Data is at byte offset 56.
+        let data_index = usize::try_from(
+            layer_int(item.payload, 56).ok_or(MapError::InvalidTileLayer)?,
+        )
+        .map_err(|_| MapError::InvalidTileLayer)?;
+        let tile_bytes = tile_count.checked_mul(4).ok_or(MapError::InvalidDimensions)?;
+        let data = file.raw_data(data_index, tile_bytes)?;
+        Self::from_tile_bytes(width, height, &data)
+    }
+
+    /// Parse CTile records (index, flags, skip, reserved) with explicit
+    /// bounds; the raw game layer has exactly width * height * 4 bytes.
+    pub fn from_tile_bytes(
+        width: usize,
+        height: usize,
+        bytes: &[u8],
+    ) -> Result<Self, MapError> {
+        let count = width.checked_mul(height).ok_or(MapError::InvalidDimensions)?;
+        if width == 0 || height == 0
+            || count.checked_mul(4).ok_or(MapError::InvalidDimensions)? != bytes.len()
+        {
+            return Err(MapError::InvalidTileData);
+        }
+
+        let tiles = bytes
+            .chunks_exact(4)
+            .map(|tile| Tile {
+                index: tile[0],
+                flags: tile[1],
+                skip: tile[2],
+                reserved: tile[3],
+            })
+            .collect();
+        Ok(Self { width, height, tiles })
+    }
+
+    pub fn tile(&self, x: usize, y: usize) -> Option<Tile> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        self.tiles.get(y * self.width + x).copied()
+    }
+
+    /// Mirrors CCollision::GetTile(int x, int y): integer division by 32,
+    /// clamped to the game layer bounds; only 1..4 are returned.
+    pub fn collision_tile_at_pixel(&self, x: i32, y: i32) -> u8 {
+        let tx = (x / 32).clamp(0, self.width as i32 - 1) as usize;
+        let ty = (y / 32).clamp(0, self.height as i32 - 1) as usize;
+        let index = self.tiles[ty * self.width + tx].index;
+        if (TILE_SOLID..=TILE_NOLASER).contains(&index) {
+            index
+        } else {
+            0
+        }
+    }
+
+    /// DDNet CCollision::IsSolid only includes TILE_SOLID and TILE_NOHOOK.
+    pub fn is_solid_pixel(&self, x: i32, y: i32) -> bool {
+        matches!(self.collision_tile_at_pixel(x, y), TILE_SOLID | TILE_NOHOOK)
+    }
+
+    /// CCollision::CheckPoint uses round_to_int before IsSolid.
+    pub fn check_point(&self, x: f32, y: f32) -> bool {
+        self.is_solid_pixel(x.round() as i32, y.round() as i32)
+    }
+
+    /// DDNet collision.cpp::IsOnGround. Position is the tee center.
+    pub fn is_on_ground(&self, center: Vec2, physical_size: f32) -> bool {
+        let y = center.y + physical_size / 2.0 + 5.0;
+        self.check_point(center.x + physical_size / 2.0, y)
+            || self.check_point(center.x - physical_size / 2.0, y)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::physics::{Character, Input, JumpEvent, Tuning};
+
+    fn grid() -> GameMap {
+        let indices: [u8; 9] = [
+            0, 0, 0,
+            0, 9, 0, // freeze tile is not solid
+            1, 3, 2, // solid, nohook, death
+        ];
+        let mut data = Vec::new();
+        for index in indices {
+            data.extend_from_slice(&[index, 0, 0, 0]);
+        }
+        GameMap::from_tile_bytes(3, 3, &data).unwrap()
+    }
+
+    #[test]
+    fn collision_matches_upstream_basic_tile_semantics() {
+        let map = grid();
+        assert_eq!(map.tile(1, 1).unwrap().index, 9);
+        assert_eq!(map.collision_tile_at_pixel(48, 48), 0);
+        assert_eq!(map.collision_tile_at_pixel(16, 80), 1);
+        assert_eq!(map.collision_tile_at_pixel(48, 80), 3);
+        assert_eq!(map.collision_tile_at_pixel(80, 80), 2);
+        assert!(map.is_solid_pixel(16, 80));
+        assert!(map.is_solid_pixel(48, 80));
+        assert!(!map.is_solid_pixel(80, 80));
+        assert!(!map.is_solid_pixel(48, 48));
+    }
+
+    #[test]
+    fn x_y_clamp_and_truncate_match_ddnet() {
+        let map = grid();
+        assert_eq!(map.collision_tile_at_pixel(-500, 80), 1);
+        assert_eq!(map.collision_tile_at_pixel(500, 80), 2);
+        assert_eq!(map.collision_tile_at_pixel(48, -100), 0);
+        assert_eq!(map.collision_tile_at_pixel(48, 500), 3);
+        assert_eq!(map.tile(3, 1), None);
+    }
+
+    #[test]
+    fn grounded_tick_uses_collision_grid() {
+        let map = grid();
+        let pos = Vec2::new(48.0, 48.0);
+        assert!(map.is_on_ground(pos, 28.0));
+        let mut c = Character::default();
+        let event = c.tick_without_collision(
+            Input { direction: 1, jump: true },
+            map.is_on_ground(pos, 28.0),
+            &Tuning::default(),
+        );
+        assert_eq!(event, JumpEvent::Ground);
+        assert_eq!(c.velocity.y, -13.2);
+        assert_eq!(c.velocity.x, 2.0);
+    }
+
+    #[test]
+    fn broken_grids_rejected() {
+        assert_eq!(GameMap::from_tile_bytes(0, 1, &[]), Err(MapError::InvalidTileData));
+        assert_eq!(GameMap::from_tile_bytes(1, 1, &[0]), Err(MapError::InvalidTileData));
+        assert_eq!(
+            GameMap::from_tile_bytes(usize::MAX, 2, &[]),
+            Err(MapError::InvalidDimensions)
+        );
+    }
+
+    #[test]
+    fn map_layer_offset_contract() {
+        let mut payload = vec![0u8; 92];
+        payload[4..8].copy_from_slice(&LAYERTYPE_TILES.to_le_bytes());
+        payload[16..20].copy_from_slice(&3i32.to_le_bytes());
+        payload[20..24].copy_from_slice(&2i32.to_le_bytes());
+        payload[24..28].copy_from_slice(&TILESLAYERFLAG_GAME.to_le_bytes());
+        payload[56..60].copy_from_slice(&7i32.to_le_bytes());
+        assert_eq!(layer_int(&payload, 4), Some(2));
+        assert_eq!(layer_int(&payload, 16), Some(3));
+        assert_eq!(layer_int(&payload, 20), Some(2));
+        assert_eq!(layer_int(&payload, 24), Some(1));
+        assert_eq!(layer_int(&payload, 56), Some(7));
+        assert_eq!(layer_int(&payload, 92), None);
+    }
+}

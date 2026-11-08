@@ -6,6 +6,7 @@
 
 pub mod datafile;
 pub mod network;
+pub mod map;
 pub mod physics;
 pub mod protocol;
 
