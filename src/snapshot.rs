@@ -239,7 +239,7 @@ mod tests {
         let part_first = SnapshotPacket::parse(NETMSG_SNAP, &first).unwrap();
         assert_eq!(assembler.push(part_last.clone()), Ok(None));
         assert_eq!(assembler.push(part_last), Ok(None));
-        let output = assembler.push(part_first).unwrap().unwrap();
+        let output = assembler.push(part_first.clone()).unwrap().unwrap();
         assert_eq!(output.game_tick, 300);
         assert_eq!(output.delta_tick, 298);
         assert_eq!(output.packed_bytes.len(), 908);
