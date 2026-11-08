@@ -240,3 +240,28 @@ hook chain/head, deterministic gait, recent attacks and extreme inputs.
 This is a simple tick-driven **visual approximation**, NOT the complete
 upstream \`CAnimState\` / walk-jump animation blend, dynamic player
 skins, named emotes, weapon sounds, or sprite batching.
+
+## Stage 5 — native Rust WavPack sound-effect decoding (first increment)
+
+\`src/sound_assets.rs\` now decodes the original \`data/audio/*.wv\`
+(WavPack) DDNet 20.2.1 effects via the pure Rust \`wavicle\` 0.1.0
+decoder, with explicitly bounded compressed file sizes, block
+sample-count preflight, 16-bit mono/stereo restrictions, rate validation,
+CRC decoding and resampling. It maps 15 canonical DDNet sound sets by
+their original static names; \`SoundBank\` loads and caches decoded sound
+samples on demand and can schedule spatial effects in \`AudioMixer\`.
+Resampling is nearest neighbor, matching upstream's
+\`CSound::RateConvert\` algorithm instead of inventing higher quality
+but incompatible sample math.
+
+\`cargo run --locked -- --audio-wv-preview upstream/ddnet/data/audio/wp_gun_fire-01.wv target/gun-fire.wav\`
+exports a real DDNet gunshot to 48kHz stereo WAV using the Rust mixer.
+Linux CI decodes original weapon and hook effects, verifies WAV metadata,
+and still tests the synthetic sample output. The \`wavicle\` dependency
+raises MSRV to Rust 1.87 because it uses std integer divisibility APIs.
+
+**Remaining:** no OS audio output device has been wired yet. The CLI
+WAV output is genuine original decoded game audio, but it is not real-time
+headphone/speaker playback. Voice and world-event scheduling, Opus,
+music and sample variants remain for later stages. There is no C++
+runtime or FFI in the Rust decoder.

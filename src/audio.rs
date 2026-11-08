@@ -51,6 +51,43 @@ impl Sample {
     pub fn frames(&self) -> usize { self.data.len() / self.channels }
     pub fn channels(&self) -> usize { self.channels }
     pub fn rate(&self) -> u32 { self.rate }
+
+    /// Port of CSound::RateConvert in DDNet 20.2.1: nearest source
+    /// frame in normalized sample time. Mono/stereo channels remain
+    /// interleaved. This intentionally does not add a quality-changing
+    /// interpolation absent from the original client.
+    pub fn resampled_to(&self, target_rate: u32) -> Result<Self, AudioError> {
+        if !(8_000..=192_000).contains(&target_rate) {
+            return Err(AudioError::InvalidRate);
+        }
+        if self.rate == target_rate {
+            return Ok(self.clone());
+        }
+        let output_frames = self.frames()
+            .checked_mul(target_rate as usize)
+            .ok_or(AudioError::InvalidSample)?
+            / self.rate as usize;
+        if output_frames == 0 || output_frames > target_rate as usize * 120 {
+            return Err(AudioError::InvalidSample);
+        }
+        let output_samples = output_frames.checked_mul(self.channels)
+            .ok_or(AudioError::InvalidSample)?;
+        let mut data = Vec::new();
+        data.try_reserve_exact(output_samples)
+            .map_err(|_| AudioError::InvalidSample)?;
+        for frame in 0..output_frames {
+            let original = frame.checked_mul(self.frames())
+                .ok_or(AudioError::InvalidSample)? / output_frames;
+            let start = original * self.channels;
+            data.extend_from_slice(&self.data[start..start + self.channels]);
+        }
+        let new_loop = (self.loop_start as u64 * u64::from(target_rate)
+            + u64::from(self.rate) / 2) / u64::from(self.rate);
+        let loop_start = usize::try_from(new_loop)
+            .map_err(|_| AudioError::InvalidSample)?
+            .min(output_frames - 1);
+        Self::new(data, self.channels, target_rate, loop_start)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -385,6 +422,24 @@ mod tests {
         assert_eq!(&bytes[40..44], &8u32.to_le_bytes());
         assert_eq!(&bytes[44..46], &1i16.to_le_bytes());
         assert_eq!(bytes.len(), 52);
+    }
+
+    #[test]
+    fn nearest_neighbour_rate_convert_matches_upstream_interleaved_channels() {
+        let input = Sample::new(vec![
+            10, 100, 20, 200, 30, 300, 40, 400,
+        ], 2, 8_000, 2).unwrap();
+        let doubled = input.resampled_to(16_000).unwrap();
+        assert_eq!(doubled.rate(), 16_000);
+        assert_eq!(doubled.frames(), 8);
+        assert_eq!(doubled.loop_start, 4);
+        assert_eq!(doubled.data, [
+            10, 100, 10, 100, 20, 200, 20, 200,
+            30, 300, 30, 300, 40, 400, 40, 400,
+        ]);
+        let reduced = input.resampled_to(8_000).unwrap();
+        assert_eq!(reduced.data, input.data);
+        assert_eq!(input.resampled_to(0), Err(AudioError::InvalidRate));
     }
 
     #[test]

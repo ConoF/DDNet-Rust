@@ -11,7 +11,8 @@ use ddnet_rust::protocol::{decode_int, write_int};
 use ddnet_rust::transport::probe_server;
 use ddnet_rust::session::{GameAction, GameSession06, Stage};
 use ddnet_rust::huffman::{reference_inputs, Huffman};
-use ddnet_rust::audio::{AudioMixer, Sample, VoiceOptions};
+use ddnet_rust::audio::{AudioMixer, Sample, VoiceOptions, MAX_BLOCK_FRAMES};
+use ddnet_rust::sound_assets::decode_wavpack;
 
 const CODEC_VECTORS: &[i32] = &[
     i32::MIN, -65536, -65, -64, -2, -1, 0, 1, 63, 64, 255, 65535, i32::MAX,
@@ -39,6 +40,7 @@ fn main() {
         [arg, map, output] if arg == "--play-offline-smoke" => play_offline_smoke(map, output),
         [arg, host] if arg == "--play-online" => play_online(host),
         [arg, output] if arg == "--audio-smoke" => audio_smoke(output),
+        [arg, file, output] if arg == "--audio-wv-preview" => audio_wv_preview(file, output),
         _ => {
             eprintln!("Unknown arguments. Run ddnet-rust --help.");
             std::process::exit(2);
@@ -62,6 +64,7 @@ fn print_help() {
     println!("  --play-offline-smoke MAP PNG   Run scripted window test under Xvfb");
     println!("  --play-online HOST   Experimental 0.6 UDP snapshot window (feature: window)");
     println!("  --audio-smoke OUT.wav   Export a synthetic PCM mixer test");
+    println!("  --audio-wv-preview SOUND.wv OUT.wav   Decode a real DDNet sound to stereo WAV");
     println!("  --version           Print project and upstream versions");
 }
 
@@ -489,4 +492,33 @@ fn audio_smoke(output: &str) {
         std::process::exit(1);
     });
     println!("Wrote synthetic 440 Hz PCM WAV to {output} (not real DDNet audio assets)");
+}
+
+fn audio_wv_preview(path: &str, output: &str) {
+    use std::sync::Arc;
+    const RATE: u32 = 48_000;
+    let bytes = std::fs::read(path).unwrap_or_else(|error| {
+        eprintln!("Unable to open DDNet WavPack {path}: {error}");
+        std::process::exit(1);
+    });
+    let sample = decode_wavpack(&bytes, RATE).unwrap_or_else(|error| {
+        eprintln!("Failed to decode DDNet WavPack {path}: {error:?}");
+        std::process::exit(1);
+    });
+    let frames = sample.frames();
+    let channels = sample.channels();
+    let mut mixer = AudioMixer::new(RATE).expect("valid output rate");
+    mixer.play(Arc::new(sample), VoiceOptions::default())
+        .expect("valid one-shot decoded voice");
+    let mut mixed = Vec::with_capacity(frames * 2);
+    for chunk in (0..frames).step_by(MAX_BLOCK_FRAMES) {
+        let size = (frames - chunk).min(MAX_BLOCK_FRAMES);
+        mixed.extend_from_slice(&mixer.mix_frames(size).expect("bounded mix chunk"));
+    }
+    let wav = mixer.wav_bytes(&mixed).expect("valid WAV export");
+    std::fs::write(output, wav).unwrap_or_else(|error| {
+        eprintln!("Unable to write {output}: {error}");
+        std::process::exit(1);
+    });
+    println!("Decoded real DDNet .wv: {frames} frames, {channels} channel(s), 48000 Hz -> {output}");
 }

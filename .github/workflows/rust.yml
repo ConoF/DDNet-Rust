@@ -26,6 +26,11 @@ jobs:
         run: |
           cargo run --locked -- --audio-smoke target/audio-smoke.wav
           python3 -c "from pathlib import Path; w=Path('target/audio-smoke.wav').read_bytes(); assert w[:4]==b'RIFF' and w[8:12]==b'WAVE' and len(w)==19244"
+      - name: Decode original DDNet 20.2.1 WavPack sound effects
+        run: |
+          cargo run --locked -- --audio-wv-preview upstream/ddnet/data/audio/wp_gun_fire-01.wv target/gun-fire.wav
+          cargo run --locked -- --audio-wv-preview upstream/ddnet/data/audio/hook_attach-01.wv target/hook-attach.wav
+          python3 -c "import wave; files=['target/gun-fire.wav','target/hook-attach.wav']; [(lambda w: (print(f, w.getnframes(), w.getframerate()), (w.getnframes()>100 and w.getnchannels()==2 and w.getframerate()==48000) or (_ for _ in ()).throw(AssertionError(f))))(wave.open(f,'rb')) for f in files]"
       - name: Compare variable integers with unmodified upstream C++
         shell: bash
         run: |
