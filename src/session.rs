@@ -15,6 +15,8 @@ use crate::game_protocol::{
 use crate::map::{GameMap, MapError};
 use crate::transport::{Client06, Event, TransportError};
 use crate::snapshot::{SnapshotAssembler, SnapshotError, SnapshotPacket};
+use crate::snapshot_delta::{DeltaDecoder, SnapshotState};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
@@ -36,6 +38,7 @@ pub enum GameAction {
     MapLoaded { name: String, width: usize, height: usize },
     EnterGameSent,
     SnapshotReceived { tick: i32, packed_bytes: usize },
+    SnapshotDecoded { tick: i32, item_count: usize },
     Disconnected(String),
 }
 
@@ -75,6 +78,8 @@ pub struct GameSession06 {
     pending_map: Option<MapDownload>,
     map_name: Option<String>,
     snapshots: SnapshotAssembler,
+    decoder: DeltaDecoder,
+    snapshot_states: BTreeMap<i32, SnapshotState>,
 }
 
 impl GameSession06 {
@@ -89,6 +94,8 @@ impl GameSession06 {
             pending_map: None,
             map_name: None,
             snapshots: SnapshotAssembler::new(),
+            decoder: DeltaDecoder::for_vanilla_06(),
+            snapshot_states: BTreeMap::new(),
         }
     }
 
@@ -157,6 +164,8 @@ impl GameSession06 {
                 self.pending_map = Some(pending);
                 self.map_name = Some(change.name.clone());
                 self.loaded_map = None;
+                self.snapshots = SnapshotAssembler::new();
+                self.snapshot_states.clear();
                 self.stage = Stage::Downloading;
                 actions.push(GameAction::MapAnnounced {
                     name: change.name, size: change.size,
@@ -206,6 +215,7 @@ impl GameSession06 {
                         tick: snapshot.game_tick,
                         packed_bytes: snapshot.packed_bytes.len(),
                     });
+                    self.try_decode_snapshot(&snapshot, actions);
                 }
             }
             NETMSG_PING => {
@@ -214,6 +224,42 @@ impl GameSession06 {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Decode delta snapshots if their reference tick is available. Invalid
+    /// deltas/CRCs are ignored rather than poisoning the verified history.
+    fn try_decode_snapshot(
+        &mut self,
+        snapshot: &crate::snapshot::AssembledSnapshot,
+        actions: &mut Vec<GameAction>,
+    ) {
+        let empty = SnapshotState::default();
+        let reference = if snapshot.delta_tick < 0 {
+            Some(&empty)
+        } else {
+            self.snapshot_states.get(&snapshot.delta_tick)
+        };
+        let Some(reference) = reference else { return; };
+        let Ok(state) = self.decoder.unpack(&snapshot.packed_bytes, reference) else {
+            return;
+        };
+        if snapshot.crc.is_some_and(|expected| expected != state.checksum()) {
+            return;
+        }
+        actions.push(GameAction::SnapshotDecoded {
+            tick: snapshot.game_tick,
+            item_count: state.items.len(),
+        });
+        self.snapshot_states.insert(snapshot.game_tick, state);
+        while self.snapshot_states.len() > 64 {
+            if let Some(oldest) = self.snapshot_states.keys().next().copied() {
+                self.snapshot_states.remove(&oldest);
+            }
+        }
+    }
+
+    pub fn snapshot_state(&self, tick: i32) -> Option<&SnapshotState> {
+        self.snapshot_states.get(&tick)
     }
 
     pub fn map_name(&self) -> Option<&str> {
@@ -389,6 +435,65 @@ mod tests {
             client.receive(&server_message(NETMSG_CON_READY, &[], 1, 1)),
             Err(SessionError::UnexpectedStage),
         );
+    }
+
+    #[test]
+    fn headless_decodes_vanilla_character_snapshots_and_deltas() {
+        let map = small_real_datafile_v3();
+        let mut session = GameSession06::new(String::new(), 4096, 1024);
+        feed_handshake(&mut session);
+        session.receive(&server_message(
+            NETMSG_MAP_CHANGE, &make_map_change(&map), 1, 1
+        )).unwrap();
+        session.receive(&server_message(
+            NETMSG_MAP_DATA, &make_map_data(&map), 2, 2
+        )).unwrap();
+        session.receive(&server_message(NETMSG_CON_READY, &[], 3, 3)).unwrap();
+        assert_eq!(session.stage, Stage::EnterGameSent);
+
+        let mut first_data = vec![0, 1, 0, 9, 1];
+        let mut state_words = vec![0; 22];
+        state_words[1] = 128;
+        state_words[2] = 256;
+        first_data.extend_from_slice(&state_words);
+        let mut packed = Vec::new();
+        for &value in &first_data {
+            write_int(value, &mut packed);
+        }
+        let expected_crc = 384i32;
+        let mut snapshot = Vec::new();
+        for value in [100, 101, expected_crc, packed.len() as i32] {
+            write_int(value, &mut snapshot);
+        }
+        snapshot.extend_from_slice(&packed);
+        let events = session.receive(&server_message(
+            NETMSG_SNAPSINGLE, &snapshot, 4, 4
+        )).unwrap();
+        assert!(events.contains(&GameAction::SnapshotDecoded {
+            tick: 100, item_count: 1
+        }));
+        assert_eq!(session.snapshot_state(100).unwrap().find(9, 1).unwrap().words[1], 128);
+
+        let mut delta = vec![0, 1, 0, 9, 1];
+        let mut differences = vec![0; 22];
+        differences[1] = 5;
+        delta.extend_from_slice(&differences);
+        let mut packed_next = Vec::new();
+        for value in delta {
+            write_int(value, &mut packed_next);
+        }
+        let mut next_snap = Vec::new();
+        for value in [101, 1, expected_crc+5, packed_next.len() as i32] {
+            write_int(value, &mut next_snap);
+        }
+        next_snap.extend_from_slice(&packed_next);
+        let events = session.receive(&server_message(
+            NETMSG_SNAPSINGLE, &next_snap, 5, 4
+        )).unwrap();
+        assert!(events.contains(&GameAction::SnapshotDecoded {
+            tick: 101, item_count: 1
+        }));
+        assert_eq!(session.snapshot_state(101).unwrap().find(9, 1).unwrap().words[1], 133);
     }
 
     #[test]
