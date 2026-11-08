@@ -55,17 +55,20 @@ fn preferred_character(snapshot: &SnapshotState) -> Option<Vec2> {
     local.or(first).map(|c| Vec2::new(c.x as f32, c.y as f32))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputMode { Play, Chat, Menu }
+
 fn movement_input(
     direction: i32, jump: bool, hook: bool, fire: i32,
-    target: Vec2, weapons: WeaponControls, chatting: bool, in_menu: bool,
+    target: Vec2, weapons: WeaponControls, mode: InputMode,
 ) -> PlayerInput {
-    if in_menu {
+    if mode == InputMode::Menu {
         return PlayerInput {
             fire, player_flags: PLAYERFLAG_IN_MENU,
             ..PlayerInput::default()
         };
     }
-    if chatting {
+    if mode == InputMode::Chat {
         return PlayerInput {
             fire, player_flags: PLAYERFLAG_CHATTING,
             ..PlayerInput::default()
@@ -519,7 +522,9 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                 (mouse.1 - HEIGHT as f32 / 2.0) / camera.scale,
             ),
             weapons,
-            typing, menu.is_open(),
+            if menu.is_open() { InputMode::Menu }
+                else if typing { InputMode::Chat }
+                else { InputMode::Play },
         );
         for _ in 0..5 {
             if accumulator < TICK { break; }
@@ -744,7 +749,7 @@ mod tests {
         let mut weapons = WeaponControls::default();
         weapons.select(3);
         let input = movement_input(-10, true, true, 3,
-            Vec2::new(30000.0, -20000.0), weapons, false, false);
+            Vec2::new(30000.0, -20000.0), weapons, InputMode::Play);
         assert_eq!(input.direction, -1);
         assert_eq!(input.target_x, 10000);
         assert_eq!(input.target_y, -10000);
@@ -755,7 +760,7 @@ mod tests {
         assert_eq!(input.wanted_weapon, 3);
         assert!(input.validate().is_ok());
         let chat = movement_input(1, true, true, 4,
-            Vec2::new(100.0, 80.0), weapons, true, false);
+            Vec2::new(100.0, 80.0), weapons, InputMode::Chat);
         assert_eq!(chat.direction, 0);
         assert_eq!(chat.jump, 0);
         assert_eq!(chat.hook, 0);
@@ -763,7 +768,7 @@ mod tests {
         assert_eq!(chat.player_flags, PLAYERFLAG_CHATTING);
         assert_eq!(chat.wanted_weapon, 0);
         let paused = movement_input(1, true, true, 4,
-            Vec2::new(100.0, 80.0), weapons, false, true);
+            Vec2::new(100.0, 80.0), weapons, InputMode::Menu);
         assert_eq!(paused.player_flags, PLAYERFLAG_IN_MENU);
         assert_eq!(paused.direction, 0);
         assert_eq!(paused.fire, 4);

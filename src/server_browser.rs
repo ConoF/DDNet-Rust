@@ -526,16 +526,19 @@ mod tests {
         let path = std::env::temp_dir().join(format!(
             "ddnet-rust-menu-prefs-{}.json", std::process::id(),
         ));
-        let mut settings = ClientSettings::default();
-        settings.show_chat = false;
-        settings.show_nameplates = false;
-        settings.sound_enabled = false;
-        settings.fps_limit = 144;
-        settings.zoom_percent = 220;
+        let settings = ClientSettings {
+            show_chat: false,
+            show_nameplates: false,
+            sound_enabled: false,
+            fps_limit: 144,
+            zoom_percent: 220,
+            ..ClientSettings::default()
+        };
         settings.save(&path).unwrap();
         assert_eq!(ClientSettings::load(&path), Ok(settings.clone()));
-        settings.fps_limit = 999;
-        assert_eq!(settings.save(&path), Err(BrowserError::InvalidSchema));
+        let mut invalid = settings.clone();
+        invalid.fps_limit = 999;
+        assert_eq!(invalid.save(&path), Err(BrowserError::InvalidSchema));
         fs::write(&path,
             r#"{"nickname":"old","fps_limit":777,"zoom_percent":500,"sound_enabled":false}"#
         ).unwrap();

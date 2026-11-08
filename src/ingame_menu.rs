@@ -21,8 +21,8 @@ const ACCENT: u32 = 0x9adce8;
 const WARNING: u32 = 0xf4c06b;
 const ROW_HEIGHT: usize = 36;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Page { Game, Players, ServerInfo, Settings }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Page { #[default] Game, Players, ServerInfo, Settings }
 
 impl Page {
     const ALL: [Self; 4] = [Self::Game, Self::Players, Self::ServerInfo, Self::Settings];
@@ -34,9 +34,9 @@ impl Page {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SettingsTab {
-    General, Player, Tee, Appearance, Controls, Graphics, Sound,
+    #[default] General, Player, Tee, Appearance, Controls, Graphics, Sound,
 }
 impl SettingsTab {
     const ALL: [Self; 7] = [Self::General, Self::Player, Self::Tee,
@@ -77,9 +77,6 @@ pub struct MenuState {
     nickname_edit: Option<String>,
     feedback: Option<String>,
 }
-
-impl Default for Page { fn default() -> Self { Self::Game } }
-impl Default for SettingsTab { fn default() -> Self { Self::General } }
 
 #[derive(Clone, Copy)]
 pub struct ServerStatus<'a> {
@@ -508,6 +505,7 @@ fn on_off(value: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "gpu")]
     use crate::graphics::Framebuffer;
     #[cfg(feature = "gpu")]
     use crate::gpu_hud::GpuHudScene;
