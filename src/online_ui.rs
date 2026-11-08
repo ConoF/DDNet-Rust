@@ -14,6 +14,8 @@ use minifb::InputCallback;
 
 use crate::gameplay::MAX_CHAT_BYTES;
 use crate::graphics::Framebuffer;
+use crate::netobjects::{player_name, PlayerInfoNet};
+use crate::snapshot_delta::SnapshotState;
 
 const TEXT: u32 = 0xf2f5fa;
 const ACCENT: u32 = 0x80e0ee;
@@ -137,9 +139,53 @@ impl OnlineHud {
         });
     }
 
+    fn draw_scoreboard(&self, frame: &mut Framebuffer, snapshot: &SnapshotState) {
+        let width = frame.width as usize;
+        let height = frame.height as usize;
+        if width < 320 || height < 200 { return; }
+        let panel_width = width.min(820).saturating_sub(60);
+        let panel_x = (width - panel_width) / 2;
+        let panel_y = 52;
+        let panel_height = (height - 112).min(370);
+        rect(frame, panel_x, panel_y, panel_width, panel_height, BACKGROUND);
+        text(frame, panel_x + 14, panel_y + 10,
+            "SCOREBOARD | TAB TO CLOSE", ACCENT, (panel_width - 24) / 8);
+
+        let mut players = snapshot.items.iter()
+            .filter_map(PlayerInfoNet::from_object)
+            .collect::<Vec<_>>();
+        players.sort_by(|a, b|
+            b.score.cmp(&a.score).then(a.client_id.cmp(&b.client_id))
+        );
+        let columns = if panel_width >= 600 { 2 } else { 1 };
+        let per_column = ((panel_height - 55) / 16).min(20);
+        for (idx, player) in players.iter().take(columns * per_column).enumerate() {
+            let column = idx / per_column;
+            let line = idx % per_column;
+            let col_width = panel_width / columns;
+            let x = panel_x + 14 + column * col_width;
+            let y = panel_y + 34 + line * 16;
+            let name = u16::try_from(player.client_id).ok()
+                .and_then(|id| player_name(snapshot, id))
+                .unwrap_or_else(|| format!("#{}", player.client_id));
+            let label = format!("{:>4} {:<16} {:>4}",
+                player.score, name, player.latency);
+            text(frame, x, y, &label,
+                if player.local { ACCENT } else { TEXT },
+                col_width.saturating_sub(28) / 8);
+        }
+        if players.len() > columns * per_column {
+            text(frame, panel_x + 14, panel_y + panel_height - 16,
+                &format!("{} MORE PLAYERS NOT SHOWN",
+                    players.len() - columns * per_column),
+                NOTICE, (panel_width - 24) / 8);
+        }
+    }
+
     pub fn render(
         &self, frame: &mut Framebuffer, stage: &str,
         local_weapon: Option<i32>, server_tick: Option<i32>,
+        scoreboard: Option<&SnapshotState>,
     ) {
         let width = frame.width as usize;
         let height = frame.height as usize;
@@ -179,6 +225,9 @@ impl OnlineHud {
             let y = height / 3;
             rect(frame, 6, y, width - 12, 16, BACKGROUND);
             text(frame, 12, y + 4, &line.text, NOTICE, (width - 24) / 8);
+        }
+        if let Some(snapshot) = scoreboard {
+            self.draw_scoreboard(frame, snapshot);
         }
         if let Some(draft) = self.draft.as_ref() {
             let y = height - 45;
@@ -226,6 +275,22 @@ mod tests {
     }
 
     #[test]
+    fn scoreboard_displays_snapshot_without_mutating_it() {
+        use crate::snapshot_delta::SnapshotObject;
+        let hud = OnlineHud::new();
+        let state = SnapshotState { items: vec![
+            SnapshotObject { type_id: 10, id: 3, words: vec![1, 3, 0, 50, 30] },
+            SnapshotObject { type_id: 10, id: 4, words: vec![0, 4, 0, 20, 80] },
+        ] };
+        let before = state.clone();
+        let mut frame = Framebuffer::new(640, 480).unwrap();
+        frame.clear(0);
+        hud.render(&mut frame, "Online", None, Some(100), Some(&state));
+        assert_eq!(state, before);
+        assert!(frame.pixels.iter().any(|&pixel| pixel != 0));
+    }
+
+    #[test]
     fn overlay_renders_in_bounded_native_framebuffer() {
         let mut hud = OnlineHud::new();
         hud.open_chat(false);
@@ -233,7 +298,7 @@ mod tests {
         hud.chat_line("[1] ", "test");
         let mut frame = Framebuffer::new(320, 180).unwrap();
         frame.clear(0);
-        hud.render(&mut frame, "Online", Some(1), Some(123));
+        hud.render(&mut frame, "Online", Some(1), Some(123), None);
         assert!(frame.pixels.iter().any(|&px| px != 0));
     }
 }
