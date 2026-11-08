@@ -172,6 +172,69 @@ pub fn fetch_master() -> Result<(Vec<ServerEntry>, &'static str), BrowserError> 
     Err(BrowserError::Network(last))
 }
 
+/// Bindable subset of the controls defined by upstream DDNet 20.2.1.
+pub const BIND_ACTIONS: [&str; 10] = [
+    "MOVE LEFT", "MOVE RIGHT", "JUMP", "JUMP ALT", "FIRE",
+    "HOOK", "HOOK ALT", "CHAT", "TEAM CHAT", "SCOREBOARD",
+];
+const DEFAULT_BINDS: [&str; 10] = [
+    "A", "D", "Space", "W", "MouseLeft",
+    "MouseRight", "E", "T", "Y", "Tab",
+];
+
+pub fn valid_binding(name: &str) -> bool {
+    if matches!(name,
+        "MouseLeft" | "MouseRight" | "MouseMiddle" | "Space" | "Tab"
+        | "Up" | "Down" | "Left" | "Right"
+        | "LeftShift" | "RightShift" | "LeftCtrl" | "RightCtrl"
+        | "LeftAlt" | "RightAlt" | "Enter" | "Backspace"
+        | "Equal" | "Minus" | "Comma" | "Period"
+    ) {
+        return true;
+    }
+    if name.len() == 1 && name.as_bytes()[0].is_ascii_uppercase() {
+        return true;
+    }
+    if let Some(num) = name.strip_prefix("Key") {
+        return num.len() == 1 && num.as_bytes()[0].is_ascii_digit();
+    }
+    if let Some(num) = name.strip_prefix('F') {
+        return num.parse::<u8>().is_ok_and(|n| (1..=12).contains(&n));
+    }
+    false
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyBindings {
+    pub slots: [String; BIND_ACTIONS.len()],
+}
+impl Default for KeyBindings {
+    fn default() -> Self {
+        Self { slots: DEFAULT_BINDS.map(str::to_owned) }
+    }
+}
+impl KeyBindings {
+    pub fn validate(&self) -> bool {
+        let mut used = std::collections::HashSet::new();
+        self.slots.iter().all(|name|
+            valid_binding(name) && used.insert(name.as_str())
+        )
+    }
+
+    /// Reusing a key swaps the two bindings rather than silently disabling
+    /// another action, so every action stays reachable.
+    pub fn set(&mut self, index: usize, key: &str) -> bool {
+        if index >= self.slots.len() || !valid_binding(key) { return false; }
+        if self.slots[index] == key { return false; }
+        if let Some(other) = self.slots.iter().position(|name| name == key) {
+            self.slots.swap(index, other);
+        } else {
+            self.slots[index] = key.to_owned();
+        }
+        true
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientSettings {
     pub nickname: String,
@@ -191,6 +254,7 @@ pub struct ClientSettings {
     pub fps_limit: u16,
     /// Camera scale * 100 (normal gameplay is 150).
     pub zoom_percent: u16,
+    pub bindings: KeyBindings,
 }
 
 impl Default for ClientSettings {
@@ -209,6 +273,7 @@ impl Default for ClientSettings {
             sound_enabled: true,
             fps_limit: 60,
             zoom_percent: 150,
+            bindings: KeyBindings::default(),
         }
     }
 }
@@ -356,6 +421,17 @@ impl ClientSettings {
                 settings.zoom_percent = v as u16;
             }
         }
+        if let Some(entries) = obj.get("bindings").and_then(Value::as_array) {
+            if entries.len() == BIND_ACTIONS.len()
+                && entries.iter().all(|v|v.as_str().is_some_and(valid_binding))
+            {
+                let mut bindings = KeyBindings::default();
+                for (slot, item) in bindings.slots.iter_mut().zip(entries) {
+                    *slot = item.as_str().unwrap_or_default().to_owned();
+                }
+                if bindings.validate() { settings.bindings = bindings; }
+            }
+        }
         Ok(settings)
     }
 
@@ -377,6 +453,7 @@ impl ClientSettings {
             || ![30, 60, 120, 144, 240].contains(&self.fps_limit)
             || !(50..=400).contains(&self.zoom_percent)
             || !self.zoom_percent.is_multiple_of(10)
+            || !self.bindings.validate()
         {
             return Err(BrowserError::InvalidSchema);
         }
@@ -394,6 +471,7 @@ impl ClientSettings {
             "sound_enabled": self.sound_enabled,
             "fps_limit": self.fps_limit,
             "zoom_percent": self.zoom_percent,
+            "bindings": self.bindings.slots,
         });
         let data = serde_json::to_vec_pretty(&json)
             .map_err(|_| BrowserError::InvalidSchema)?;
@@ -519,6 +597,35 @@ mod tests {
         assert_eq!(loaded.connect_timeout_secs, 20);
         assert_eq!(loaded.reconnect_attempts, 3);
         fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn rebind_swaps_conflicts_and_rejects_invalid_names() {
+        let mut binds = KeyBindings::default();
+        assert!(binds.validate());
+        assert!(binds.set(0, "D"));
+        assert_eq!(binds.slots[0], "D");
+        assert_eq!(binds.slots[1], "A");
+        assert!(!binds.set(2, "Escape"));
+        assert!(!binds.set(99, "F1"));
+        assert!(binds.validate());
+        assert!(binds.set(4, "F12"));
+        assert_eq!(binds.slots[4], "F12");
+        assert!(binds.validate());
+    }
+
+    #[test]
+    fn bindings_survive_settings_roundtrip_and_invalid_lists_use_defaults() {
+        let path=std::env::temp_dir().join(format!(
+            "ddnet-rust-bindings-{}.json", std::process::id()));
+        let mut options=ClientSettings::default();
+        assert!(options.bindings.set(0,"Q"));
+        options.save(&path).unwrap();
+        assert_eq!(ClientSettings::load(&path).unwrap(), options);
+        fs::write(&path,r#"{"bindings":["A","A"]}"#).unwrap();
+        assert_eq!(ClientSettings::load(&path).unwrap().bindings,
+            KeyBindings::default());
+        let _=fs::remove_file(path);
     }
 
     #[test]
