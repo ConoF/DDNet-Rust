@@ -67,7 +67,6 @@ fn movement_input(
         wanted_weapon: weapons.wanted_weapon,
         next_weapon: weapons.next_weapon,
         prev_weapon: weapons.prev_weapon,
-        ..PlayerInput::default()
     }
 }
 
