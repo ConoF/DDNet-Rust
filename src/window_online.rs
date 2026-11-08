@@ -415,7 +415,8 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                     .and_then(|tick| session.snapshot_state(tick))
                 {
                     let progress = online_interpolation_fraction(
-                        previous_snapshot.unwrap_or(tick), tick,
+                        previous_snapshot.unwrap_or_default(),
+                        current_snapshot.unwrap_or_default(),
                         last_snapshot_at.elapsed(),
                     );
                     interpolate_snapshots(previous, newest, progress)
