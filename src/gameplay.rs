@@ -130,19 +130,22 @@ mod tests {
 
     #[test]
     fn vanilla_gameplay_message_ids_and_field_order() {
-        let say = decode_message(&client_say(false, "hello").unwrap()).unwrap();
+        let say_bytes = client_say(false, "hello").unwrap();
+        let say = decode_message(&say_bytes).unwrap();
         assert_eq!(say.id, MessageId::Regular { system: false, number: 17 });
         let mut read = Reader::new(say.payload);
         assert_eq!(read.read_int(), Ok(0));
         assert_eq!(read.read_string(), Ok("hello"));
         assert_eq!(read.remaining(), 0);
 
-        let say = decode_message(&client_say(true, "Привет").unwrap()).unwrap();
+        let say_bytes = client_say(true, "Привет").unwrap();
+        let say = decode_message(&say_bytes).unwrap();
         let mut read = Reader::new(say.payload);
         assert_eq!(read.read_int(), Ok(1));
         assert_eq!(read.read_string(), Ok("Привет"));
 
-        let spec = decode_message(&client_set_team(-1).unwrap()).unwrap();
+        let spec_bytes = client_set_team(-1).unwrap();
+        let spec = decode_message(&spec_bytes).unwrap();
         assert_eq!(spec.id, MessageId::Regular { system: false, number: 18 });
         assert_eq!(Reader::new(spec.payload).read_int(), Ok(-1));
         assert_eq!(decode_message(&client_kill()).unwrap().id,
