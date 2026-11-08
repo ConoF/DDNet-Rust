@@ -78,9 +78,9 @@ fn blit(
     sprite: Sprite,
     center: (f32, f32),
     size: (f32, f32),
-    rotation: f32,
-    mirrored_y: bool,
+    orientation: (f32, bool),
 ) {
+    let (rotation, mirrored_y) = orientation;
     if !valid_sheet(atlas, grid) || !center.0.is_finite() || !center.1.is_finite()
         || !rotation.is_finite() || !size.0.is_finite() || !size.1.is_finite()
         || size.0 <= 0.0 || size.1 <= 0.0
@@ -177,10 +177,10 @@ fn draw_hook(
         let center = to_screen(frame, camera, x, y);
         blit(frame, atlas, GRID_GAME, HOOK_CHAIN, center,
              (13.0 * camera.scale, 16.0 * camera.scale),
-             angle + std::f32::consts::FRAC_PI_2, false);
+             (angle + std::f32::consts::FRAC_PI_2, false));
     }
     blit(frame, atlas, GRID_GAME, HOOK_HEAD, tip,
-         (24.0 * camera.scale, 12.0 * camera.scale), angle, false);
+         (24.0 * camera.scale, 12.0 * camera.scale), (angle, false));
 }
 
 fn draw_tee(
@@ -209,17 +209,17 @@ fn draw_tee(
     ] {
         let foot = (center.0 + offset_x * scale, center.1 + offset_y * scale);
         blit(frame, skin, GRID_SKIN, FOOT, foot,
-             (15.0 * scale, 12.0 * scale), 0.0, false);
+             (15.0 * scale, 12.0 * scale), (0.0, false));
     }
     blit(frame, skin, GRID_SKIN, BODY, center,
-         (34.0 * scale, 32.0 * scale), 0.0, false);
+         (34.0 * scale, 32.0 * scale), (0.0, false));
     let emote = words.get(20).copied().unwrap_or(0);
     let facing = if character.direction < 0 { -1.0 } else { 1.0 };
     let blink = emote == 5 || tick % 201 < 3;
     blit(frame, skin, GRID_SKIN, skin_eye(emote),
          (center.0 + facing * 6.0 * scale, center.1 - 3.0 * scale),
          (13.0 * scale, if blink { 3.0 * scale } else { 11.0 * scale }),
-         0.0, facing < 0.0);
+         (0.0, facing < 0.0));
 
     let Some(game) = game.filter(|g| valid_sheet(g, GRID_GAME)) else { return; };
     let weapon = words.get(19).copied().unwrap_or(-1);
@@ -242,7 +242,7 @@ fn draw_tee(
         else if weapon == 1 { (30.0, 17.0) }
         else { (38.0, 19.0) };
     blit(frame, game, GRID_GAME, sprite, weapon_center,
-         (w * scale, h * scale), angle, mirrored);
+         (w * scale, h * scale), (angle, mirrored));
 
     if attack > 0 && (0..=2).contains(&attack_age) {
         if let Some(flash) = muzzle_sprite(weapon) {
@@ -251,7 +251,7 @@ fn draw_tee(
                 weapon_center.1 + aim_y * w * 0.56 * scale,
             );
             blit(frame, game, GRID_GAME, flash, muzzle,
-                 (22.0 * scale, 14.0 * scale), angle, mirrored);
+                 (22.0 * scale, 14.0 * scale), (angle, mirrored));
         }
     }
 }
