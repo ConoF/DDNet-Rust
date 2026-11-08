@@ -7,27 +7,18 @@
 
 use crate::hook::{HookError, HookPeer, HookState};
 use crate::map::GameMap;
-use crate::physics::{JumpEvent, Vec2};
+use crate::physics::Vec2;
 use crate::simulator::{SimError, SimInput, SimStep, TeeSimulator};
 
 pub const MAX_WORLD_PLAYERS: usize = 64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PlayerRules {
     pub team: u8,
     pub solo: bool,
     pub super_mode: bool,
     pub collision_disabled: bool,
     pub hook_disabled: bool,
-}
-
-impl Default for PlayerRules {
-    fn default() -> Self {
-        Self {
-            team: 0, solo: false, super_mode: false,
-            collision_disabled: false, hook_disabled: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -259,7 +250,7 @@ impl World {
         // Move each tee after all deferred interactions, preserving
         // the other characters' current positions for swept collision.
         let mut steps = Vec::with_capacity(n);
-        for i in 0..n {
+        for (i, &(jump, hook)) in events.iter().enumerate() {
             let old = next.players[i].tee.position;
             let grounded = next.players[i].tee.move_core(map)?;
             let new_pos = next.players[i].tee.position;
@@ -279,7 +270,7 @@ impl World {
             steps.push((next.players[i].id, SimStep {
                 tick: tee.tick, position: tee.position,
                 velocity: tee.character.velocity,
-                jump: events[i].0, hook: events[i].1, grounded,
+                jump, hook, grounded,
             }));
         }
         next.tick += 1;
