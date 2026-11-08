@@ -123,8 +123,9 @@ fn handle_filter_key(key: Key, filter: &mut String) {
 }
 
 fn show(
-    servers: Vec<ServerEntry>, source: &str, screenshot: Option<&Path>,
-) -> Result<(), String> {
+    mut servers: Vec<ServerEntry>, source: &str, screenshot: Option<&Path>,
+) -> Result<Option<String>, String> {
+    let mut source_label = source.to_owned();
     let path = ClientSettings::default_path();
     let mut settings = if screenshot.is_some() {
         ClientSettings::default()
@@ -134,7 +135,7 @@ fn show(
     let mut window = Window::new(
         "DDNet-Rust: Server Browser", W, H, WindowOptions::default(),
     ).map_err(|e| format!("server browser window: {e}"))?;
-    window.set_target_fps(60);
+    window.set_target_fps(usize::from(settings.fps_limit));
     let mut frame = Framebuffer::new(W as u32, H as u32)
         .map_err(|e| format!("framebuffer: {e:?}"))?;
     let mut selected = 0usize;
@@ -170,8 +171,10 @@ fn show(
                     }
                     Key::F5 => {
                         match fetch_master() {
-                            Ok((new_list, _url)) => {
-                                return show(new_list, "refreshed master", None);
+                            Ok((new_list, new_source)) => {
+                                servers = new_list;
+                                source_label = new_source;
+                                selected = 0;
                             }
                             Err(error) => eprintln!("Master refresh failed: {error:?}"),
                         }
@@ -183,8 +186,7 @@ fn show(
                             let host = servers[idx].endpoint.clone();
                             settings.last_server = host.clone();
                             settings.save(&path).map_err(|e| format!("save settings: {e:?}"))?;
-                            drop(window);
-                            return crate::window_online::play_online(&host);
+                            return Ok(Some(host));
                         }
                     }
                     _ => {
@@ -196,7 +198,7 @@ fn show(
             }
         }
         let matching = paint(
-            &mut frame, &servers, &settings, selected, source,
+            &mut frame, &servers, &settings, selected, &source_label,
         );
         selected = selected.min(matching.len().saturating_sub(1));
         window.update_with_buffer(&frame.pixels, W, H)
@@ -207,21 +209,30 @@ fn show(
                 let png = frame.png_bytes().map_err(|e| format!("png: {e:?}"))?;
                 std::fs::write(output, png)
                     .map_err(|e| format!("write {}: {e}", output.display()))?;
-                return Ok(());
+                return Ok(None);
             }
         }
     }
     if screenshot.is_none() {
         settings.save(&path).map_err(|e| format!("save settings: {e:?}"))?;
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Download and display official DDNet master servers; Enter attempts
 /// the existing experimental 0.6 connection only (not 0.7).
 pub fn browse_servers() -> Result<(), String> {
     let (servers, url) = fetch_master().map_err(|e| format!("master: {e:?}"))?;
-    show(servers, url, None)
+    // Re-open the browser after an in-game Disconnect without recursive
+    // menus and without leaking any network or window resources.
+    loop {
+        let Some(endpoint) = show(servers.clone(), &url, None)? else {
+            return Ok(());
+        };
+        if let Err(error) = crate::window_online::play_online(&endpoint) {
+            eprintln!("Disconnected from {endpoint}: {error}");
+        }
+    }
 }
 
 /// Deterministic Xvfb smoke: no public network access, no local settings
@@ -230,6 +241,7 @@ pub fn smoke_server_browser(fixture: &str, screenshot: &str) -> Result<(), Strin
     let bytes = std::fs::read(fixture).map_err(|e| format!("fixture: {e}"))?;
     let servers = parse_master(&bytes).map_err(|e| format!("parse fixture: {e:?}"))?;
     show(servers, "local master fixture", Some(Path::new(screenshot)))
+        .map(|_| ())
 }
 
 #[cfg(test)]
