@@ -641,9 +641,11 @@ mod tests {
 
         // Distinct rule: the 60 tick limit applies to a grabbed player,
         // not a ground tile.
-        let mut wall_hook = Hook::default();
-        wall_hook.state = HookState::Grabbed;
-        wall_hook.position = Vec2::new(250.0, 80.0);
+        let mut wall_hook = Hook {
+            state: HookState::Grabbed,
+            position: Vec2::new(250.0, 80.0),
+            ..Hook::default()
+        };
         for _ in 0..100 {
             wall_hook.tick(control, start, &mut velocity, &map, HookTuning::default()).unwrap();
         }
@@ -653,9 +655,11 @@ mod tests {
 
     #[test]
     fn deferred_hook_force_pulls_both_tees_with_saturated_component_speeds() {
-        let mut hook = Hook::default();
-        hook.state = HookState::Grabbed;
-        hook.hooked_player = Some(3);
+        let hook = Hook {
+            state: HookState::Grabbed,
+            hooked_player: Some(3),
+            ..Hook::default()
+        };
         let mut target = peer(3, 250.0, 80.0);
         let mut own_velocity = Vec2::default();
         assert_eq!(hook.apply_player_drag(
