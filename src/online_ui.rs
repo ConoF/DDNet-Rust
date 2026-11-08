@@ -115,6 +115,12 @@ impl HudCanvas for Framebuffer {
     fn write_text(&mut self, x: usize, y: usize, value: &str,
         color: u32, max_chars: usize)
     {
+        if crate::ui_font::draw_text_cpu(
+            &mut self.pixels, self.width as usize, self.height as usize,
+            x,y,value,color,max_chars,
+        ) {
+            return;
+        }
         for (index, ch) in value.chars().take(max_chars).enumerate() {
             let Some(glyph) = BASIC_FONTS.get(ch).or_else(|| BASIC_FONTS.get('?'))
                 else { continue; };

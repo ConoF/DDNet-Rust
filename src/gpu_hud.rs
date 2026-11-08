@@ -1,21 +1,26 @@
 //! GPU HUD commands for chat, scoreboard, nameplates and prompts.
-//! A 128-glyph bitmap atlas is uploaded once, not a full-screen RGB buffer
-//! every frame. This preserves the existing HUD layout, although a proper
-//! DDNet scalable Unicode font still needs to replace Basic Latin.
+//! Original DDNet DejaVu Sans TrueType is rasterized once into a glyph
+//! atlas; native GPU scenes batch proportional Unicode glyph rectangles.
+
 
 use font8x8::{BASIC_FONTS, UnicodeFonts};
 
 use crate::gpu_scene::{GpuBatch, GpuVertex, MAX_FRAME_VERTICES};
 use crate::online_ui::HudCanvas;
+use crate::ui_font;
 
 pub const HUD_SOLID_SLOT: usize = 0;
 pub const HUD_FONT_SLOT: usize = 1;
-pub const FONT_WIDTH: u32 = 128;
-pub const FONT_HEIGHT: u32 = 64;
+pub const FONT_WIDTH: u32 = ui_font::WIDTH;
+pub const FONT_HEIGHT: u32 = ui_font::HEIGHT;
 
 /// Atlas of 128 ASCII glyphs, in 16 columns and 8 rows of 8x8 RGBA.
 /// Matches the legacy bitmap HUD fallback, including missing-glyph '?'.
 pub fn font_atlas_rgba() -> Vec<u8> {
+    if let Some(font) = ui_font::font_atlas() {
+        return font.rgba.clone();
+    }
+    // Keep the ASCII atlas when running without original DDNet assets.
     let mut pixels = vec![0u8; (FONT_WIDTH * FONT_HEIGHT * 4) as usize];
     for code in 0..128u32 {
         let character = char::from_u32(code).unwrap_or('?');
@@ -134,6 +139,27 @@ impl HudCanvas for GpuHudScene {
     fn write_text(&mut self, x: usize, y: usize, value: &str,
         color: u32, max_chars: usize)
     {
+        if let Some(atlas) = ui_font::font_atlas() {
+            let mut pen = x as f32;
+            let baseline = y as f32 + 15.0;
+            for ch in value.chars().take(max_chars) {
+                let Some(glyph) = ui_font::glyph_at(atlas, ch) else { continue };
+                let (gx, gy) = ui_font::glyph_origin(glyph,pen,baseline);
+                if gx >= 0 && gy >= 0 && glyph.width > 0 && glyph.height > 0 {
+                    let x0 = glyph.x as f32 / FONT_WIDTH as f32;
+                    let y0 = glyph.y as f32 / FONT_HEIGHT as f32;
+                    let x1 = (glyph.x+glyph.width) as f32 / FONT_WIDTH as f32;
+                    let y1 = (glyph.y+glyph.height) as f32 / FONT_HEIGHT as f32;
+                    self.quad((gx as usize,gy as usize,
+                        glyph.width as usize,glyph.height as usize),
+                        [[x0,y0],[x1,y0],[x0,y1],[x1,y1]],
+                        color, HUD_FONT_SLOT);
+                }
+                pen += glyph.advance.max(0.0);
+                if pen >= self.width as f32 { break; }
+            }
+            return;
+        }
         for (i, ch) in value.chars().take(max_chars).enumerate() {
             let Some(x) = x.checked_add(i.saturating_mul(8)) else { break };
             if x >= self.width || y >= self.height { break; }
@@ -143,11 +169,13 @@ impl HudCanvas for GpuHudScene {
             if ch == ' ' { continue; }
             let col = glyph % 16;
             let row = glyph / 16;
-            let u = col as f32 / 16.0;
-            let v = row as f32 / 8.0;
+            let u = (col * 8) as f32 / FONT_WIDTH as f32;
+            let v = (row * 8) as f32 / FONT_HEIGHT as f32;
+            let step_u = 8.0 / FONT_WIDTH as f32;
+            let step_v = 8.0 / FONT_HEIGHT as f32;
             let uv = [
-                [u,v],[u + 1.0/16.0,v],
-                [u,v + 1.0/8.0],[u + 1.0/16.0,v + 1.0/8.0],
+                [u,v],[u + step_u,v],
+                [u,v + step_v],[u + step_u,v + step_v],
             ];
             self.quad((x,y,8,8), uv, color, HUD_FONT_SLOT);
         }
@@ -161,16 +189,24 @@ mod tests {
     use crate::graphics::Framebuffer;
 
     #[test]
-    fn ascii_glyph_atlas_matches_pixel_font() {
+    fn original_dejavu_font_atlas_or_ascii_fallback_is_valid() {
         let atlas = font_atlas_rgba();
         assert_eq!(atlas.len(), FONT_WIDTH as usize * FONT_HEIGHT as usize * 4);
-        let glyph = BASIC_FONTS.get('A').unwrap();
-        let col = ('A' as u32 % 16) * 8;
-        let row = ('A' as u32 / 16) * 8;
-        for (y, bits) in glyph.iter().enumerate() {
-            for bit in 0..8u32 {
-                let index = (((row + y as u32) * FONT_WIDTH + col + bit) * 4 + 3) as usize;
-                assert_eq!(atlas[index], if bits & (1 << bit) != 0 { 255 } else { 0 });
+        if let Some(font) = ui_font::font_atlas() {
+            for ch in ['W','A','П','р'] {
+                let glyph=font.glyphs.get(&ch).unwrap();
+                assert!(glyph.x+glyph.width<=FONT_WIDTH);
+                assert!(glyph.y+glyph.height<=FONT_HEIGHT);
+            }
+        } else {
+            let glyph = BASIC_FONTS.get('A').unwrap();
+            let col = ('A' as u32 % 16) * 8;
+            let row = ('A' as u32 / 16) * 8;
+            for (y, bits) in glyph.iter().enumerate() {
+                for bit in 0..8u32 {
+                    let index = (((row + y as u32) * FONT_WIDTH + col + bit) * 4 + 3) as usize;
+                    assert_eq!(atlas[index], if bits & (1 << bit) != 0 { 255 } else { 0 });
+                }
             }
         }
     }
@@ -200,7 +236,7 @@ mod tests {
     #[test]
     fn partial_viewport_glyph_is_clipped_and_bounded() {
         let mut scene = GpuHudScene::new(16,16);
-        scene.write_text(12, 14, "A", 0xff0000, 1);
+        scene.write_text(12, 0, "A", 0xff0000, 1);
         assert_eq!(scene.vertices.len(), 6);
         assert!(scene.vertices.iter().all(|v| v.clip.iter().all(|&p|(-1.0..=1.0).contains(&p))));
         scene.fill_rect(usize::MAX, usize::MAX, 20,20,0xffffff);
