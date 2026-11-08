@@ -244,8 +244,19 @@ impl OnlineHud {
 
     pub fn render<C: HudCanvas>(
         &self, frame: &mut C, stage: &str,
-        _local_weapon: Option<i32>, _server_tick: Option<i32>,
+        local_weapon: Option<i32>, server_tick: Option<i32>,
         scoreboard: Option<&SnapshotState>,
+    ) {
+        self.render_with_visibility(frame, stage, local_weapon, server_tick,
+            scoreboard, true);
+    }
+
+    /// User-selectable chat visibility. The input editor stays available
+    /// even if past chat lines are hidden.
+    pub fn render_with_visibility<C: HudCanvas>(
+        &self, frame: &mut C, stage: &str,
+        _local_weapon: Option<i32>, _server_tick: Option<i32>,
+        scoreboard: Option<&SnapshotState>, show_chat: bool,
     ) {
         let (width, height) = frame.dimensions();
         if width < 240 || height < 120 { return; }
@@ -257,23 +268,25 @@ impl OnlineHud {
             text(frame, 16, 13, &format!("CONNECTING: {stage}"), NOTICE, 24);
         }
 
-        for (i, line) in self.lines.iter().rev().filter(|line|
-            line.arrived_at.elapsed() < VISIBLE_FOR
-        ).take(MAX_LINES).enumerate() {
-            // Chat uses the lower-left area in vanilla DDNet, above input.
-            let y = height.saturating_sub(72 + i * 13);
-            let line_width = (line.text.chars().count() * 8 + 12)
-                .min(width.saturating_sub(12)).min(680);
-            rect(frame, 6, y, line_width, 12, BACKGROUND);
-            text(frame, 12, y + 2, &line.text, TEXT, (width - 24).min(664) / 8);
-        }
+        if show_chat {
+            for (i, line) in self.lines.iter().rev().filter(|line|
+                line.arrived_at.elapsed() < VISIBLE_FOR
+            ).take(MAX_LINES).enumerate() {
+                // Chat uses the lower-left area in vanilla DDNet, above input.
+                let y = height.saturating_sub(72 + i * 13);
+                let line_width = (line.text.chars().count() * 8 + 12)
+                        .min(width.saturating_sub(12)).min(680);
+                rect(frame, 6, y, line_width, 12, BACKGROUND);
+                text(frame, 12, y + 2, &line.text, TEXT, (width - 24).min(664) / 8);
+            }
 
-        if let Some(line) = self.announcement.as_ref().filter(|line|
-            line.arrived_at.elapsed() < Duration::from_secs(7)
-        ) {
-            let y = height / 3;
-            rect(frame, 6, y, width - 12, 16, BACKGROUND);
-            text(frame, 12, y + 4, &line.text, NOTICE, (width - 24) / 8);
+            if let Some(line) = self.announcement.as_ref().filter(|line|
+                line.arrived_at.elapsed() < Duration::from_secs(7)
+            ) {
+                let y = height / 3;
+                rect(frame, 6, y, width - 12, 16, BACKGROUND);
+                text(frame, 12, y + 4, &line.text, NOTICE, (width - 24) / 8);
+            }
         }
         if let Some(snapshot) = scoreboard {
             self.draw_scoreboard(frame, snapshot);
