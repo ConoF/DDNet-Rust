@@ -183,6 +183,14 @@ pub struct ClientSettings {
     pub show_favorites: bool,
     pub connect_timeout_secs: u64,
     pub reconnect_attempts: u8,
+    /// In-game menu preferences, all validated on read/write.
+    pub show_nameplates: bool,
+    pub show_chat: bool,
+    pub sound_enabled: bool,
+    /// Native window FPS limiter, not a simulation-tick setting.
+    pub fps_limit: u16,
+    /// Camera scale * 100 (normal gameplay is 150).
+    pub zoom_percent: u16,
 }
 
 impl Default for ClientSettings {
@@ -196,6 +204,11 @@ impl Default for ClientSettings {
             show_favorites: false,
             connect_timeout_secs: 20,
             reconnect_attempts: 3,
+            show_nameplates: true,
+            show_chat: true,
+            sound_enabled: true,
+            fps_limit: 60,
+            zoom_percent: 150,
         }
     }
 }
@@ -324,6 +337,25 @@ impl ClientSettings {
                 settings.reconnect_attempts = value as u8;
             }
         }
+        if let Some(v) = obj.get("show_nameplates").and_then(Value::as_bool) {
+            settings.show_nameplates = v;
+        }
+        if let Some(v) = obj.get("show_chat").and_then(Value::as_bool) {
+            settings.show_chat = v;
+        }
+        if let Some(v) = obj.get("sound_enabled").and_then(Value::as_bool) {
+            settings.sound_enabled = v;
+        }
+        if let Some(v) = obj.get("fps_limit").and_then(Value::as_u64) {
+            if [30, 60, 120, 144, 240].contains(&v) {
+                settings.fps_limit = v as u16;
+            }
+        }
+        if let Some(v) = obj.get("zoom_percent").and_then(Value::as_u64) {
+            if (50..=400).contains(&v) && v.is_multiple_of(10) {
+                settings.zoom_percent = v as u16;
+            }
+        }
         Ok(settings)
     }
 
@@ -342,6 +374,9 @@ impl ClientSettings {
             || !(MIN_CONNECT_TIMEOUT_SECS..=MAX_CONNECT_TIMEOUT_SECS)
                 .contains(&self.connect_timeout_secs)
             || self.reconnect_attempts > MAX_RECONNECT_ATTEMPTS
+            || ![30, 60, 120, 144, 240].contains(&self.fps_limit)
+            || !(50..=400).contains(&self.zoom_percent)
+            || !self.zoom_percent.is_multiple_of(10)
         {
             return Err(BrowserError::InvalidSchema);
         }
@@ -354,6 +389,11 @@ impl ClientSettings {
             "show_favorites": self.show_favorites,
             "connect_timeout_secs": self.connect_timeout_secs,
             "reconnect_attempts": self.reconnect_attempts,
+            "show_nameplates": self.show_nameplates,
+            "show_chat": self.show_chat,
+            "sound_enabled": self.sound_enabled,
+            "fps_limit": self.fps_limit,
+            "zoom_percent": self.zoom_percent,
         });
         let data = serde_json::to_vec_pretty(&json)
             .map_err(|_| BrowserError::InvalidSchema)?;
