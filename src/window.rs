@@ -112,7 +112,7 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
             SimInput {
                 direction: 1,
                 jump: frames == 2,
-                hook: frames >= 10 && frames < 24,
+                hook: (10..24).contains(&frames),
                 aim: Vec2::new(1.0, -0.5),
             }
         } else {
