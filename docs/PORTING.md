@@ -157,3 +157,22 @@ multiplayer tick orchestration, full team collision restrictions,
 telehook behavior, or player-player collision response. Those need
 a multi-core world integration rather than pretending a single-tee
 simulator provides complete hooking.
+
+## Stage 3.4: bounded multi-character world simulation
+
+A new `src/world.rs` coordinates up to 64 clients with a shared 50 Hz
+tick. It runs the tick phase for all players, applies directional
+`CCharacterCore::TickDeferred` player pushes and hooked-player drag,
+then performs map `MoveBox` integration and sampled tee blocking in
+client-ID order. The input API is keyed by client ID and rejects
+duplicates/unknown IDs without partially committing a tick. Physics
+simulator tick/move phases are reusable by both the isolated and
+multi-character paths. Six synthetic regression tests cover tick order,
+hook influence, pushing, team/solo restrictions and transactionality.
+
+**Limitations:** This is an offline simulation, not a real 64-client game
+world. DDNet's `CTeamsCore` collision logic, `m_MoveRestrictions`, input
+freezing/teleport/tune layers, deterministic server reconciliation and
+the entire network snapshot prediction loop remain incomplete. The
+simple same-team and solo rule is an approximation, not a full port of
+DDNet team semantics.

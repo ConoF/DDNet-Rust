@@ -73,19 +73,43 @@ impl TeeSimulator {
         }
     }
 
-    /// A complete tick within this restricted static-map simulation.
-    /// On invalid motion, internal state is unchanged.
-    pub fn step(
-        &mut self, map: &GameMap, input: SimInput,
-    ) -> Result<SimStep, SimError> {
-        if ![input.aim.x, input.aim.y, self.position.x, self.position.y]
+    /// Tick movement and hook state only; position is integrated later.
+    /// Used by the multi-character world to preserve DDNet tick order.
+    pub(crate) fn tick_core(
+        &mut self,
+        map: &GameMap,
+        input: SimInput,
+        peers: &[crate::hook::HookPeer],
+    ) -> Result<(JumpEvent, HookEvent), SimError> {
+        if ![input.aim.x, input.aim.y, self.position.x, self.position.y,
+            self.character.velocity.x, self.character.velocity.y]
             .iter().all(|value| value.is_finite())
         {
             return Err(SimError::InvalidInput);
         }
+        let grounded_before = map.is_on_ground(
+            self.position, self.hook_tuning.physical_size,
+        );
+        let direction = input.direction.clamp(-1, 1);
+        let jump = self.character.tick_without_collision(
+            Input { direction, jump: input.jump },
+            grounded_before,
+            &self.movement_tuning,
+        );
+        let hook = self.hook.tick_with_players(
+            HookInput { held: input.hook, aim: input.aim, movement: direction },
+            self.position,
+            &mut self.character.velocity,
+            map,
+            self.hook_tuning,
+            peers,
+        )?;
+        Ok((jump, hook))
+    }
 
-        // Validate the tuning parameters before mutating simulated state.
-        // VelocityRamp divides by range and raises curvature to a power.
+    /// Move a ticked tee against static map collisions. This is the
+    /// MoveBox half of CCharacterCore::Move, without other tee collisions.
+    pub(crate) fn move_core(&mut self, map: &GameMap) -> Result<bool, SimError> {
         let t = self.movement_tuning;
         if ![
             t.velramp_start, t.velramp_range, t.velramp_curvature,
@@ -97,64 +121,53 @@ impl TeeSimulator {
         {
             return Err(SimError::InvalidTuning);
         }
-
-        let mut next = *self;
-        let physical = next.hook_tuning.physical_size;
-        let grounded_before = map.is_on_ground(next.position, physical);
-        let direction = input.direction.clamp(-1, 1);
-
-        let jump = next.character.tick_without_collision(
-            Input { direction, jump: input.jump },
-            grounded_before,
-            &next.movement_tuning,
-        );
-
-        let hook = next.hook.tick(
-            HookInput { held: input.hook, aim: input.aim, movement: direction },
-            next.position, &mut next.character.velocity,
-            map, next.hook_tuning,
-        )?;
-
-        // DDNet 20.2.1 CCharacterCore::Move applies VelocityRamp ONLY
-        // during MoveBox collision/position integration, then restores the
-        // underlying horizontal velocity. This matters after hook boosts.
-        let speed = next.character.velocity.x.hypot(next.character.velocity.y) * 50.0;
+        let physical = self.hook_tuning.physical_size;
+        let speed = self.character.velocity.x.hypot(self.character.velocity.y) * 50.0;
         let ramp = velocity_ramp(
             speed, t.velramp_start, t.velramp_range, t.velramp_curvature,
         );
         if !ramp.is_finite() || ramp <= 0.0
-            || !(next.character.velocity.x * ramp).is_finite()
+            || !(self.character.velocity.x * ramp).is_finite()
             || !(1.0 / ramp).is_finite()
         {
             return Err(SimError::InvalidTuning);
         }
-        next.character.velocity.x *= ramp;
-        let size = Vec2::new(physical, physical);
+
+        self.character.velocity.x *= ramp;
         let mut grounded_on_contact = false;
         map.move_box(
-            &mut next.position, &mut next.character.velocity, size,
+            &mut self.position, &mut self.character.velocity,
+            Vec2::new(physical, physical),
             Vec2::new(t.ground_elasticity_x, t.ground_elasticity_y),
             &mut grounded_on_contact,
         )?;
         if grounded_on_contact {
-            next.character.jumped &= !2;
-            next.character.jumped_total = 0;
+            self.character.jumped &= !2;
+            self.character.jumped_total = 0;
         }
-        // C++ uses multiply by the reciprocal, not a direct division.
-        next.character.velocity.x *= 1.0 / ramp;
+        self.character.velocity.x *= 1.0 / ramp;
+        self.tick += 1;
+        Ok(grounded_on_contact || map.is_on_ground(self.position, physical))
+    }
 
-        let grounded_after = grounded_on_contact || map.is_on_ground(next.position, physical);
-        next.tick += 1;
-        let output = SimStep {
+    /// Single-player convenience API, preserving transactional validation
+    /// even when either the Tick or Move phase encounters invalid input.
+    pub fn step(
+        &mut self, map: &GameMap, input: SimInput,
+    ) -> Result<SimStep, SimError> {
+        let mut next = *self;
+        let (jump, hook) = next.tick_core(map, input, &[])?;
+        let grounded = next.move_core(map)?;
+        let step = SimStep {
             tick: next.tick,
             position: next.position,
             velocity: next.character.velocity,
             jump,
             hook,
-            grounded: grounded_after,
+            grounded,
         };
         *self = next;
-        Ok(output)
+        Ok(step)
     }
 
     /// Deterministic offline input replay for regression testing.

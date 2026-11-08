@@ -27,6 +27,7 @@ pub mod window_online;
 pub mod physics;
 pub mod hook;
 pub mod simulator;
+pub mod world;
 pub mod protocol;
 
 pub const UPSTREAM_VERSION: &str = "20.2.1";
