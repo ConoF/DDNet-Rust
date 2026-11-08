@@ -20,7 +20,7 @@ use crate::server_browser::ClientSettings;
 use crate::netobjects::CHARACTER_TYPE;
 use crate::interpolation::interpolate_snapshots;
 use crate::input::{correct_next_input_tick, FireCounter, InputFrame, PlayerInput, PLAYERFLAG_PLAYING};
-use crate::netobjects::{CharacterCoreNet, PlayerInfoNet};
+use crate::netobjects::CharacterCoreNet;
 use crate::physics::Vec2;
 use crate::prediction::{apply_visual_prediction, local_character_id, LocalPredictor};
 use crate::session::{GameAction, GameSession06, Stage};
@@ -32,11 +32,9 @@ const HEIGHT: usize = 540;
 const TICK: Duration = Duration::from_millis(20);
 
 fn preferred_character(snapshot: &SnapshotState) -> Option<Vec2> {
-    let local_id = snapshot.items.iter().filter_map(PlayerInfoNet::from_object)
-        .find(|player| player.local).map(|player| player.client_id);
-    let local = local_id.and_then(|id| snapshot.items.iter()
-        .find(|obj| obj.type_id == CHARACTER_TYPE && obj.id as i32 == id)
-        .and_then(CharacterCoreNet::from_object));
+    let local = local_character_id(snapshot)
+        .and_then(|id| snapshot.find(CHARACTER_TYPE, id))
+        .and_then(CharacterCoreNet::from_object);
     let first = snapshot.items.iter().find_map(CharacterCoreNet::from_object);
     local.or(first).map(|c| Vec2::new(c.x as f32, c.y as f32))
 }
