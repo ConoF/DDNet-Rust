@@ -526,3 +526,13 @@ reports recent FPS and CPU frame+present milliseconds to expose real
 performance regressions. These are client-side improvements; DDNet's
 full smooth-time prediction, GPU rendering and tune-zone support still
 need porting.
+
+
+## Basic in-game UI parity correction
+
+Removed the full-width prototype toolbars from active gameplay (controls
+remain documented in the README). Live chat is anchored above the lower
+left input, and visible tees have simple client-name plates above their
+heads. Rendering is deliberately clipped to visible characters. This is
+a **layout correction only**: the bitmap font still lacks proper Unicode,
+outlined proportional glyphs, and all the original DDNet menu/HUD art.

@@ -13,8 +13,8 @@ use font8x8::{BASIC_FONTS, UnicodeFonts};
 use minifb::InputCallback;
 
 use crate::gameplay::MAX_CHAT_BYTES;
-use crate::graphics::Framebuffer;
-use crate::netobjects::{player_name, PlayerInfoNet};
+use crate::graphics::{Camera, Framebuffer};
+use crate::netobjects::{player_name, PlayerInfoNet, CHARACTER_TYPE};
 use crate::snapshot_delta::SnapshotState;
 
 const TEXT: u32 = 0xf2f5fa;
@@ -139,6 +139,41 @@ impl OnlineHud {
         });
     }
 
+    /// Names occupy screen space above the actual tee, rather than a
+    /// permanent debugging toolbar. This follows the original DDNet
+    /// draw order: after foreground map layers, before chat and menus.
+    pub fn draw_nameplates(
+        &self, frame: &mut Framebuffer, snapshot: &SnapshotState, camera: Camera,
+    ) {
+        let width = frame.width as f32;
+        let height = frame.height as f32;
+        if !camera.scale.is_finite() || !camera.center.x.is_finite()
+            || !camera.center.y.is_finite()
+        {
+            return;
+        }
+        for item in &snapshot.items {
+            if item.type_id != CHARACTER_TYPE || item.words.len() < 3 { continue; }
+            let Some(name) = player_name(snapshot, item.id) else { continue; };
+            if name.is_empty() { continue; }
+            let px = (item.words[1] as f32 - camera.center.x) * camera.scale
+                + width / 2.0;
+            let py = (item.words[2] as f32 - camera.center.y - 32.0) * camera.scale
+                + height / 2.0;
+            if !px.is_finite() || !py.is_finite()
+                || !(-32.0..=width + 32.0).contains(&px)
+                || !(-16.0..=height + 16.0).contains(&py)
+            {
+                continue;
+            }
+            let label_width = name.chars().take(15).count() * 8;
+            let x = (px.round() as i64 - label_width as i64 / 2).max(0) as usize;
+            let y = py.round().max(0.0) as usize;
+            text(frame, x + 1, y + 1, &name, 0x111111, 15);
+            text(frame, x, y, &name, TEXT, 15);
+        }
+    }
+
     fn draw_scoreboard(&self, frame: &mut Framebuffer, snapshot: &SnapshotState) {
         let width = frame.width as usize;
         let height = frame.height as usize;
@@ -184,38 +219,28 @@ impl OnlineHud {
 
     pub fn render(
         &self, frame: &mut Framebuffer, stage: &str,
-        local_weapon: Option<i32>, server_tick: Option<i32>,
+        _local_weapon: Option<i32>, _server_tick: Option<i32>,
         scoreboard: Option<&SnapshotState>,
     ) {
         let width = frame.width as usize;
         let height = frame.height as usize;
         if width < 240 || height < 120 { return; }
 
-        rect(frame, 0, 0, width, 19, BACKGROUND);
-        text(frame, 8, 5,
-            &format!("DDNET-RUST | {stage} | T/Y CHAT | 1-5 WEAPONS | F7 SPEC | F8 PLAY | F10 KILL | ESC"),
-            TEXT, (width - 16) / 8);
-
-        let weapon = match local_weapon {
-            Some(0) => "HAMMER",
-            Some(1) => "GUN",
-            Some(2) => "SHOTGUN",
-            Some(3) => "GRENADE",
-            Some(4) => "LASER",
-            Some(5) => "NINJA",
-            _ => "UNKNOWN",
-        };
-        rect(frame, 0, height - 20, width, 20, BACKGROUND);
-        text(frame, 8, height - 14,
-            &format!("WEAPON: {weapon} | TICK: {} | WHEEL SWITCH | +/- ZOOM",
-                server_tick.map_or(String::from("?"), |tick| tick.to_string())),
-            ACCENT, (width - 16) / 8);
+        // Official gameplay does not obscure the world with permanent
+        // full-width debugging controls. Show status only while connecting.
+        if stage != "EnterGameSent" && stage != "Online" {
+            rect(frame, 8, 8, 210, 18, BACKGROUND);
+            text(frame, 16, 13, &format!("CONNECTING: {stage}"), NOTICE, 24);
+        }
 
         for (i, line) in self.lines.iter().rev().filter(|line|
             line.arrived_at.elapsed() < VISIBLE_FOR
         ).take(MAX_LINES).enumerate() {
-            let y = 26 + i * 13;
-            rect(frame, 6, y, (width - 12).min(680), 12, BACKGROUND);
+            // Chat uses the lower-left area in vanilla DDNet, above input.
+            let y = height.saturating_sub(72 + i * 13);
+            let line_width = (line.text.chars().count() * 8 + 12)
+                .min(width.saturating_sub(12)).min(680);
+            rect(frame, 6, y, line_width, 12, BACKGROUND);
             text(frame, 12, y + 2, &line.text, TEXT, (width - 24).min(664) / 8);
         }
 
@@ -272,6 +297,40 @@ mod tests {
         assert_eq!(hud.lines.front().unwrap().text, "[server] line 21");
         hud.announcement("map changed");
         assert_eq!(hud.announcement.as_ref().unwrap().text, "map changed");
+    }
+
+    #[test]
+    fn nameplates_follow_tees_and_leave_offscreen_players_invisible() {
+        use crate::netobjects::CLIENTINFO_TYPE;
+        use crate::snapshot_delta::SnapshotObject;
+        let name = b"Tee\0";
+        let mut packed = [0u8; 16];
+        packed[..name.len()].copy_from_slice(name);
+        let mut words = vec![0i32; 17];
+        for (i, chunk) in packed.chunks_exact(4).enumerate() {
+            words[i] = i32::from_be_bytes([
+                chunk[0].wrapping_add(128), chunk[1].wrapping_add(128),
+                chunk[2].wrapping_add(128), chunk[3].wrapping_add(128),
+            ]);
+        }
+        words[3] &= !0xff;
+        let mut character = vec![0i32; 22];
+        character[1] = 48; character[2] = 64;
+        let state = SnapshotState { items: vec![
+            SnapshotObject { type_id: CLIENTINFO_TYPE, id: 4, words },
+            SnapshotObject { type_id: CHARACTER_TYPE, id: 4, words: character },
+        ] };
+        let hud = OnlineHud::new();
+        let camera = Camera { center: crate::physics::Vec2::new(48.0,64.0), scale: 1.0 };
+        let mut frame = Framebuffer::new(128, 128).unwrap();
+        frame.clear(0);
+        hud.draw_nameplates(&mut frame, &state, camera);
+        assert!(frame.pixels.iter().any(|&pixel| pixel != 0));
+        let mut offscreen = camera;
+        offscreen.center.x = 100_000.0;
+        frame.clear(0);
+        hud.draw_nameplates(&mut frame, &state, offscreen);
+        assert!(frame.pixels.iter().all(|&pixel| pixel == 0));
     }
 
     #[test]

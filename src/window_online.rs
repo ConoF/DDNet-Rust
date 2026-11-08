@@ -464,6 +464,9 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         } else {
             None
         };
+        if let Some(snapshot) = display.as_ref() {
+            hud.draw_nameplates(&mut pixels, snapshot, camera);
+        }
         hud.render(&mut pixels, &format!("{:?}", session.stage),
             local_weapon, current_snapshot, scoreboard);
         window.update_with_buffer(&pixels.pixels, WIDTH, HEIGHT)
