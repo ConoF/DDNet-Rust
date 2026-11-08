@@ -46,6 +46,8 @@ fn main() {
         [arg, addr, out] if arg == "--capture-headless" => connect_headless(addr, Some(out)),
         [arg, map] if arg == "--play-offline" => play_offline(map),
         [arg, map, output] if arg == "--play-offline-smoke" => play_offline_smoke(map, output),
+        #[cfg(feature = "gpu")]
+        [arg, map] if arg == "--gpu-offline-smoke" => gpu_offline_smoke(map),
         [arg, host] if arg == "--play-online" => play_online(host),
         [arg] if arg == "--servers" => servers_list(None, None),
         [arg, query] if arg == "--servers" => servers_list(None, Some(query)),
@@ -90,6 +92,8 @@ fn print_help() {
     println!("  --capture-headless HOST[:PORT] OUT.png  Capture first decoded snapshot");
     println!("  --play-offline MAP   Offline window: cargo run --features window -- --play-offline MAP");
     println!("  --play-offline-smoke MAP PNG   Run scripted window test under Xvfb");
+    #[cfg(feature = "gpu")]
+    println!("  --gpu-offline-smoke MAP    Test 30 actual GPU-presented frames under Xvfb");
     println!("  --play-online HOST   Experimental 0.6 UDP snapshot window (feature: window)");
     println!("  --audio-smoke OUT.wav   Export a synthetic PCM mixer test");
     println!("  --audio-wv-preview SOUND.wv OUT.wav   Decode a real DDNet sound to stereo WAV");
@@ -504,6 +508,14 @@ fn play_online(endpoint: &str) {
 fn play_online(_endpoint: &str) {
     eprintln!("This command requires --features window");
     std::process::exit(2);
+}
+
+#[cfg(feature = "gpu")]
+fn gpu_offline_smoke(map: &str) {
+    if let Err(error) = ddnet_rust::window::smoke_gpu_offline(map) {
+        eprintln!("GPU offline smoke failed: {error}");
+        std::process::exit(1);
+    }
 }
 
 #[cfg(feature = "window")]

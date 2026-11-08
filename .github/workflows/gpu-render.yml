@@ -7,6 +7,8 @@ on:
       - Cargo.lock
       - src/gpu_renderer.rs
       - src/gpu_scene.rs
+      - src/gpu_shader.wgsl
+      - src/main.rs
       - src/window_online.rs
       - src/window.rs
       - .github/workflows/gpu-render.yml
@@ -24,11 +26,14 @@ jobs:
       - name: Install graphical build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libasound2-dev libx11-dev libxkbcommon-dev libwayland-dev libvulkan1 mesa-vulkan-drivers
+          sudo apt-get install -y pkg-config libasound2-dev libx11-dev libxkbcommon-dev libwayland-dev libvulkan1 mesa-vulkan-drivers xvfb xauth
       - name: Resolve and check GPU feature
         run: |
           cargo check --all-targets --features gpu
           cargo test --lib --features gpu
+      - name: Verify native GPU frame presentation with actual DDNet map
+        run: |
+          xvfb-run -a cargo run --features gpu -- --gpu-offline-smoke upstream/ddnet/data/maps/ctf1.map
       - name: Commit generated GPU dependency lockfile
         if: always()
         run: |
