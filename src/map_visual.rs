@@ -546,7 +546,7 @@ mod tests {
     fn preserves_original_tile_and_quad_interleaving() {
         // A solid quad first, then an ordinary green image-backed tile.
         // Rendering quads in a separate post-pass would incorrectly cover it.
-        let image = words(&[1, 16, 16, 0, 0, 2]);
+        let image = words(&[1, 16, 16, 0, 2, 3]);
         let quad_layer = words(&[0, QUADMAP, 0, 1, 1, 0, -1]);
         let tile_layer = words(&[
             0, TILEMAP, 0, 2, 1, 1, 0,
