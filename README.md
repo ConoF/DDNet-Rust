@@ -124,3 +124,16 @@ The native bitmap glyph atlas is a transition stage, **not** DDNet's
 true scalable UTF-8 glyph renderer. Missing glyphs render as '?'.
 The browser menus, per-player custom skins, and full original DDNet
 UI are separate unfinished subsystems.
+
+
+### In-game Esc menu
+
+While playing online or offline, `Esc` opens a native pause/settings
+menu. Use mouse click or arrows + Enter, `Tab` to switch main pages,
+or keys 1-4. Sections include Game, Players, Server info, Settings.
+Available settings are immediately applied and saved to the same
+configuration as the server browser, including FPS limit, zoom,
+sound enabled, nameplates, chat and UTF-8 nickname (server updates via
+Cl_ChangeInfo). `Esc` again resumes gameplay; Disconnect returns to the
+server browser if launched from it. Missing DDNet 20.2.1 settings are
+explicitly marked unavailable rather than silently doing nothing.

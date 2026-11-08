@@ -633,3 +633,31 @@ monitor scanout. Real hardware benchmark data remains to be collected.
 **Still missing:** DDNet 20.2.1 proportional UTF-8 font rendering
 and exact menu widgets; current font atlas is Basic Latin (8x8);
 full original GUI and GPU browser integration require separate work.
+
+
+## In-game Esc menu and configurable controls (current stage)
+
+`Esc` now opens a real in-game menu rather than terminating the online
+client. It reuses the same `HudCanvas` primitives for both the software
+renderer and native GPU HUD: a Game/Players/Server Info/Settings layout
+with 20.2.1-inspired settings categories (General, Player, Tee,
+Appearance, Controls, Graphics, Sound). The player list comes from
+actual 0.6 snapshots, not fabricated rows.
+
+**Implemented actions:** resume, disconnect (and return to server
+browser when launched from it), join/spectate, kill, live nickname
+change via vital `Cl_ChangeInfo`, mute sound, show/hide chat and nameplates,
+set FPS cap and zoom. Input is suppressed while menus are open and
+the correct original 0.6 `PLAYERFLAG_IN_MENU=2`, `CHATTING=4` flags
+are used. The same menu is available in the offline sandbox; its
+simulation pauses when the menu is open. Settings persist in the
+existing validated JSON config file; existing files migrate safely.
+
+**Not ported:** full DDNet 20.2.1 look (rounded controls, animation,
+original proportional Unicode fonts, localization), live skin selection,
+controls rebinding, full graphics settings, vote interface, friend
+management, console, editor and other official pages. Tee, Appearance
+and Controls currently show informational text instead of fake
+interactive options. These remain follow-up tasks rather than complete
+parity. The `--play-offline-menu-smoke MAP PNG` command captures the
+actual menu in an Xvfb window for regression comparisons.

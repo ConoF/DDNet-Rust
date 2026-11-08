@@ -924,12 +924,14 @@ mod tests {
         let mut client = GameSession06::new(String::new(), 1024, 1024);
         assert_eq!(client.send_chat(false, "hello"), Err(SessionError::UnexpectedStage));
         assert_eq!(client.request_kill(), Err(SessionError::UnexpectedStage));
+        assert_eq!(client.change_name("NewName"), Err(SessionError::UnexpectedStage));
         feed_handshake(&mut client);
         client.stage = Stage::EnterGameSent;
         for packet in [
             client.send_chat(true, "привет").unwrap(),
             client.set_team(-1).unwrap(),
             client.request_kill().unwrap(),
+            client.change_name("NewName").unwrap(),
         ] {
             let crate::network::Packet::Connected { header, payload } =
                 crate::network::parse_packet_06(&packet).unwrap()
@@ -941,7 +943,8 @@ mod tests {
             assert_eq!(chunks[0].header.flags & CHUNK_VITAL, CHUNK_VITAL);
             assert!(!chunks[0].payload.is_empty());
         }
-        assert!(client.transport.outstanding_count() >= 4);
+        assert!(client.transport.outstanding_count() >= 5);
+        assert_eq!(client.start_info.name, "NewName");
     }
 
     #[test]

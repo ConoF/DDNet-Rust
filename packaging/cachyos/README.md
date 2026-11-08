@@ -66,3 +66,14 @@ The game still has CPU-rendered tee sprites and HUD uploaded as
 separate transparent overlays; this is not the original DDNet GPU
 sprite/GUI implementation. The original GPU-render smoke is checked in
 CI using `--gpu-offline-smoke data/maps/ctf1.map`.
+
+
+### Esc menu
+
+Press `Esc` during play to open Game / Players / Server info / Settings.
+Mouse and keyboard navigation are supported; `Esc` resumes play.
+General settings cover chat and nameplates, Player updates your name,
+Graphics sets FPS/zoom, and Sound toggles sounds. The settings persist
+to `~/.config/ddnet-rust/settings.json` on Linux (or the appropriate
+XDG config directory). Exact original DDNet fonts, all skins and
+all menu pages have not yet been ported.
