@@ -168,7 +168,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     let reconnect_limit = connection.reconnect_attempts;
     let receive_timeout = Duration::from_secs(connection.connect_timeout_secs);
     let mut session = GameSession06::new(String::new(), 64 * 1024 * 1024, 16_777_216);
-    session.start_info.name = connection.nickname;
+    session.start_info.name = connection.nickname.clone();
     let mut hello = session.connect().map_err(|e| format!("handshake: {e:?}"))?;
     socket.send(&hello).map_err(|e| format!("CONNECT: {e}"))?;
 
