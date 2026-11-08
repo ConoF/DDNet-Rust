@@ -19,6 +19,7 @@ use crate::network::{
     MAX_CHUNK_SIZE, MAX_PACKET_SIZE, MAX_SEQUENCE,
 };
 use crate::reliable::{is_in_backroom, Delivery, Receiver};
+use crate::huffman::{Huffman, HuffmanError};
 
 const TOKEN_MAGIC: &[u8; 4] = b"TKEN";
 const CTRL_KEEPALIVE: u8 = 0;
@@ -49,7 +50,7 @@ pub enum TransportError {
     InvalidState,
     InvalidAcknowledgement,
     InvalidToken,
-    UnsupportedCompression,
+    Huffman(HuffmanError),
     InvalidControl,
     OversizedMessage,
     TooManyOutstanding,
@@ -86,6 +87,7 @@ pub struct Client06 {
     pub sequence: u16,
     pub peer_ack: u16,
     outstanding: VecDeque<Unacked>,
+    huffman: Huffman,
 }
 
 impl Default for Client06 {
@@ -97,6 +99,7 @@ impl Default for Client06 {
             sequence: 0,
             peer_ack: 0,
             outstanding: VecDeque::new(),
+            huffman: Huffman::new(),
         }
     }
 }
@@ -298,7 +301,16 @@ impl Client06 {
             ]);
         }
 
-        let payload = self.strip_security(payload)?;
+        // In DDNet, Huffman compression covers the entire packet body,
+        // INCLUDING the trailing 0.6 security token. Decompress first.
+        let decompressed = if header.flags & FLAG_COMPRESSION != 0 {
+            Some(self.huffman.decompress(payload, MAX_PACKET_SIZE)
+                .map_err(TransportError::Huffman)?)
+        } else {
+            None
+        };
+        let uncompressed = decompressed.as_deref().unwrap_or(payload);
+        let payload = self.strip_security(uncompressed)?;
         if header.flags & FLAG_CONTROL != 0 {
             let Some(&kind) = payload.first() else {
                 return Err(TransportError::InvalidControl);
@@ -317,9 +329,6 @@ impl Client06 {
             return Ok(Vec::new());
         }
 
-        if header.flags & FLAG_COMPRESSION != 0 {
-            return Err(TransportError::UnsupportedCompression);
-        }
         // Verify all chunks before changing state, to avoid accepting
         // a half-parsed malformed packet.
         let chunks = parse_chunks_06(payload, header.num_chunks)?;
@@ -520,9 +529,12 @@ mod tests {
             c.receive(&packet(0, 0, 1, &[0, 0])),
             Err(TransportError::InvalidToken),
         );
+        let compressed_wrong_token = c.huffman.compress(
+            &[0u8, 0, 1, 2, 3, 4], MAX_PACKET_SIZE
+        ).unwrap();
         assert_eq!(
-            c.receive(&packet(FLAG_COMPRESSION, 0, 1, &[1, 2, 3, 4])),
-            Err(TransportError::UnsupportedCompression),
+            c.receive(&packet(FLAG_COMPRESSION, 0, 1, &compressed_wrong_token)),
+            Err(TransportError::InvalidToken),
         );
         assert_eq!(c.state, State::Online);
         assert_eq!(c.disconnect().unwrap(),
@@ -552,6 +564,21 @@ mod tests {
         });
         assert_eq!(probe_server(address, 4).unwrap(), address);
         join.join().unwrap();
+    }
+
+    #[test]
+    fn huffman_compressed_data_includes_security_token() {
+        let token = 0x0102_0304u32;
+        let mut client = connected(Some(token));
+        let mut payload = ChunkHeader {
+            flags: 0, size: 5, sequence: None,
+        }.encode_06().unwrap();
+        payload.extend_from_slice(b"hello");
+        payload.extend_from_slice(&token.to_be_bytes());
+        let compressed = client.huffman.compress(&payload, MAX_PACKET_SIZE).unwrap();
+        let received = packet(FLAG_COMPRESSION, 0, 1, &compressed);
+        assert_eq!(client.receive(&received).unwrap(),
+            vec![Event::Message(b"hello".to_vec())]);
     }
 
     #[test]
