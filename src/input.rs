@@ -14,6 +14,7 @@ use crate::protocol::{write_int, Reader, CodecError};
 pub const PLAYERFLAG_PLAYING: i32 = 1;
 pub const PLAYERFLAG_IN_MENU: i32 = 2;
 pub const PLAYERFLAG_CHATTING: i32 = 4;
+pub const PLAYERFLAG_SCOREBOARD: i32 = 8;
 const INPUT_STATE_MASK: u8 = 63;
 
 /// Official 0.6 fire input is a 6-bit edge counter, not a boolean.
