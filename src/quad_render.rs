@@ -1,7 +1,6 @@
-//! Static Teeworlds 0.6 map quads. Source: DDNet 20.2.1
-//! game/mapitems.h (CQuad, 152 bytes) and game/map/render_map.cpp.
-//! CPU rasterization is clipped to the viewport; envelopes and full GPU
-//! interpolation are handled by future renderer stages.
+//! DDNet 0.6 map quads (animated translation/rotation/RGBA).
+//! Source: DDNet 20.2.1 mapitems.h (CQuad, 152 bytes) and render_map.cpp.
+//! Software triangles are viewport-clipped; GPU batching is not yet ported.
 
 use crate::envelope::{EnvelopeSet, EnvelopeTimes};
 use crate::graphics::{Camera, Framebuffer};

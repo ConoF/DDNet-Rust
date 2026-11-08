@@ -1,6 +1,6 @@
-//! Preview DDNet map tile images using external PNGs and embedded RGBA data.
-//! This is a CPU-only first step toward the original map renderer.
-//! Quad layers, envelope animations and GPU batching remain unimplemented.
+//! CPU renderer for original DDNet map tiles, quad geometry and envelopes.
+//! Loads PNGs and embedded RGBA data, preserving layer order and alpha.
+//! GPU batching, group clipping and some DDNet extensions remain pending.
 
 use std::path::Path;
 

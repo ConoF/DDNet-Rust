@@ -85,3 +85,23 @@ because quad/envelope backgrounds are not yet drawn.
   screenshot pixel/shape checks) and regression benchmarks.
 - Validate actual 60 FPS playability on the target CachyOS machine;
   report measured p50/p95 frame times, not estimated progress percentages.
+
+
+## 2026-11-08 implementation update
+
+The earlier parity table records the **original audit baseline**, not the
+current full capabilities. The following gaps have since narrowed:
+
+- Implemented basic 152-byte CQuad parsing, textured/solid CPU triangles,
+  original tile/quad ordering and front/background grouping.
+- Added original envelope metadata and 22.10 fixed-point EnvPoints, color
+  and position/rotation animation on quads, and tile color-envelope tint.
+- Added server-tick vs local map-load clocks, demo/online/offline integration,
+  four basic easing curves plus step, and legacy Teeworlds v3 inline Bezier.
+- Added pixel-output regression tests and a flat-color quad raster fast path.
+
+**Remaining P0:** A proper GPU map renderer with quad/texture batching,
+frame pacing and benchmarks; the complete original DDNet UI/font system;
+game-side physics and input/prediction parity. Group clipping and UUID
+Bezier handles still need implementation. Do not claim the Rust window is
+visually equivalent to 20.2.1 yet.
