@@ -27,6 +27,7 @@ use crate::snapshot_delta::{SnapshotObject, SnapshotState};
 use crate::window_assets::{WindowAssets, candidate_roots};
 use crate::server_browser::ClientSettings;
 use crate::ingame_menu::{MenuAction, MenuState, ServerStatus};
+use crate::keybinds::BindSnapshot;
 use crate::online_ui::TextInputCollector;
 use crate::game_audio::{attack_sound_for_weapon, try_start};
 use crate::sound_assets::GameSound;
@@ -162,6 +163,8 @@ fn play_offline_impl(
     let mut menu = MenuState::new();
     if menu_smoke { menu.toggle(); }
     let mut left_was_down = false;
+    let mut right_was_down = false;
+    let mut middle_was_down = false;
 
     while window.is_open() {
         let typed = std::mem::take(&mut *chars.borrow_mut());
@@ -179,7 +182,19 @@ fn play_offline_impl(
             }
         }
         let left_down = window.get_mouse_down(MouseButton::Left);
-        if menu.is_open() && left_down && !left_was_down {
+        let right_down = window.get_mouse_down(MouseButton::Right);
+        let middle_down = window.get_mouse_down(MouseButton::Middle);
+        if menu.is_capturing_binding() {
+            let button = if right_down && !right_was_down { Some("MouseRight") }
+                else if middle_down && !middle_was_down { Some("MouseMiddle") }
+                else if left_down && !left_was_down { Some("MouseLeft") }
+                else { None };
+            if let Some(button) = button {
+                if let Some(action) = menu.bind_mouse(button, &mut settings) {
+                    menu_actions.push(action);
+                }
+            }
+        } else if menu.is_open() && left_down && !left_was_down {
             if let Some(pos) = window.get_mouse_pos(MouseMode::Discard) {
                 if let Some(action) = menu.click(pos, (SCREEN_W, SCREEN_H), &mut settings) {
                     menu_actions.push(action);
@@ -187,6 +202,8 @@ fn play_offline_impl(
             }
         }
         left_was_down = left_down;
+        right_was_down = right_down;
+        middle_was_down = middle_down;
         for action in menu_actions {
             match action {
                 MenuAction::Resume => {}
@@ -216,6 +233,7 @@ fn play_offline_impl(
                 }
             }
         }
+        let sampled_bindings = BindSnapshot::capture(&window, &settings.bindings);
         let now = Instant::now();
         let frame_duration = (now - previous).min(Duration::from_millis(100));
         if menu.is_open() {
@@ -237,8 +255,8 @@ fn play_offline_impl(
         let mouse = window.get_mouse_pos(MouseMode::Discard)
             .unwrap_or((SCREEN_W as f32 * 0.75, SCREEN_H as f32 * 0.5));
         let direction = if menu.is_open() { 0 } else {
-            i32::from(window.is_key_down(Key::D) || window.is_key_down(Key::Right))
-                - i32::from(window.is_key_down(Key::A) || window.is_key_down(Key::Left))
+            i32::from(sampled_bindings.held(1))
+                - i32::from(sampled_bindings.held(0))
         };
         let previous_weapon = selected_weapon;
         if !menu.is_open() && window.is_key_down(Key::Key1) { selected_weapon = 0; }
@@ -252,7 +270,7 @@ fn play_offline_impl(
                 out.play(GameSound::WeaponSwitch, None);
             }
         }
-        let attack_button = window.get_mouse_down(MouseButton::Left);
+        let attack_button = sampled_bindings.held(4);
         if !menu.is_open() && attack_button && !last_attack_button {
             attack_tick = simulator.tick.min(i32::MAX as u64) as i32;
             if let Some(kind) = attack_sound_for_weapon(selected_weapon) {
@@ -264,9 +282,8 @@ fn play_offline_impl(
         last_attack_button = attack_button;
         let controls = SimInput {
             direction,
-            jump: window.is_key_down(Key::W) || window.is_key_down(Key::Space)
-                || window.is_key_down(Key::Up),
-            hook: window.get_mouse_down(MouseButton::Right) || window.is_key_down(Key::E),
+            jump: sampled_bindings.held(2) || sampled_bindings.held(3),
+            hook: sampled_bindings.held(5) || sampled_bindings.held(6),
             aim: Vec2::new(
                 (mouse.0 - SCREEN_W as f32 / 2.0) / camera.scale,
                 (mouse.1 - SCREEN_H as f32 / 2.0) / camera.scale,
