@@ -8,7 +8,7 @@
 
 use crate::hook::{Hook, HookError, HookEvent, HookInput, HookTuning};
 use crate::map::{GameMap, MapError};
-use crate::physics::{Character, Input, JumpEvent, Tuning, Vec2};
+use crate::physics::{velocity_ramp, Character, Input, JumpEvent, Tuning, Vec2};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SimInput {
@@ -39,6 +39,7 @@ pub struct SimStep {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimError {
     InvalidInput,
+    InvalidTuning,
     Hook(HookError),
     Collision(MapError),
 }
@@ -83,6 +84,20 @@ impl TeeSimulator {
             return Err(SimError::InvalidInput);
         }
 
+        // Validate the tuning parameters before mutating simulated state.
+        // VelocityRamp divides by range and raises curvature to a power.
+        let t = self.movement_tuning;
+        if ![
+            t.velramp_start, t.velramp_range, t.velramp_curvature,
+            t.ground_elasticity_x, t.ground_elasticity_y,
+        ].iter().all(|v| v.is_finite())
+            || t.velramp_start < 0.0
+            || t.velramp_range <= 0.0
+            || t.velramp_curvature <= 0.0
+        {
+            return Err(SimError::InvalidTuning);
+        }
+
         let mut next = *self;
         let physical = next.hook_tuning.physical_size;
         let grounded_before = map.is_on_ground(next.position, physical);
@@ -100,12 +115,33 @@ impl TeeSimulator {
             map, next.hook_tuning,
         )?;
 
+        // DDNet 20.2.1 CCharacterCore::Move applies VelocityRamp ONLY
+        // during MoveBox collision/position integration, then restores the
+        // underlying horizontal velocity. This matters after hook boosts.
+        let speed = next.character.velocity.x.hypot(next.character.velocity.y) * 50.0;
+        let ramp = velocity_ramp(
+            speed, t.velramp_start, t.velramp_range, t.velramp_curvature,
+        );
+        if !ramp.is_finite() || ramp <= 0.0
+            || !(next.character.velocity.x * ramp).is_finite()
+            || !(1.0 / ramp).is_finite()
+        {
+            return Err(SimError::InvalidTuning);
+        }
+        next.character.velocity.x *= ramp;
         let size = Vec2::new(physical, physical);
         let mut grounded_on_contact = false;
         map.move_box(
             &mut next.position, &mut next.character.velocity, size,
-            Vec2::default(), &mut grounded_on_contact,
+            Vec2::new(t.ground_elasticity_x, t.ground_elasticity_y),
+            &mut grounded_on_contact,
         )?;
+        if grounded_on_contact {
+            next.character.jumped &= !2;
+            next.character.jumped_total = 0;
+        }
+        // C++ uses multiply by the reciprocal, not a direct division.
+        next.character.velocity.x *= 1.0 / ramp;
 
         let grounded_after = grounded_on_contact || map.is_on_ground(next.position, physical);
         next.tick += 1;
@@ -213,6 +249,61 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(x.len(), 200);
         assert_eq!(a.tick, 200);
+    }
+
+    #[test]
+    fn velocity_ramp_reduces_distance_but_does_not_reduce_saved_speed() {
+        // Start far enough from boundaries so there are no collisions.
+        let map = GameMap::from_tile_bytes(40, 8, &vec![0; 40 * 8 * 4]).unwrap();
+        let mut sim = TeeSimulator::new(Vec2::new(128.0, 80.0));
+        sim.character.velocity = Vec2::new(40.0, 0.0);
+        let input = SimInput { direction: 1, ..SimInput::default() };
+        let expected = velocity_ramp(
+            40.0f32.hypot(0.5) * 50.0, 550.0, 2000.0, 1.4,
+        );
+        assert!(expected < 1.0);
+        let step = sim.step(&map, input).unwrap();
+        assert!((step.position.x - (128.0 + 40.0 * expected)).abs() < 0.02);
+        assert!((step.velocity.x - 40.0).abs() < 0.001);
+
+        // With curvature=1 the original VelocityRamp equals 1 (no slowdown).
+        let mut no_ramp = TeeSimulator::new(Vec2::new(128.0, 80.0));
+        no_ramp.character.velocity = Vec2::new(40.0, 0.0);
+        no_ramp.movement_tuning.velramp_curvature = 1.0;
+        let normal_step = no_ramp.step(&map, input).unwrap();
+        assert!((normal_step.position.x - 168.0).abs() < 0.02);
+        assert!(step.position.x < normal_step.position.x);
+    }
+
+    #[test]
+    fn ground_elasticity_bounce_resets_air_jump_bit_like_cpp_move() {
+        let map = world();
+        let mut sim = TeeSimulator::new(Vec2::new(64.0, 100.0));
+        sim.character.velocity.y = 30.0;
+        sim.character.jumped = 2;
+        sim.character.jumped_total = 1;
+        sim.movement_tuning.ground_elasticity_y = 1.0;
+        let step = sim.step(&map, SimInput::default()).unwrap();
+        assert!(step.grounded);
+        assert!(step.velocity.y < 0.0);
+        assert_eq!(sim.character.jumped & 2, 0);
+        assert_eq!(sim.character.jumped_total, 0);
+        assert!(!map.test_box(step.position, Vec2::new(28.0, 28.0)));
+    }
+
+    #[test]
+    fn invalid_ramp_tuning_does_not_mutate_simulator() {
+        let map = world();
+        let mut sim = TeeSimulator::new(Vec2::new(64.0, 80.0));
+        sim.movement_tuning.velramp_range = 0.0;
+        let before = sim;
+        assert_eq!(sim.step(&map, SimInput::default()), Err(SimError::InvalidTuning));
+        assert_eq!(sim, before);
+        sim.movement_tuning.velramp_range = 2000.0;
+        sim.movement_tuning.velramp_curvature = f32::NAN;
+        let before = sim;
+        assert_eq!(sim.step(&map, SimInput::default()), Err(SimError::InvalidTuning));
+        assert_eq!(sim, before);
     }
 
     #[test]

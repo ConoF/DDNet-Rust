@@ -114,3 +114,16 @@ Up to three consecutive reconnect attempts are allowed, with the counter
 reset after a decoded snapshot. Explicit server disconnect/kick messages do
 not trigger automatic reconnect. This remains prototype recovery, not
 full DDNet failover or timeout protection.
+
+## Stage 3 / movement physics audit, part 1
+
+The local 50 Hz simulator now implements the original `CCharacterCore::Move`
+horizontal `VelocityRamp` around `MoveBox`: adjust horizontal velocity
+for collision movement, then undo the factor so subsequent ticks retain
+the underlying velocity. The default tuning values are 550/2000/1.4.
+Configurable ground/wall elasticity now reaches `MoveBox`, and bouncy
+ground contact resets the consumed air-jump bit like the original
+`CCharacterCore::Move`. Synthetic tests cover fast movement, disabling
+the ramp, bouncy landing and invalid tuning. Complete physics parity
+requires follow-on work on interaction, switches, teleports and player
+prediction; these tests do not establish full game-level equivalence.

@@ -27,6 +27,13 @@ pub struct Tuning {
     pub air_control_accel: f32,
     pub air_friction: f32,
     pub gravity: f32,
+    /// Horizontal velocity ramp in CCharacterCore::Move (world units/sec).
+    pub velramp_start: f32,
+    pub velramp_range: f32,
+    pub velramp_curvature: f32,
+    /// Collision elasticity: 0 = stop, 1 = full bounce.
+    pub ground_elasticity_x: f32,
+    pub ground_elasticity_y: f32,
 }
 
 impl Default for Tuning {
@@ -41,6 +48,11 @@ impl Default for Tuning {
             air_control_accel: 1.5,
             air_friction: 0.95,
             gravity: 0.5,
+            velramp_start: 550.0,
+            velramp_range: 2000.0,
+            velramp_curvature: 1.4,
+            ground_elasticity_x: 0.0,
+            ground_elasticity_y: 0.0,
         }
     }
 }
@@ -195,6 +207,11 @@ mod tests {
         assert_eq!(t.air_control_speed, 5.0);
         assert_eq!(t.air_control_accel, 1.5);
         assert_eq!(t.gravity, 0.5);
+        assert_eq!(t.velramp_start, 550.0);
+        assert_eq!(t.velramp_range, 2000.0);
+        assert_eq!(t.velramp_curvature, 1.4);
+        assert_eq!(t.ground_elasticity_x, 0.0);
+        assert_eq!(t.ground_elasticity_y, 0.0);
     }
 
     #[test]
