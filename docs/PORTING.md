@@ -613,3 +613,23 @@ use the CPU bitmap overlay, and custom per-player skin, original DDNet
 animation-state fidelity, Vulkan-vs-original pixel-diff comparisons and
 real-hardware p50/p95 frame benchmarks remain outstanding. The GPU
 smoke test now rejects frames that don't produce native tee vertices.
+
+
+## Native GPU UI geometry (next render stage)
+
+Implemented a shared HudCanvas drawing protocol for the existing CPU
+framebuffer and a new native GPU path. Chat, scoreboard, nameplates,
+connection status, broadcasts and chat editing now generate batched
+flat-color rectangles and bitmap glyph quads, with a persistent 128x64
+glyph texture. Rendering order is background -> tees/hooks -> foreground
+-> native HUD, and there is no full-frame HUD upload when wgpu is active.
+The GPU fallback for unsupported character skins is unchanged.
+
+The online title provides draw-time p50/p95/p99 plus FPS using a bounded
+2048-frame latency sample. The measurements include CPU work for draw
+submission and present, but **not** actual GPU execution latency or
+monitor scanout. Real hardware benchmark data remains to be collected.
+
+**Still missing:** DDNet 20.2.1 proportional UTF-8 font rendering
+and exact menu widgets; current font atlas is Basic Latin (8x8);
+full original GUI and GPU browser integration require separate work.

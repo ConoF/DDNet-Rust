@@ -104,3 +104,23 @@ overlays until their own GPU paths are ported.
 If no GPU adapter is available, the client falls back to CPU rendering.
 Force CPU for A/B comparison using `DDNET_RENDERER=software`.
 No measured FPS improvement is claimed without a same-machine benchmark.
+
+
+### Native GPU HUD and frame stutter diagnostics
+
+When the `gpu` feature is enabled, online chat, nameplates, server
+broadcasts, input prompts and the in-game scoreboard now draw with
+GPU triangles and a persistent 8x8 glyph atlas. The client does **not**
+re-upload a full-screen CPU HUD image each rendered frame. The old CPU
+framebuffer path remains available using `DDNET_RENDERER=software`.
+
+Online window title shows `FPS` and `draw p50/p95/p99 ms`, sampled
+over approximately one second. Frame draw timing includes GPU surface
+submission/present call but not server networking, input simulation,
+display scanout, or completed GPU execution time. Use the same machine,
+display resolution, and server to compare these numbers.
+
+The native bitmap glyph atlas is a transition stage, **not** DDNet's
+true scalable UTF-8 glyph renderer. Missing glyphs render as '?'.
+The browser menus, per-player custom skins, and full original DDNet
+UI are separate unfinished subsystems.
