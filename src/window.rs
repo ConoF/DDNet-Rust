@@ -14,7 +14,9 @@ use crate::map::GameMap;
 use crate::physics::Vec2;
 use crate::simulator::{SimInput, TeeSimulator};
 use crate::snapshot_delta::{SnapshotObject, SnapshotState};
-use crate::window_assets::WindowAssets;
+use crate::window_assets::{WindowAssets, candidate_roots};
+use crate::game_audio::{attack_sound_for_weapon, try_start};
+use crate::sound_assets::GameSound;
 
 const SCREEN_W: usize = 960;
 const SCREEN_H: usize = 540;
@@ -82,6 +84,11 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
     window.set_target_fps(60);
     let mut pixels = Framebuffer::new(SCREEN_W as u32, SCREEN_H as u32)
         .map_err(|e| format!("framebuffer: {e:?}"))?;
+    // Hardware-free Xvfb smoke remains deterministic. Real play opens the
+    // default WASAPI/ALSA output and keeps decoding on the game thread.
+    let mut audio = if smoke_output.is_none() {
+        try_start(&candidate_roots(Some(Path::new(path))))
+    } else { None };
     let mut simulator = TeeSimulator::new(spawn);
     let mut camera = Camera { center: spawn, scale: 1.5 };
     let mut snapshot = SnapshotState {
@@ -110,15 +117,26 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
             .unwrap_or((SCREEN_W as f32 * 0.75, SCREEN_H as f32 * 0.5));
         let direction = i32::from(window.is_key_down(Key::D) || window.is_key_down(Key::Right))
             - i32::from(window.is_key_down(Key::A) || window.is_key_down(Key::Left));
+        let previous_weapon = selected_weapon;
         if window.is_key_down(Key::Key1) { selected_weapon = 0; }
         if window.is_key_down(Key::Key2) { selected_weapon = 1; }
         if window.is_key_down(Key::Key3) { selected_weapon = 2; }
         if window.is_key_down(Key::Key4) { selected_weapon = 3; }
         if window.is_key_down(Key::Key5) { selected_weapon = 4; }
         if window.is_key_down(Key::Key6) { selected_weapon = 5; }
+        if selected_weapon != previous_weapon {
+            if let Some(out) = audio.as_mut() {
+                out.play(GameSound::WeaponSwitch, None);
+            }
+        }
         let attack_button = window.get_mouse_down(MouseButton::Left);
         if attack_button && !last_attack_button {
             attack_tick = simulator.tick.min(i32::MAX as u64) as i32;
+            if let Some(kind) = attack_sound_for_weapon(selected_weapon) {
+                if let Some(out) = audio.as_mut() {
+                    out.play(kind, Some(simulator.position));
+                }
+            }
         }
         last_attack_button = attack_button;
         let controls = SimInput {
@@ -144,10 +162,15 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
         };
         for _ in 0..5 {
             if accumulator < PHYSICS_TICK { break; }
-            simulator.step(&map, controls).map_err(|e| format!("tick: {e:?}"))?;
+            let step = simulator.step(&map, controls)
+                .map_err(|e| format!("tick: {e:?}"))?;
+            if let Some(out) = audio.as_mut() {
+                out.play_movement(step);
+            }
             accumulator -= PHYSICS_TICK;
         }
 
+        if let Some(out) = audio.as_ref() { out.listener(simulator.position); }
         camera.center.x += (simulator.position.x - camera.center.x) * 0.2;
         camera.center.y += (simulator.position.y - camera.center.y) * 0.2;
         assets.draw_map(&mut pixels, &map, camera)?;

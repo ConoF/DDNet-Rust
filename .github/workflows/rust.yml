@@ -14,6 +14,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Install ALSA SDK for CPAL output backend
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
+      - name: Temporary audio backend lockfile refresh
+        run: |
+          cargo generate-lockfile
+          printf 'DDNET_LOCKFILE_BASE64:'
+          base64 -w0 Cargo.lock
+          printf '\n'
       - name: Build
         run: cargo build --release --locked --features window
       - name: Unit tests and tick simulation

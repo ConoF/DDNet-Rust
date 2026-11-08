@@ -13,7 +13,10 @@ use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
 
 use crate::graphics::{Camera, Framebuffer};
 use crate::datafile::Datafile;
-use crate::window_assets::WindowAssets;
+use crate::window_assets::{WindowAssets, candidate_roots};
+use crate::game_audio::{attack_sound_for_weapon, try_start, GameAudio};
+use crate::sound_assets::GameSound;
+use crate::netobjects::CHARACTER_TYPE;
 use crate::interpolation::interpolate_snapshots;
 use crate::input::{InputFrame, PlayerInput};
 use crate::netobjects::{CharacterCoreNet, PlayerInfoNet};
@@ -48,6 +51,34 @@ fn movement_input(direction: i32, jump: bool, hook: bool, target: Vec2) -> Playe
     }
 }
 
+/// Derive game effects only from consecutive authoritative snapshots,
+/// never from interpolated frames, so >60 FPS render does not replay sound.
+/// Character weapon (word 19), attack tick (word 21), and hook (word 9)
+/// are DDNet 0.6 netobject fields.
+fn play_snapshot_sounds(audio: &mut GameAudio, previous: &SnapshotState,
+                        current: &SnapshotState) {
+    for item in &current.items {
+        if item.type_id != CHARACTER_TYPE || item.words.len() < 22 { continue; }
+        let Some(prev) = previous.items.iter()
+            .find(|other| other.type_id == CHARACTER_TYPE
+                && other.id == item.id && other.words.len() >= 22) else {
+            continue;
+        };
+        let location = Some(Vec2::new(item.words[1] as f32, item.words[2] as f32));
+        if item.words[21] > 0 && item.words[21] != prev.words[21] {
+            if let Some(sound) = attack_sound_for_weapon(item.words[19]) {
+                audio.play(sound, location);
+            }
+        }
+        if item.words[9] == 5 && prev.words[9] != 5 {
+            audio.play(GameSound::HookAttach, location);
+        }
+        if item.words[7] & 1 != 0 && prev.words[7] & 1 == 0 {
+            audio.play(GameSound::PlayerJump, location);
+        }
+    }
+}
+
 /// Opens a real window and connects to a *remote* DDNet 0.6 server.
 /// Inputs go over UDP at 50 Hz. Visuals use map tiles and default skin
 /// when original DDNet data assets are available, with a collision fallback.
@@ -71,6 +102,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         .map_err(|e| format!("framebuffer: {e:?}"))?;
     let mut camera = Camera { center: Vec2::default(), scale: 1.5 };
     let mut assets = WindowAssets::default();
+    let mut audio = try_start(&candidate_roots(None));
     let mut session = GameSession06::new(String::new(), 64 * 1024 * 1024, 16_777_216);
     let mut hello = session.connect().map_err(|e| format!("handshake: {e:?}"))?;
     socket.send(&hello).map_err(|e| format!("CONNECT: {e}"))?;
@@ -114,6 +146,13 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                         socket.send(&wire).map_err(|e| format!("UDP send: {e}"))?;
                     }
                     GameAction::SnapshotDecoded { tick, .. } => {
+                        if let (Some(out), Some(old_tick)) = (audio.as_mut(), current_snapshot) {
+                            if let (Some(previous), Some(current)) =
+                                (session.snapshot_state(old_tick), session.snapshot_state(tick))
+                            {
+                                play_snapshot_sounds(out, previous, current);
+                            }
+                        }
                         reconnect_attempts = 0;
                         last_ack_snapshot = tick;
                         previous_snapshot = current_snapshot;
@@ -169,6 +208,8 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             current_snapshot = None;
             previous_snapshot = None;
             assets = WindowAssets::default();
+            // Reset event deduplication with the snapshot chain. Audio device
+            // stays active and reusable across reconnects.
             accumulator = Duration::ZERO;
             continue;
         }
@@ -236,6 +277,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             });
         if let Some(snapshot) = display.as_ref() {
             if let Some(pos) = preferred_character(snapshot) {
+                if let Some(out) = audio.as_ref() { out.listener(pos); }
                 camera.center.x += (pos.x - camera.center.x) * 0.3;
                 camera.center.y += (pos.y - camera.center.y) * 0.3;
             }

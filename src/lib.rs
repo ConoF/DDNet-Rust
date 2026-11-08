@@ -27,6 +27,10 @@ pub mod window_assets;
 pub mod audio;
 pub mod sound_assets;
 #[cfg(feature = "window")]
+pub mod audio_device;
+#[cfg(feature = "window")]
+pub mod game_audio;
+#[cfg(feature = "window")]
 pub mod window;
 #[cfg(feature = "window")]
 pub mod window_online;

@@ -277,3 +277,27 @@ rather than reporting a corrupt file. The decoder is therefore a
 **partial** DDNet sound loader, not yet a drop-in replacement for the
 original native WavPack backend. CI validates three real lossless effects
 and uploads a playable WAV artifact.
+
+## Stage 5 — native audio output and event playback
+
+\`window\` feature now selects CPAL 0.16.0 to open the host's default
+output stream: WASAPI on Windows or ALSA on Linux. A safe Rust
+\`AudioDevice\` owns the stream and a shared mixer. The audio callback
+supports interleaved i16/f32/u16 samples, mono/stereo/multichannel
+layouts, and bounded mixing blocks. It tries the mutex without waiting:
+if the game thread is scheduling an effect, it outputs silence rather
+than blocking the real-time callback. Original DDNet WavPack samples
+are decoded and cached by the game thread. On absent devices or missing
+local assets, the game remains interactive but silent.
+
+Offline controls now emit real sounds for jump, weapon change, firing
+and hook attachment (if a compatible .wv is available). The online 0.6
+prototype derives weapon attacks, jumping and hook attachment from
+consecutive *authoritative* snapshots rather than visual interpolation,
+preventing repeated sound at display FPS. Positional sounds follow
+the local listener.
+
+Linux and Windows CI build and test the CPAL integration but do not
+guarantee functional hardware playback on end-user machines. CPAL's
+Linux backend uses the system ALSA library (installed in CI); the Rust
+client does not link original DDNet C++ code.
