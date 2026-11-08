@@ -23,6 +23,9 @@ pub const NETMSG_REQUEST_MAP_DATA: u16 = 19;
 pub const NETMSG_PING: u16 = 22;
 pub const NETMSG_PING_REPLY: u16 = 23;
 
+pub const NETMSGTYPE_SV_READYTOENTER: u16 = 8;
+pub const NETMSGTYPE_CL_STARTINFO: u16 = 20;
+
 pub const MAX_MAP_BYTES: usize = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +116,57 @@ pub fn client_info(password: &str) -> Result<Vec<u8>, MessageError> {
     write_string(GAME_NETVERSION_06, &mut data)?;
     write_string(password, &mut data)?;
     system(NETMSG_INFO, &data)
+}
+
+/// Original Teeworlds 0.6 Cl_StartInfo game message. Must be sent after
+/// the system CON_READY and before the server's Sv_ReadyToEnter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartInfo {
+    pub name: String,
+    pub clan: String,
+    pub country: i32,
+    pub skin: String,
+    pub use_custom_color: bool,
+    pub color_body: i32,
+    pub color_feet: i32,
+}
+
+impl Default for StartInfo {
+    fn default() -> Self {
+        Self {
+            name: "DDNet-Rust".to_owned(),
+            clan: String::new(),
+            country: -1,
+            skin: "default".to_owned(),
+            use_custom_color: false,
+            color_body: 0,
+            color_feet: 0,
+        }
+    }
+}
+
+impl StartInfo {
+    /// Strict validation prevents malformed names/skins from reaching
+    /// the remote server. Limits are measured in UTF-8 bytes.
+    pub fn pack(&self) -> Result<Vec<u8>, MessageError> {
+        if self.name.is_empty() || self.name.len() >= 16
+            || self.clan.len() >= 12 || self.skin.is_empty()
+            || self.skin.len() >= 24 {
+            return Err(MessageError::InvalidMessage);
+        }
+        let mut data = Vec::new();
+        write_string(&self.name, &mut data)?;
+        write_string(&self.clan, &mut data)?;
+        write_int(self.country, &mut data);
+        write_string(&self.skin, &mut data)?;
+        write_int(i32::from(self.use_custom_color), &mut data);
+        write_int(self.color_body, &mut data);
+        write_int(self.color_feet, &mut data);
+        encode_message(MessageId::Regular {
+            system: false,
+            number: NETMSGTYPE_CL_STARTINFO,
+        }, &data)
+    }
 }
 
 pub fn client_ready() -> Vec<u8> {
@@ -283,6 +337,41 @@ impl MapDownload {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn original_game_startinfo_wire_fields() {
+        let info = StartInfo {
+            name: "Rust".into(), clan: "DDNet".into(), country: -1,
+            skin: "default".into(), use_custom_color: false,
+            color_body: 0, color_feet: 0,
+        };
+        let data = info.pack().unwrap();
+        let msg = decode_message(&data).unwrap();
+        assert_eq!(msg.id, MessageId::Regular {
+            system: false, number: NETMSGTYPE_CL_STARTINFO,
+        });
+        let mut fields = Reader::new(msg.payload);
+        assert_eq!(fields.read_string(), Ok("Rust"));
+        assert_eq!(fields.read_string(), Ok("DDNet"));
+        assert_eq!(fields.read_int(), Ok(-1));
+        assert_eq!(fields.read_string(), Ok("default"));
+        for _ in 0..3 { assert_eq!(fields.read_int(), Ok(0)); }
+        assert_eq!(fields.remaining(), 0);
+        assert_eq!(NETMSGTYPE_SV_READYTOENTER, 8);
+    }
+
+    #[test]
+    fn start_info_validates_wire_lengths() {
+        let mut info = StartInfo::default();
+        info.name = "abcdefghijklmnop".into();
+        assert_eq!(info.pack(), Err(MessageError::InvalidMessage));
+        info.name = "Rust".into();
+        info.skin = String::new();
+        assert_eq!(info.pack(), Err(MessageError::InvalidMessage));
+        info.skin = "default".into();
+        info.clan = "null\0clan".into();
+        assert_eq!(info.pack(), Err(MessageError::Codec(CodecError::EmbeddedNul)));
+    }
 
     #[test]
     fn client_06_message_golden_vectors() {
