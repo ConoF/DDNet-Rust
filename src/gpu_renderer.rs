@@ -10,6 +10,10 @@ use minifb::Window;
 
 use crate::envelope::EnvelopeTimes;
 use crate::gpu_scene::{build_gpu_scene, GpuBatch, GpuScene, GpuVertex, VERTEX_STRIDE};
+use crate::gpu_tees::{build_gpu_tees, GpuTeeScene, SpriteTextureSlots};
+use crate::sprite_render::{valid_sheet, GRID_SKIN, GRID_GAME};
+use crate::snapshot_delta::SnapshotState;
+use crate::texture::Texture;
 use crate::graphics::{Camera, Framebuffer, BACKGROUND};
 use crate::map_visual::VisualMap;
 
@@ -23,6 +27,15 @@ struct ImageBind {
     group: wgpu::BindGroup,
 }
 
+/// Native sprite context for one frame. The legacy CPU overlay remains an
+/// option for missing skins or unsupported visual map data.
+pub struct TeeFrame<'a> {
+    pub state: Option<&'a SnapshotState>,
+    pub tick: u64,
+    pub skin: Option<&'a Texture>,
+    pub game: Option<&'a Texture>,
+}
+
 pub struct GpuRenderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -32,6 +45,8 @@ pub struct GpuRenderer {
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     images: Vec<ImageBind>,
+    map_image_count: usize,
+    skin_ready: bool,
     overlay_tee: ImageBind,
     overlay_hud: ImageBind,
     vertices: wgpu::Buffer,
@@ -187,7 +202,8 @@ impl GpuRenderer {
         );
         Ok(Self {
             surface, device, queue, config, pipeline, layout, sampler,
-            images: Vec::new(), overlay_tee, overlay_hud,
+            images: Vec::new(), map_image_count: 0, skin_ready: false,
+            overlay_tee, overlay_hud,
             vertices, capacity: INITIAL_VERTICES, overlay_vertices,
         })
     }
@@ -233,10 +249,15 @@ impl GpuRenderer {
         ImageBind { _texture: texture, group }
     }
 
-    /// Call after successful map load; images stay resident in VRAM until
-    /// another map is loaded, instead of decoding/uploading PNGs each frame.
-    pub fn sync_map(&mut self, map: Option<&VisualMap>) {
+    /// Upload atlases only when the actual map or visual assets change.
+    /// Slots: map images (0..N), solid white (N), skin (N+1), game (N+2).
+    /// Keeping those indices stable avoids texture binding churn per frame.
+    pub fn sync_assets(
+        &mut self, map: Option<&VisualMap>,
+        skin: Option<&Texture>, game: Option<&Texture>,
+    ) {
         self.images.clear();
+        self.map_image_count = map.map_or(0, |m| m.images.len());
         if let Some(map) = map {
             for image in &map.images {
                 self.images.push(Self::make_texture(
@@ -249,6 +270,29 @@ impl GpuRenderer {
             &self.device, &self.queue, &self.layout, &self.sampler,
             (1, 1), &WHITE, "DDNet solid white quad texture",
         ));
+        self.skin_ready = skin.is_some_and(|s| valid_sheet(s, GRID_SKIN));
+        let skin = skin.filter(|s| valid_sheet(s, GRID_SKIN));
+        let game = game.filter(|s| valid_sheet(s, GRID_GAME));
+        for (image, label) in [
+            (skin, "DDNet default skin atlas"),
+            (game, "DDNet weapons and hook atlas"),
+        ] {
+            let (dimensions, bytes) = if let Some(image) = image {
+                ((image.width, image.height), image.rgba.as_slice())
+            } else {
+                ((1, 1), &[0u8; 4][..])
+            };
+            self.images.push(Self::make_texture(
+                &self.device, &self.queue, &self.layout, &self.sampler,
+                dimensions, bytes, label,
+            ));
+        }
+    }
+
+    /// True when a compatible skin atlas was loaded. The caller may bypass
+    /// CPU sprite rasterization if the map itself also has visual layers.
+    pub fn native_tees_ready(&self) -> bool {
+        self.skin_ready
     }
 
     fn upload_overlay(queue: &wgpu::Queue, image: &wgpu::Texture, frame: &Framebuffer) {
@@ -286,17 +330,42 @@ impl GpuRenderer {
     /// The two overlay buffers have transparent chroma-key backgrounds.
     pub fn render(
         &mut self, map: Option<&VisualMap>, camera: Camera, times: EnvelopeTimes,
-        tees: &Framebuffer, hud: &Framebuffer,
+        tee: TeeFrame<'_>, tees: &Framebuffer, hud: &Framebuffer,
     ) -> Result<(), String> {
         if tees.width != self.config.width || tees.height != self.config.height
             || hud.width != tees.width || hud.height != tees.height
         {
             return Err("GPU overlay dimensions changed without surface reconfiguration".into());
         }
-        let scene = map.map(|map| {
+        let mut scene = map.map(|map| {
             build_gpu_scene(map, camera, times, self.config.width, self.config.height)
         }).transpose().map_err(|e| format!("GPU scene geometry: {e:?}"))?
             .unwrap_or_default();
+        // For maps with graphics and usable skins, all tee sprites are now
+        // actual native vertices. No tee framebuffer or full-screen tee
+        // texture is uploaded in this path.
+        let native = self.skin_ready && map.is_some();
+        let mut sprite = if native {
+            tee.state.map(|state| build_gpu_tees(
+                state, camera, tee.tick,
+                (self.config.width, self.config.height),
+                tee.skin, tee.game, SpriteTextureSlots {
+                    white: self.map_image_count,
+                    skin: self.map_image_count + 1,
+                    game: self.map_image_count + 2,
+                },
+            )).transpose().map_err(|e| format!("GPU tee geometry: {e:?}"))?
+                .unwrap_or_default()
+        } else {
+            GpuTeeScene::default()
+        };
+        let tee_base = u32::try_from(scene.vertices.len())
+            .map_err(|_| String::from("GPU tee vertex offset overflow"))?;
+        for batch in &mut sprite.batches {
+            batch.start = batch.start.checked_add(tee_base)
+                .ok_or("GPU tee batch offset overflow")?;
+        }
+        scene.vertices.extend(sprite.vertices);
         let bytes = scene.vertex_bytes();
         if scene.vertices.len() > self.capacity {
             self.capacity = scene.vertices.len().next_power_of_two();
@@ -308,7 +377,9 @@ impl GpuRenderer {
             });
         }
         if !bytes.is_empty() { self.queue.write_buffer(&self.vertices, 0, &bytes); }
-        Self::upload_overlay(&self.queue, &self.overlay_tee._texture, tees);
+        if !native {
+            Self::upload_overlay(&self.queue, &self.overlay_tee._texture, tees);
+        }
         Self::upload_overlay(&self.queue, &self.overlay_hud._texture, hud);
         let output = match self.surface.get_current_texture() {
             Ok(output) => output,
@@ -345,9 +416,13 @@ impl GpuRenderer {
             pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(0, self.vertices.slice(..));
             Self::draw_batches(&mut pass, &scene.background, &self.images);
-            pass.set_vertex_buffer(0, self.overlay_vertices.slice(..));
-            pass.set_bind_group(0, &self.overlay_tee.group, &[]);
-            pass.draw(0..OVERLAY_VERTEX_COUNT, 0..1);
+            if native {
+                Self::draw_batches(&mut pass, &sprite.batches, &self.images);
+            } else {
+                pass.set_vertex_buffer(0, self.overlay_vertices.slice(..));
+                pass.set_bind_group(0, &self.overlay_tee.group, &[]);
+                pass.draw(0..OVERLAY_VERTEX_COUNT, 0..1);
+            }
             pass.set_vertex_buffer(0, self.vertices.slice(..));
             Self::draw_batches(&mut pass, &scene.foreground, &self.images);
             pass.set_vertex_buffer(0, self.overlay_vertices.slice(..));
