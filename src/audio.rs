@@ -39,7 +39,7 @@ impl Sample {
         data: Vec<i16>, channels: usize, rate: u32, loop_start: usize,
     ) -> Result<Self, AudioError> {
         if !(1..=2).contains(&channels) || !(8_000..=192_000).contains(&rate)
-            || data.is_empty() || !data.len().is_multiple_of(channels)
+            || data.is_empty() || !data.chunks_exact(channels).remainder().is_empty()
             || data.len() / channels > rate as usize * 120
             || loop_start >= data.len() / channels
         {
@@ -268,7 +268,7 @@ impl AudioMixer {
 
     /// Produce a standard PCM16/stereo WAV without opening an audio device.
     pub fn wav_bytes(&self, stereo: &[i16]) -> Result<Vec<u8>, AudioError> {
-        if !stereo.len().is_multiple_of(2) {
+        if !stereo.chunks_exact(2).remainder().is_empty() {
             return Err(AudioError::InvalidSample);
         }
         let payload = stereo.len().checked_mul(2).ok_or(AudioError::WavTooLarge)?;
