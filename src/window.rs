@@ -13,6 +13,7 @@ use crate::hook::HookState;
 use crate::map::GameMap;
 use crate::physics::Vec2;
 use crate::interpolation::camera_follow_fraction;
+use crate::envelope::EnvelopeTimes;
 use crate::simulator::{SimInput, TeeSimulator};
 use crate::snapshot_delta::{SnapshotObject, SnapshotState};
 use crate::window_assets::{WindowAssets, candidate_roots};
@@ -176,7 +177,10 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
         let follow = camera_follow_fraction(frame_duration);
         camera.center.x += (simulator.position.x - camera.center.x) * follow;
         camera.center.y += (simulator.position.y - camera.center.y) * follow;
-        assets.draw_background(&mut pixels, &map, camera)?;
+        let animation_times = EnvelopeTimes::from_tick(
+            simulator.tick as f64 + accumulator.as_secs_f64() * 50.0,
+        );
+        assets.draw_background_at(&mut pixels, &map, camera, animation_times)?;
         let entity = &mut snapshot.items[0].words;
         entity[1] = simulator.position.x.round() as i32;
         entity[2] = simulator.position.y.round() as i32;
@@ -193,7 +197,7 @@ fn play_offline_impl(path: &str, smoke_output: Option<&str>) -> Result<(), Strin
         entity[11] = simulator.hook.position.x.round() as i32;
         entity[12] = simulator.hook.position.y.round() as i32;
         assets.draw_snapshot(&mut pixels, &snapshot, camera, simulator.tick)?;
-        assets.draw_foreground(&mut pixels, camera)?;
+        assets.draw_foreground_at(&mut pixels, camera, animation_times)?;
         window.update_with_buffer(&pixels.pixels, SCREEN_W, SCREEN_H)
             .map_err(|e| format!("present: {e}"))?;
         frames += 1;

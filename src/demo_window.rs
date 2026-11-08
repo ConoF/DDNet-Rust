@@ -8,6 +8,7 @@ use font8x8::{BASIC_FONTS, UnicodeFonts};
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 
 use crate::datafile::Datafile;
+use crate::envelope::EnvelopeTimes;
 use crate::demo_playback::{DemoClock, DemoCursor};
 use crate::graphics::{Camera, Framebuffer, BACKGROUND};
 use crate::huffman::Huffman;
@@ -80,9 +81,11 @@ fn paint(
 ) -> Result<(), String> {
     frame.clear(BACKGROUND);
     if let Some(map) = map {
-        map.assets.draw_map(frame, &map.collision, camera)?;
+        let times = EnvelopeTimes::from_tick(clock.tick);
+        map.assets.draw_background_at(frame, &map.collision, camera, times)?;
         map.assets.draw_snapshot(frame, displayed, camera,
                                  cursor.current_tick() as u64)?;
+        map.assets.draw_foreground_at(frame, camera, times)?;
     } else {
         frame.render_snapshot(displayed, camera)
             .map_err(|e| format!("demo characters: {e:?}"))?;

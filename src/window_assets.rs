@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::datafile::Datafile;
+use crate::envelope::EnvelopeTimes;
 use crate::graphics::{Camera, Framebuffer};
 use crate::map::GameMap;
 use crate::map_visual::VisualMap;
@@ -92,8 +93,15 @@ impl WindowAssets {
     pub fn draw_map(
         &self, frame: &mut Framebuffer, map: &GameMap, camera: Camera,
     ) -> Result<(), String> {
+        self.draw_map_at(frame, map, camera, EnvelopeTimes::default())
+    }
+
+    pub fn draw_map_at(
+        &self, frame: &mut Framebuffer, map: &GameMap, camera: Camera,
+        times: EnvelopeTimes,
+    ) -> Result<(), String> {
         if let Some(visual) = self.visual_map.as_ref() {
-            if visual.render(frame, camera).is_ok() {
+            if visual.render_at(frame, camera, times).is_ok() {
                 return Ok(());
             }
         }
@@ -105,8 +113,14 @@ impl WindowAssets {
     pub fn draw_foreground(
         &self, frame: &mut Framebuffer, camera: Camera,
     ) -> Result<(), String> {
+        self.draw_foreground_at(frame, camera, EnvelopeTimes::default())
+    }
+
+    pub fn draw_foreground_at(
+        &self, frame: &mut Framebuffer, camera: Camera, times: EnvelopeTimes,
+    ) -> Result<(), String> {
         if let Some(map) = self.visual_map.as_ref() {
-            map.render_foreground(frame, camera)
+            map.render_foreground_at(frame, camera, times)
                 .map_err(|error| format!("foreground map: {error:?}"))?;
         }
         Ok(())
@@ -115,8 +129,15 @@ impl WindowAssets {
     pub fn draw_background(
         &self, frame: &mut Framebuffer, map: &GameMap, camera: Camera,
     ) -> Result<(), String> {
+        self.draw_background_at(frame, map, camera, EnvelopeTimes::default())
+    }
+
+    pub fn draw_background_at(
+        &self, frame: &mut Framebuffer, map: &GameMap, camera: Camera,
+        times: EnvelopeTimes,
+    ) -> Result<(), String> {
         if let Some(visual) = self.visual_map.as_ref() {
-            if visual.render_background(frame, camera).is_ok() {
+            if visual.render_background_at(frame, camera, times).is_ok() {
                 return Ok(());
             }
         }

@@ -23,6 +23,7 @@ use crate::netobjects::CHARACTER_TYPE;
 use crate::interpolation::{
     camera_follow_fraction, interpolate_snapshots, online_interpolation_fraction,
 };
+use crate::envelope::EnvelopeTimes;
 use crate::input::{
     correct_next_input_tick, FireCounter, InputFrame, PlayerInput,
     PLAYERFLAG_CHATTING, PLAYERFLAG_PLAYING,
@@ -145,6 +146,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     let mut current_snapshot: Option<i32> = None;
     let mut previous_snapshot: Option<i32> = None;
     let mut last_snapshot_at = Instant::now();
+    let mut map_loaded_at = Instant::now();
     let mut last_title = Instant::now();
     let mut reconnect_attempts = 0u8;
     let mut frames_in_sample = 0u32;
@@ -287,6 +289,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                         return Err(format!("Server disconnected: {reason}"));
                     }
                     GameAction::MapLoaded { width, height, .. } => {
+                        map_loaded_at = Instant::now();
                         predictor.reset();
                         previous_snapshot = None;
                         current_snapshot = None;
@@ -444,8 +447,14 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             }
         }
         let render_started = Instant::now();
+        let game_tick = current_snapshot.unwrap_or(0).max(0) as f64
+            + (last_snapshot_at.elapsed().as_secs_f64() * 50.0).min(3.0);
+        let animation_times = EnvelopeTimes {
+            game_ms: game_tick * 20.0,
+            local_ms: map_loaded_at.elapsed().as_secs_f64() * 1000.0,
+        };
         if let Some(map) = session.loaded_map.as_ref() {
-            assets.draw_background(&mut pixels, map, camera)?;
+            assets.draw_background_at(&mut pixels, map, camera, animation_times)?;
         } else {
             pixels.clear(crate::graphics::BACKGROUND);
         }
@@ -453,7 +462,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             assets.draw_snapshot(&mut pixels, snapshot, camera,
                 current_snapshot.unwrap_or(0).max(0) as u64)?;
         }
-        assets.draw_foreground(&mut pixels, camera)?;
+        assets.draw_foreground_at(&mut pixels, camera, animation_times)?;
         let local_weapon = display.as_ref().and_then(|snapshot|
             local_character_id(snapshot).and_then(|id|
                 snapshot.find(CHARACTER_TYPE, id)

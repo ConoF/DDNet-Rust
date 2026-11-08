@@ -554,3 +554,21 @@ The offline map preview and online window use this shared renderer.
 GPU batching, smooth texture filtering and the official renderer's
 exact quad-to-GPU blending rules. Large animated maps will still
 look different and may perform poorly with software rendering.
+
+
+## Map envelopes (DDNet 20.2.1 visual animation)
+
+The map renderer parses original `MAPITEMTYPE_ENVELOPE` and
+`MAPITEMTYPE_ENVPOINTS` data with fixed-point 22.10 channel values,
+millisecond timestamps, envelope offsets and repeating keyframes.
+Curve types step, linear, slow, fast, smooth and legacy embedded Bezier
+are evaluated. Quads now animate their position, rotation around the
+pivot and per-vertex RGBA; ordinary tile layers animate their tint.
+Synchronized envelopes use the server 50-Hz tick clock while local
+envelopes use the map-load clock. Offline simulation and demo playback
+advance at their own tick rate, and the demo player retains the original
+background/tee/foreground ordering.
+
+Limitations: UUID-based DDNet Bezier control points are still not decoded,
+render-time synchronization is approximate, and CPU rasterization is
+not a replacement for GPU batching. Static screenshot APIs use time zero.
