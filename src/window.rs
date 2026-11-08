@@ -10,7 +10,7 @@ use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
 use crate::datafile::Datafile;
 use crate::graphics::{Camera, Framebuffer};
 #[cfg(feature = "gpu")]
-use crate::gpu_renderer::{GpuRenderer, OVERLAY_KEY};
+use crate::gpu_renderer::{GpuRenderer, TeeFrame, OVERLAY_KEY};
 use crate::hook::HookState;
 use crate::map::GameMap;
 use crate::physics::Vec2;
@@ -103,7 +103,8 @@ fn play_offline_impl(
     } else {
         match GpuRenderer::new(&window, SCREEN_W as u32, SCREEN_H as u32) {
             Ok(mut renderer) => {
-                renderer.sync_map(assets.visual_map.as_ref());
+                renderer.sync_assets(assets.visual_map.as_ref(),
+                    assets.default_skin.as_ref(), assets.game_sprites.as_ref());
                 Some(renderer)
             }
             Err(error) if !gpu_smoke => {
@@ -223,7 +224,12 @@ fn play_offline_impl(
             assets.draw_background_at(&mut pixels, &map, camera, animation_times)?;
         }
         #[cfg(feature = "gpu")]
-        if using_gpu {
+        let native_tees = using_gpu && assets.visual_map.is_some()
+            && gpu.as_ref().is_some_and(|renderer| renderer.native_tees_ready());
+        #[cfg(not(feature = "gpu"))]
+        let native_tees = false;
+        #[cfg(feature = "gpu")]
+        if using_gpu && !native_tees {
             gpu_tee.clear(OVERLAY_KEY);
             if assets.visual_map.is_none() {
                 gpu_tee.render_map(&map, camera)
@@ -249,14 +255,21 @@ fn play_offline_impl(
         let tee_frame = if using_gpu { &mut gpu_tee } else { &mut pixels };
         #[cfg(not(feature = "gpu"))]
         let tee_frame = &mut pixels;
-        assets.draw_snapshot(tee_frame, &snapshot, camera, simulator.tick)?;
+        if !native_tees {
+            assets.draw_snapshot(tee_frame, &snapshot, camera, simulator.tick)?;
+        }
         if !using_gpu {
             assets.draw_foreground_at(&mut pixels, camera, animation_times)?;
         }
         #[cfg(feature = "gpu")]
         if let Some(renderer) = gpu.as_mut() {
             renderer.render(assets.visual_map.as_ref(), camera, animation_times,
-                &gpu_tee, &gpu_hud)?;
+                TeeFrame {
+                    state: Some(&snapshot),
+                    tick: simulator.tick,
+                    skin: assets.default_skin.as_ref(),
+                    game: assets.game_sprites.as_ref(),
+                }, &gpu_tee, &gpu_hud)?;
             window.update();
         } else {
             window.update_with_buffer(&pixels.pixels, SCREEN_W, SCREEN_H)

@@ -15,7 +15,7 @@ use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 
 use crate::graphics::{Camera, Framebuffer};
 #[cfg(feature = "gpu")]
-use crate::gpu_renderer::{GpuRenderer, OVERLAY_KEY};
+use crate::gpu_renderer::{GpuRenderer, TeeFrame, OVERLAY_KEY};
 use crate::datafile::Datafile;
 use crate::window_assets::{WindowAssets, candidate_roots};
 use crate::game_audio::{attack_sound_for_weapon, try_start, GameAudio};
@@ -132,7 +132,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     } else {
         match GpuRenderer::new(&window, WIDTH as u32, HEIGHT as u32) {
             Ok(mut renderer) => {
-                renderer.sync_map(None);
+                renderer.sync_assets(None, None, None);
                 Some(renderer)
             }
             Err(error) => {
@@ -325,7 +325,8 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                             .unwrap_or_default();
                         #[cfg(feature = "gpu")]
                         if let Some(renderer) = gpu.as_mut() {
-                            renderer.sync_map(assets.visual_map.as_ref());
+                            renderer.sync_assets(assets.visual_map.as_ref(),
+                                assets.default_skin.as_ref(), assets.game_sprites.as_ref());
                         }
                     }
                     _ => {}
@@ -365,7 +366,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             assets = WindowAssets::default();
             #[cfg(feature = "gpu")]
             if let Some(renderer) = gpu.as_mut() {
-                renderer.sync_map(None);
+                renderer.sync_assets(None, None, None);
             }
             // Reset event deduplication with the snapshot chain. Audio device
             // stays active and reusable across reconnects.
@@ -496,7 +497,12 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             }
         }
         #[cfg(feature = "gpu")]
-        if using_gpu {
+        let native_tees = using_gpu && assets.visual_map.is_some()
+            && gpu.as_ref().is_some_and(|renderer| renderer.native_tees_ready());
+        #[cfg(not(feature = "gpu"))]
+        let native_tees = false;
+        #[cfg(feature = "gpu")]
+        if using_gpu && !native_tees {
             gpu_tee.clear(OVERLAY_KEY);
             if assets.visual_map.is_none() {
                 // Maps without supported visual art still show collision
@@ -511,9 +517,11 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         let tee_frame = if using_gpu { &mut gpu_tee } else { &mut pixels };
         #[cfg(not(feature = "gpu"))]
         let tee_frame = &mut pixels;
-        if let Some(snapshot) = display.as_ref() {
-            assets.draw_snapshot(tee_frame, snapshot, camera,
-                current_snapshot.unwrap_or(0).max(0) as u64)?;
+        if !native_tees {
+            if let Some(snapshot) = display.as_ref() {
+                assets.draw_snapshot(tee_frame, snapshot, camera,
+                    current_snapshot.unwrap_or(0).max(0) as u64)?;
+            }
         }
         if !using_gpu {
             assets.draw_foreground_at(&mut pixels, camera, animation_times)?;
@@ -542,7 +550,12 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         #[cfg(feature = "gpu")]
         if let Some(renderer) = gpu.as_mut() {
             renderer.render(assets.visual_map.as_ref(), camera, animation_times,
-                &gpu_tee, &gpu_hud)?;
+                TeeFrame {
+                    state: display.as_ref(),
+                    tick: current_snapshot.unwrap_or(0).max(0) as u64,
+                    skin: assets.default_skin.as_ref(),
+                    game: assets.game_sprites.as_ref(),
+                }, &gpu_tee, &gpu_hud)?;
             window.update();
         } else {
             window.update_with_buffer(&pixels.pixels, WIDTH, HEIGHT)
