@@ -230,7 +230,7 @@ impl Texture {
     pub fn pixel(&self, x: usize, y: usize) -> Option<[u8; 4]> {
         if x >= self.width as usize || y >= self.height as usize { return None; }
         let at = (y * self.width as usize + x) * 4;
-        Some(self.rgba.get(at..at + 4)?.try_into().ok()?)
+        self.rgba.get(at..at + 4)?.try_into().ok()
     }
 }
 

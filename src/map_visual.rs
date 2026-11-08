@@ -106,7 +106,7 @@ fn load_image(
 ) -> Result<Texture, VisualError> {
     if payload.len() < 24 { return Err(VisualError::InvalidImage); }
     let version = field(payload, 0)?;
-    if version < 1 || version > 2
+    if !(1..=2).contains(&version)
         || (version == 2 && field(payload, 24)? != 1)
     {
         return Err(VisualError::InvalidImage);
@@ -235,7 +235,7 @@ impl VisualMap {
             let cell_w = texture.width as usize / 16;
             let cell_h = texture.height as usize / 16;
             if cell_w == 0 || cell_h == 0
-                || !texture.width.is_multiple_of(16) || !texture.height.is_multiple_of(16)
+                || texture.width % 16 != 0 || texture.height % 16 != 0
                 || layer.width.checked_mul(layer.height) != Some(layer.tiles.len())
             {
                 return Err(VisualError::InvalidImage);
