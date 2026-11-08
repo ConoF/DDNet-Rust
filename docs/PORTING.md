@@ -397,3 +397,11 @@ where available. Synthetic test recordings cover v3/v4/v5/v6,
 Huffman-encoded snapshots, delta updates, malformed ticks, bounds and
 truncation. Demo playback in a native interactive window, audio,
 full UUID extended netobjects and editing remain unimplemented.
+
+## Stage 7: interactive native demo player
+
+The window-feature demo viewer supports --play-demo FILE.demo with a keyframe-aware incremental decoder and 50Hz playback clock. Controls: Space pauses, Left/Right steps recorded frames, PageUp/PageDown seeks ten seconds, Up/Down changes speed (0.25x through 4x), Home/End jumps, mouse timeline scrubs, wheel zooms, R restarts and Escape closes. It uses the original map textures and default skin when the recording contains embedded map data, and falls back to a diagnostic view otherwise.
+
+CI creates a genuine Huffman-compressed synthetic demo with 201 tick markers, two keyframes, delta updates and an official map. It launches the native replay window under Xvfb and validates a PNG. The downloadable CachyOS release runs the same test from the extracted archive.
+
+Limitations: not yet verified with a user's actual multiplayer demo. Original demo audio, all UUID extension netobjects, additional visual effects and fully faithful interpolation remain future work.

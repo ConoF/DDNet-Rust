@@ -28,6 +28,7 @@ cd ddnet-rust-cachyos-x86_64
 
 To open the experimental browser: \`./run.sh\`.
 To inspect a .demo header: \`./run.sh --inspect-demo FILE.demo\`.
+To view a recording: \`./run.sh --play-demo FILE.demo\`.
 See bundled README-CACHYOS.md for dependencies and controls.
 
 No local Rust compiler, Git clone or manual asset downloads required.

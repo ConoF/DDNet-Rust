@@ -26,6 +26,7 @@ Other useful commands:
     ./run.sh --self-test
     ./run.sh --settings
     ./run.sh --inspect-demo path/to/file.demo
+    ./run.sh --play-demo path/to/file.demo
     ./run.sh --help
 
 Controls in offline mode: A/D walk, W or Space jump, right mouse
@@ -45,3 +46,5 @@ tested on a physical CachyOS installation.
 This bundle includes original resources from upstream DDNet 20.2.1
 with upstream licensing and attribution. See LICENSE-DDNET.txt,
 LICENSE-RUST.txt and data/maps/license.txt.
+
+Demo controls: Space pause/resume; Left/Right frame step; PageUp/PageDown +10/-10 seconds; Up/Down speed; Home/End beginning/end; click timeline to seek; mouse wheel zoom; R restart; Esc quit. Audio replay is not yet implemented.
