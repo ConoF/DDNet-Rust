@@ -3,9 +3,11 @@
 //! no server connection or full DDNet GUI.
 
 use std::time::{Duration, Instant};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::path::Path;
 
-use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
+use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 
 use crate::datafile::Datafile;
 use crate::graphics::{Camera, Framebuffer};
@@ -23,6 +25,9 @@ use crate::envelope::EnvelopeTimes;
 use crate::simulator::{SimInput, TeeSimulator};
 use crate::snapshot_delta::{SnapshotObject, SnapshotState};
 use crate::window_assets::{WindowAssets, candidate_roots};
+use crate::server_browser::ClientSettings;
+use crate::ingame_menu::{MenuAction, MenuState, ServerStatus};
+use crate::online_ui::TextInputCollector;
 use crate::game_audio::{attack_sound_for_weapon, try_start};
 use crate::sound_assets::GameSound;
 
@@ -96,7 +101,15 @@ fn play_offline_impl(
         "DDNet-Rust: OFFLINE physics prototype",
         SCREEN_W, SCREEN_H, WindowOptions::default(),
     ).map_err(|e| format!("window: {e}"))?;
-    window.set_target_fps(60);
+    let settings_path = ClientSettings::default_path();
+    let mut settings = if smoke_output.is_some() || gpu_smoke {
+        ClientSettings::default()
+    } else {
+        ClientSettings::load(&settings_path).unwrap_or_default()
+    };
+    window.set_target_fps(usize::from(settings.fps_limit));
+    let chars = Rc::new(RefCell::new(Vec::new()));
+    window.set_input_callback(Box::new(TextInputCollector(Rc::clone(&chars))));
     let mut pixels = Framebuffer::new(SCREEN_W as u32, SCREEN_H as u32)
         .map_err(|e| format!("framebuffer: {e:?}"))?;
     #[cfg(feature = "gpu")]
@@ -129,7 +142,9 @@ fn play_offline_impl(
         try_start(&candidate_roots(Some(Path::new(path))))
     } else { None };
     let mut simulator = TeeSimulator::new(spawn);
-    let mut camera = Camera { center: spawn, scale: 1.5 };
+    let mut camera = Camera {
+        center: spawn, scale: f32::from(settings.zoom_percent) / 100.0,
+    };
     let mut snapshot = SnapshotState {
         items: vec![SnapshotObject { type_id: 9, id: 0, words: vec![0; 22] }],
     };
@@ -139,41 +154,103 @@ fn play_offline_impl(
     let mut previous = Instant::now();
     let mut accumulator = Duration::ZERO;
     let mut frames: usize = 0;
+    let mut menu = MenuState::new();
+    let mut left_was_down = false;
 
-    while window.is_open() && !window.is_key_down(Key::Escape) {
+    while window.is_open() {
+        let typed = std::mem::take(&mut *chars.borrow_mut());
+        if menu.is_editing() { menu.append_typed(&typed); }
+        let mut menu_actions = Vec::new();
+        for key in window.get_keys_pressed(if menu.is_editing() {
+            KeyRepeat::Yes
+        } else { KeyRepeat::No }) {
+            if menu.is_open() {
+                if let Some(action) = menu.key(key, &mut settings) {
+                    menu_actions.push(action);
+                }
+            } else if key == Key::Escape {
+                menu.toggle();
+            }
+        }
+        let left_down = window.get_mouse_down(MouseButton::Left);
+        if menu.is_open() && left_down && !left_was_down {
+            if let Some(pos) = window.get_mouse_pos(MouseMode::Discard) {
+                if let Some(action) = menu.click(pos, (SCREEN_W, SCREEN_H), &mut settings) {
+                    menu_actions.push(action);
+                }
+            }
+        }
+        left_was_down = left_down;
+        for action in menu_actions {
+            match action {
+                MenuAction::Resume => {}
+                MenuAction::Disconnect => return Ok(()),
+                MenuAction::Kill => {
+                    simulator = TeeSimulator::new(spawn);
+                    attack_tick = 0;
+                    accumulator = Duration::ZERO;
+                    menu.close();
+                }
+                MenuAction::Join | MenuAction::Spectate =>
+                    menu.feedback("Team selection requires an online server"),
+                MenuAction::SettingsChanged => {
+                    window.set_target_fps(usize::from(settings.fps_limit));
+                    camera.scale = f32::from(settings.zoom_percent) / 100.0;
+                    if let Err(error) = settings.save(&settings_path) {
+                        menu.feedback(format!("Cannot save settings: {error:?}"));
+                    }
+                }
+                MenuAction::ChangeNickname(nick) => {
+                    settings.nickname = nick;
+                    match settings.save(&settings_path) {
+                        Ok(()) => menu.feedback("Nickname saved for next connection"),
+                        Err(error) => menu.feedback(
+                            format!("Cannot save nickname: {error:?}")),
+                    }
+                }
+            }
+        }
         let now = Instant::now();
         let frame_duration = (now - previous).min(Duration::from_millis(100));
-        accumulator += frame_duration;
+        if menu.is_open() {
+            accumulator = Duration::ZERO;
+        } else {
+            accumulator += frame_duration;
+        }
         previous = now;
-        if window.is_key_down(Key::R) {
+        if !menu.is_open() && window.is_key_down(Key::R) {
             simulator = TeeSimulator::new(spawn);
             accumulator = Duration::ZERO;
         }
         if let Some((_, wheel)) = window.get_scroll_wheel() {
-            if wheel > 0.0 { camera.scale = (camera.scale * 1.12).min(8.0); }
-            if wheel < 0.0 { camera.scale = (camera.scale / 1.12).max(0.1); }
+            if !menu.is_open() {
+                if wheel > 0.0 { camera.scale = (camera.scale * 1.12).min(8.0); }
+                if wheel < 0.0 { camera.scale = (camera.scale / 1.12).max(0.1); }
+            }
         }
         let mouse = window.get_mouse_pos(MouseMode::Discard)
             .unwrap_or((SCREEN_W as f32 * 0.75, SCREEN_H as f32 * 0.5));
-        let direction = i32::from(window.is_key_down(Key::D) || window.is_key_down(Key::Right))
-            - i32::from(window.is_key_down(Key::A) || window.is_key_down(Key::Left));
+        let direction = if menu.is_open() { 0 } else {
+            i32::from(window.is_key_down(Key::D) || window.is_key_down(Key::Right))
+                - i32::from(window.is_key_down(Key::A) || window.is_key_down(Key::Left))
+        };
         let previous_weapon = selected_weapon;
-        if window.is_key_down(Key::Key1) { selected_weapon = 0; }
-        if window.is_key_down(Key::Key2) { selected_weapon = 1; }
-        if window.is_key_down(Key::Key3) { selected_weapon = 2; }
-        if window.is_key_down(Key::Key4) { selected_weapon = 3; }
-        if window.is_key_down(Key::Key5) { selected_weapon = 4; }
-        if window.is_key_down(Key::Key6) { selected_weapon = 5; }
+        if !menu.is_open() && window.is_key_down(Key::Key1) { selected_weapon = 0; }
+        if !menu.is_open() && window.is_key_down(Key::Key2) { selected_weapon = 1; }
+        if !menu.is_open() && window.is_key_down(Key::Key3) { selected_weapon = 2; }
+        if !menu.is_open() && window.is_key_down(Key::Key4) { selected_weapon = 3; }
+        if !menu.is_open() && window.is_key_down(Key::Key5) { selected_weapon = 4; }
+        if !menu.is_open() && window.is_key_down(Key::Key6) { selected_weapon = 5; }
         if selected_weapon != previous_weapon {
-            if let Some(out) = audio.as_mut() {
+            if let Some(out) = audio.as_mut().filter(|_| settings.sound_enabled) {
                 out.play(GameSound::WeaponSwitch, None);
             }
         }
         let attack_button = window.get_mouse_down(MouseButton::Left);
-        if attack_button && !last_attack_button {
+        if !menu.is_open() && attack_button && !last_attack_button {
             attack_tick = simulator.tick.min(i32::MAX as u64) as i32;
             if let Some(kind) = attack_sound_for_weapon(selected_weapon) {
-                if let Some(out) = audio.as_mut() {
+                if let Some(out) = audio.as_mut().filter(|_| settings.sound_enabled) {
                     out.play(kind, Some(simulator.position));
                 }
             }
@@ -190,7 +267,11 @@ fn play_offline_impl(
             ),
         };
         // Exercise both movement and hook in CI without synthetic keyboard events.
-        let controls = if smoke_output.is_some() || gpu_smoke {
+        let controls = if menu.is_open() {
+            SimInput {
+                direction: 0, jump: false, hook: false, aim: Vec2::new(1.0, 0.0),
+            }
+        } else if smoke_output.is_some() || gpu_smoke {
             SimInput {
                 direction: 1,
                 jump: frames == 2,
@@ -204,7 +285,7 @@ fn play_offline_impl(
             if accumulator < PHYSICS_TICK { break; }
             let step = simulator.step(&map, controls)
                 .map_err(|e| format!("tick: {e:?}"))?;
-            if let Some(out) = audio.as_mut() {
+            if let Some(out) = audio.as_mut().filter(|_| settings.sound_enabled) {
                 out.play_movement(step);
             }
             accumulator -= PHYSICS_TICK;
