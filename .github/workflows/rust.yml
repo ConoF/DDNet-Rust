@@ -18,12 +18,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev pkg-config
-      - name: Temporary server-browser lockfile refresh
-        run: |
-          cargo generate-lockfile
-          printf 'DDNET_BROWSER_LOCKFILE_BASE64:'
-          base64 -w0 Cargo.lock
-          printf '\n'
       - name: Build
         run: cargo build --release --locked --features window
       - name: Validate master JSON fixture using browser CLI
@@ -31,10 +25,6 @@ jobs:
           cargo run --locked -- --servers-file tests/fixtures/master.json
           cargo run --locked -- --servers-file tests/fixtures/master.json "sunny"
           python3 -c "import subprocess; p=subprocess.check_output(['target/debug/ddnet-rust','--servers-file','tests/fixtures/master.json','sunny']).decode(); assert '127.0.0.1:8303' in p and '[::1]' not in p"
-      - name: Launch native DDNet browser from fixture in Xvfb
-        run: |
-          xvfb-run -a cargo run --locked --features window -- --browse-servers-smoke tests/fixtures/master.json target/server-browser.png
-          python3 -c "from pathlib import Path; p=Path('target/server-browser.png'); assert p.stat().st_size>1500 and p.read_bytes()[:8]==bytes((137,80,78,71,13,10,26,10))"
       - name: Unit tests and tick simulation
         run: cargo test --all-targets --locked --features window
       - name: Clippy
@@ -122,6 +112,10 @@ jobs:
           fi
           xvfb-run -a cargo run --locked --features window -- --play-offline-smoke upstream/ddnet/data/maps/ctf1.map target/offline-window-smoke.png
           python3 -c "from pathlib import Path; p=Path('target/offline-window-smoke.png'); assert p.stat().st_size > 100; assert p.read_bytes()[:8] == bytes((137,80,78,71,13,10,26,10))"
+      - name: Launch native DDNet browser from fixture in Xvfb
+        run: |
+          xvfb-run -a cargo run --locked --features window -- --browse-servers-smoke tests/fixtures/master.json target/server-browser.png
+          python3 -c "from pathlib import Path; p=Path('target/server-browser.png'); assert p.stat().st_size>1500 and p.read_bytes()[:8]==bytes((137,80,78,71,13,10,26,10))"
       - name: Verify offline window skin, weapons and textured map smoke
         run: |
           python3 -c "from pathlib import Path; p=Path('target/offline-window-smoke.png'); assert p.read_bytes()[:8]==bytes((137,80,78,71,13,10,26,10)); assert p.stat().st_size>1000"

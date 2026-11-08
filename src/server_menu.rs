@@ -8,7 +8,7 @@ use minifb::{Key, KeyRepeat, Window, WindowOptions};
 
 use crate::graphics::Framebuffer;
 use crate::server_browser::{
-    BrowserError, ClientSettings, ServerEntry, fetch_master,
+    ClientSettings, ServerEntry, fetch_master,
     matches_filter, parse_master,
 };
 
