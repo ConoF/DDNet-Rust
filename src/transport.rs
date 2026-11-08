@@ -364,7 +364,7 @@ pub fn probe_server<A: ToSocketAddrs>(
     socket.connect(peer)?;
     socket.set_read_timeout(Some(Duration::from_millis(400)))?;
     let mut session = Client06::new();
-    let hello = session.begin_connect().map_err(io::Error::other)?;
+    let hello = session.begin_connect().map_err(|e| io::Error::other(format!("{e:?}")))?;
     let mut incoming = [0u8; MAX_PACKET_SIZE];
     for _ in 0..attempts {
         socket.send(&hello)?;
