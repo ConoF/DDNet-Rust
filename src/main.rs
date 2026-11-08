@@ -3,6 +3,7 @@ use ddnet_rust::map::GameMap;
 use ddnet_rust::layers::PhysicsLayers;
 use ddnet_rust::physics::{Character, Input, JumpEvent, Tuning};
 use ddnet_rust::protocol::{decode_int, write_int};
+use ddnet_rust::transport::probe_server;
 
 const CODEC_VECTORS: &[i32] = &[
     i32::MIN, -65536, -65, -64, -2, -1, 0, 1, 63, 64, 255, 65535, i32::MAX,
@@ -19,6 +20,7 @@ fn main() {
         [arg, path] if arg == "--inspect-map" => inspect_map(path),
         [arg, path] if arg == "--inspect-game-map" => inspect_game_map(path),
         [arg, path] if arg == "--inspect-layers" => inspect_layers(path),
+        [arg, addr] if arg == "--probe-server" => probe(addr),
         _ => {
             eprintln!("Unknown arguments. Run ddnet-rust --help.");
             std::process::exit(2);
@@ -31,6 +33,7 @@ fn print_help() {
     println!("  --self-test         Run isolated physics/protocol smoke tests");
     println!("  --codec-vectors     Emit integer vectors for C++ differential testing");
     println!("  --inspect-map PATH  Parse and validate a v3/v4 DDNet map's metadata");
+    println!("  --probe-server HOST[:PORT]  Probe a live DDNet 0.6 UDP handshake");
     println!("  --version           Print project and upstream versions");
 }
 
@@ -124,4 +127,21 @@ fn inspect_layers(path: &str) {
         layers.front.is_some(), layers.tele.is_some(),
         layers.speedup.is_some(), layers.switches.is_some(), layers.tune.is_some(),
     );
+}
+
+fn probe(endpoint: &str) {
+    let address = if endpoint.contains(':') {
+        endpoint.to_owned()
+    } else {
+        format!("{endpoint}:8303")
+    };
+    match probe_server(address.as_str(), 5) {
+        Ok(peer) => println!(
+            "DDNet 0.6 transport handshake succeeded with {peer}; gameplay is NOT yet implemented"
+        ),
+        Err(error) => {
+            eprintln!("DDNet 0.6 handshake failed: {error}");
+            std::process::exit(1);
+        }
+    }
 }
