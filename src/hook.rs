@@ -236,23 +236,23 @@ mod tests {
         let tee = Vec2::new(100.0, 80.0);
         let t = HookTuning::default();
         let aim = Vec2::new(1.0, 0.0);
-        hook.tick(HookInput { held: true, aim: aim, movement: 1 },
+        hook.tick(HookInput { held: true, aim, movement: 1 },
             tee, &mut vel, &map, t).unwrap();
-        assert_eq!(hook.tick(HookInput { held: true, aim: aim, movement: 1 },
+        assert_eq!(hook.tick(HookInput { held: true, aim, movement: 1 },
             tee, &mut vel, &map, t),
             Ok(HookEvent::HitNoHook));
         assert_eq!(hook.state, HookState::RetractStart);
-        hook.tick(HookInput { held: true, aim: aim, movement: 1 },
+        hook.tick(HookInput { held: true, aim, movement: 1 },
             tee, &mut vel, &map, t).unwrap();
         assert_eq!(hook.state, HookState::RetractMid);
-        hook.tick(HookInput { held: true, aim: aim, movement: 1 },
+        hook.tick(HookInput { held: true, aim, movement: 1 },
             tee, &mut vel, &map, t).unwrap();
         assert_eq!(hook.state, HookState::RetractEnd);
-        assert_eq!(hook.tick(HookInput { held: true, aim: aim, movement: 1 },
+        assert_eq!(hook.tick(HookInput { held: true, aim, movement: 1 },
             tee, &mut vel, &map, t),
             Ok(HookEvent::Retracted));
         assert_eq!(hook.state, HookState::Retracted);
-        assert_eq!(hook.tick(HookInput { held: false, aim: aim, movement: 1 },
+        assert_eq!(hook.tick(HookInput { held: false, aim, movement: 1 },
             tee, &mut vel, &map, t),
             Ok(HookEvent::Released));
         assert_eq!(hook.state, HookState::Idle);
