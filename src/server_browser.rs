@@ -522,6 +522,32 @@ mod tests {
     }
 
     #[test]
+    fn game_menu_preferences_persist_and_invalid_values_fall_back() {
+        let path = std::env::temp_dir().join(format!(
+            "ddnet-rust-menu-prefs-{}.json", std::process::id(),
+        ));
+        let mut settings = ClientSettings::default();
+        settings.show_chat = false;
+        settings.show_nameplates = false;
+        settings.sound_enabled = false;
+        settings.fps_limit = 144;
+        settings.zoom_percent = 220;
+        settings.save(&path).unwrap();
+        assert_eq!(ClientSettings::load(&path), Ok(settings.clone()));
+        settings.fps_limit = 999;
+        assert_eq!(settings.save(&path), Err(BrowserError::InvalidSchema));
+        fs::write(&path,
+            r#"{"nickname":"old","fps_limit":777,"zoom_percent":500,"sound_enabled":false}"#
+        ).unwrap();
+        let loaded = ClientSettings::load(&path).unwrap();
+        assert_eq!(loaded.fps_limit, 60);
+        assert_eq!(loaded.zoom_percent, 150);
+        assert_eq!(loaded.nickname, "old");
+        assert!(!loaded.sound_enabled);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn settings_roundtrip_and_bad_endpoint_are_sanitized() {
         let path = std::env::temp_dir().join(format!(
             "ddnet-rust-browser-settings-{}-{}.json", std::process::id(), "roundtrip",
@@ -535,6 +561,7 @@ mod tests {
             show_favorites: true,
             connect_timeout_secs: 12,
             reconnect_attempts: 2,
+            ..ClientSettings::default()
         };
         settings.save(&path).unwrap();
         assert_eq!(ClientSettings::load(&path), Ok(settings.clone()));

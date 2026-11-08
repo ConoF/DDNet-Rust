@@ -509,6 +509,7 @@ fn on_off(value: bool) -> &'static str {
 mod tests {
     use super::*;
     use crate::graphics::Framebuffer;
+    #[cfg(feature = "gpu")]
     use crate::gpu_hud::GpuHudScene;
 
     #[test]
@@ -574,6 +575,7 @@ mod tests {
         assert!(!s.sound_enabled);
     }
 
+    #[cfg(feature = "gpu")]
     #[test]
     fn ui_paints_on_cpu_and_gpu_without_screen_upload() {
         let mut m=MenuState::new();m.toggle();
