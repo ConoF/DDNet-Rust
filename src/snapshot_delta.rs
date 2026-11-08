@@ -70,6 +70,17 @@ impl Default for DeltaDecoder {
 impl DeltaDecoder {
     pub fn new() -> Self { Self::default() }
 
+    /// Complete fixed-size metadata for the vanilla 0.6 DDNet netobjects.
+    /// Extended UUID netobjects continue to carry dynamic sizes.
+    pub fn for_vanilla_06() -> Self {
+        let mut decoder = Self::new();
+        for (kind, &words) in crate::netobjects::VANILLA_OBJECT_WORDS.iter().enumerate().skip(1) {
+            decoder.sizes[kind] = words;
+        }
+        decoder
+    }
+
+
     pub fn set_static_words(
         &mut self, type_id: u8, words: u16,
     ) -> Result<(), DeltaError> {
@@ -279,6 +290,19 @@ mod tests {
             Err(DeltaError::TrailingData));
         assert_eq!(d.unpack(&packed(&[0,2,0,65,0,1,2,65,0,1,3]), &old),
             Err(DeltaError::DuplicateKey));
+    }
+
+    #[test]
+    fn official_06_static_schema_decodes_character_without_size_prefix() {
+        let d = DeltaDecoder::for_vanilla_06();
+        let mut words = vec![0, 1, 0, 9, 0];
+        words.extend(0..22);
+        let state = d.unpack(&packed(&words), &SnapshotState::default()).unwrap();
+        let item = state.find(9, 0).unwrap();
+        assert_eq!(item.words.len(), 22);
+        assert_eq!(crate::netobjects::CharacterCoreNet::from_object(item).unwrap().x, 1);
+        assert_eq!(crate::netobjects::CharacterCoreNet::from_object(item).unwrap().hook_state, 9);
+        assert_eq!(state.checksum(), (0..22u32).sum::<u32>());
     }
 
     #[test]
