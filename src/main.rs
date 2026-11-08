@@ -9,6 +9,7 @@ use ddnet_rust::protocol::{decode_int, write_int};
 use ddnet_rust::transport::probe_server;
 use ddnet_rust::session::{GameAction, GameSession06, Stage};
 use ddnet_rust::huffman::{reference_inputs, Huffman};
+use ddnet_rust::audio::{AudioMixer, Sample, VoiceOptions};
 
 const CODEC_VECTORS: &[i32] = &[
     i32::MIN, -65536, -65, -64, -2, -1, 0, 1, 63, 64, 255, 65535, i32::MAX,
@@ -34,6 +35,7 @@ fn main() {
         [arg, map] if arg == "--play-offline" => play_offline(map),
         [arg, map, output] if arg == "--play-offline-smoke" => play_offline_smoke(map, output),
         [arg, host] if arg == "--play-online" => play_online(host),
+        [arg, output] if arg == "--audio-smoke" => audio_smoke(output),
         _ => {
             eprintln!("Unknown arguments. Run ddnet-rust --help.");
             std::process::exit(2);
@@ -55,6 +57,7 @@ fn print_help() {
     println!("  --play-offline MAP   Offline window: cargo run --features window -- --play-offline MAP");
     println!("  --play-offline-smoke MAP PNG   Run scripted window test under Xvfb");
     println!("  --play-online HOST   Experimental 0.6 UDP snapshot window (feature: window)");
+    println!("  --audio-smoke OUT.wav   Export a synthetic PCM mixer test");
     println!("  --version           Print project and upstream versions");
 }
 
@@ -400,4 +403,27 @@ fn play_offline_smoke(map: &str, output: &str) {
 fn play_offline_smoke(_map: &str, _output: &str) {
     eprintln!("This command requires --features window");
     std::process::exit(2);
+}
+
+fn audio_smoke(output: &str) {
+    use std::sync::Arc;
+    const RATE: u32 = 48_000;
+    const FRAMES: usize = 4_800;
+    let signal: Vec<i16> = (0..FRAMES)
+        .map(|i| {
+            let phase = std::f32::consts::TAU * 440.0 * (i as f32 / RATE as f32);
+            (phase.sin() * 8_000.0) as i16
+        })
+        .collect();
+    let sample = Arc::new(Sample::new(signal, 1, RATE, 0)
+        .expect("fixed 440 Hz diagnostic sample"));
+    let mut mixer = AudioMixer::new(RATE).expect("valid 48 kHz mixer");
+    mixer.play(sample, VoiceOptions::default()).expect("one diagnostic voice");
+    let stereo = mixer.mix_frames(FRAMES).expect("bounded 100 ms PCM block");
+    let wav = mixer.wav_bytes(&stereo).expect("bounded RIFF WAV serialization");
+    std::fs::write(output, wav).unwrap_or_else(|e| {
+        eprintln!("Unable to write audio test {output}: {e}");
+        std::process::exit(1);
+    });
+    println!("Wrote synthetic 440 Hz PCM WAV to {output} (not real DDNet audio assets)");
 }
