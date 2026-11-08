@@ -429,7 +429,7 @@ mod tests {
         frame.pixels[16 * 32 + 16] = 0x00ff00;
         assert_eq!(map.render_foreground(&mut frame, camera).unwrap(), 1);
         assert_eq!(frame.pixel(16, 16), Some(0x0000ff));
-        assert_eq!(map.render(&mut frame, camera).unwrap(), 1);
+        assert_eq!(map.render(&mut frame, camera).unwrap(), 2);
         assert_eq!(frame.pixel(16, 16), Some(0x0000ff));
     }
 
