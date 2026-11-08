@@ -362,8 +362,10 @@ mod tests {
 
     #[test]
     fn start_info_validates_wire_lengths() {
-        let mut info = StartInfo::default();
-        info.name = "abcdefghijklmnop".into();
+        let mut info = StartInfo {
+            name: "abcdefghijklmnop".into(),
+            ..StartInfo::default()
+        };
         assert_eq!(info.pack(), Err(MessageError::InvalidMessage));
         info.name = "Rust".into();
         info.skin = String::new();
