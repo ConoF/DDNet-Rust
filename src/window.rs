@@ -156,7 +156,7 @@ fn play_offline_impl(
         try_start(&candidate_roots(Some(Path::new(path))))
     } else { None };
     if let Some(device) = audio.as_mut() {
-        device.set_volume(settings.sound_volume)
+        device.set_volume(settings.effective_volume())
             .map_err(|e| format!("initial audio volume: {e:?}"))?;
     }
     let mut simulator = TeeSimulator::new(spawn);
@@ -236,7 +236,7 @@ fn play_offline_impl(
                     window.set_target_fps(usize::from(settings.fps_limit));
                     camera.scale = f32::from(settings.zoom_percent) / 100.0;
                     if let Some(device) = audio.as_mut() {
-                        if let Err(error) = device.set_volume(settings.sound_volume) {
+                        if let Err(error) = device.set_volume(settings.effective_volume()) {
                             menu.feedback(format!("Audio volume update: {error:?}"));
                         }
                     }

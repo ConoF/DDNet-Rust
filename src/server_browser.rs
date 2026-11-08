@@ -302,6 +302,11 @@ pub fn visible_indices(servers: &[ServerEntry], settings: &ClientSettings) -> Ve
 }
 
 impl ClientSettings {
+    /// Even already playing voices become silent immediately when disabled.
+    pub fn effective_volume(&self) -> u8 {
+        if self.sound_enabled { self.sound_volume } else { 0 }
+    }
+
     pub fn is_favorite(&self, endpoint: &str) -> bool {
         self.favorites.iter().any(|favorite| favorite == endpoint)
     }
@@ -634,6 +639,18 @@ mod tests {
         assert_eq!(ClientSettings::load(&path).unwrap().bindings,
             KeyBindings::default());
         let _=fs::remove_file(path);
+    }
+
+    #[test]
+    fn muting_forces_mixer_gain_to_zero_without_forgetting_slider() {
+        let mut s=ClientSettings {
+            sound_volume: 40, ..ClientSettings::default()
+        };
+        assert_eq!(s.effective_volume(),40);
+        s.sound_enabled=false;
+        assert_eq!(s.effective_volume(),0);
+        s.sound_enabled=true;
+        assert_eq!(s.effective_volume(),40);
     }
 
     #[test]
