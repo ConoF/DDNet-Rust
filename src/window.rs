@@ -346,6 +346,10 @@ fn play_offline_impl(
         #[cfg(feature = "gpu")]
         if let Some(renderer) = gpu.as_mut() {
             gpu_hud.clear();
+            menu.paint(&mut gpu_hud, &settings, Some(&snapshot), ServerStatus {
+                endpoint: "LOCAL", stage: "Offline sandbox",
+                map: Some(path), tick: Some(simulator.tick as i32), ack: -1,
+            });
             if gpu_smoke {
                 gpu_hud.write_text(10, 10, "GPU HUD", 0xffffff, 7);
             }
@@ -364,12 +368,22 @@ fn play_offline_impl(
             }
             window.update();
         } else {
+            menu.paint(&mut pixels, &settings, Some(&snapshot), ServerStatus {
+                endpoint: "LOCAL", stage: "Offline sandbox",
+                map: Some(path), tick: Some(simulator.tick as i32), ack: -1,
+            });
             window.update_with_buffer(&pixels.pixels, SCREEN_W, SCREEN_H)
                 .map_err(|e| format!("present: {e}"))?;
         }
         #[cfg(not(feature = "gpu"))]
-        window.update_with_buffer(&pixels.pixels, SCREEN_W, SCREEN_H)
-            .map_err(|e| format!("present: {e}"))?;
+        {
+            menu.paint(&mut pixels, &settings, Some(&snapshot), ServerStatus {
+                endpoint: "LOCAL", stage: "Offline sandbox",
+                map: Some(path), tick: Some(simulator.tick as i32), ack: -1,
+            });
+            window.update_with_buffer(&pixels.pixels, SCREEN_W, SCREEN_H)
+                .map_err(|e| format!("present: {e}"))?;
+        }
         frames += 1;
         if gpu_smoke && frames >= 30 {
             println!("GPU DDNet X11 window smoke: 30 hardware-presented frames");
