@@ -8,7 +8,7 @@ use minifb::Key;
 
 use crate::online_ui::HudCanvas;
 use crate::netobjects::{player_name, PlayerInfoNet};
-use crate::server_browser::ClientSettings;
+use crate::server_browser::{ClientSettings, BIND_ACTIONS};
 use crate::snapshot_delta::SnapshotState;
 
 const PANEL: u32 = 0x213344;
@@ -20,6 +20,7 @@ const PALE: u32 = 0xb8c8d3;
 const ACCENT: u32 = 0x9adce8;
 const WARNING: u32 = 0xf4c06b;
 const ROW_HEIGHT: usize = 36;
+const BIND_ROW_HEIGHT: usize = 26;
 
 /// Soft 5px rounded DDNet-style menu panels. Each scanline strip is
 /// disjoint, preventing alpha-overlap darkening on transparent UI.
@@ -74,7 +75,8 @@ impl SettingsTab {
         match self {
             Self::General => 2, Self::Player => 1,
             Self::Graphics => 2, Self::Sound => 1,
-            Self::Appearance | Self::Tee | Self::Controls => 0,
+            Self::Controls => BIND_ACTIONS.len(),
+            Self::Appearance | Self::Tee => 0,
         }
     }
 }
@@ -97,6 +99,7 @@ pub struct MenuState {
     pub settings_tab: SettingsTab,
     selected: usize,
     nickname_edit: Option<String>,
+    binding_edit: Option<usize>,
     feedback: Option<String>,
 }
 
@@ -133,8 +136,25 @@ impl MenuState {
     pub fn new() -> Self { Self::default() }
     pub fn is_open(&self) -> bool { self.open }
     pub fn is_editing(&self) -> bool { self.nickname_edit.is_some() }
+    pub fn is_capturing_binding(&self) -> bool { self.binding_edit.is_some() }
+
+    pub fn bind_mouse(&mut self, button: &str, settings: &mut ClientSettings)
+        -> Option<MenuAction>
+    {
+        let index = self.binding_edit.take()?;
+        if settings.bindings.set(index, button) {
+            self.feedback(format!("{} -> {}", BIND_ACTIONS[index], button));
+            Some(MenuAction::SettingsChanged)
+        } else {
+            self.feedback("Binding unchanged or invalid");
+            None
+        }
+    }
+
     pub fn toggle(&mut self) {
-        if self.nickname_edit.is_some() {
+        if self.binding_edit.is_some() {
+            self.binding_edit = None;
+        } else if self.nickname_edit.is_some() {
             self.nickname_edit = None;
         } else {
             self.open = !self.open;
@@ -143,6 +163,7 @@ impl MenuState {
     pub fn close(&mut self) {
         self.open = false;
         self.nickname_edit = None;
+        self.binding_edit = None;
     }
     pub fn feedback(&mut self, feedback: impl Into<String>) {
         self.feedback = Some(feedback.into());
@@ -152,12 +173,14 @@ impl MenuState {
         self.page = page;
         self.selected = 0;
         self.nickname_edit = None;
+        self.binding_edit = None;
         self.feedback = None;
     }
     fn select_tab(&mut self, tab: SettingsTab) {
         self.settings_tab = tab;
         self.selected = 0;
         self.nickname_edit = None;
+        self.binding_edit = None;
         self.feedback = None;
     }
     fn rows(&self) -> usize {
@@ -241,6 +264,11 @@ impl MenuState {
                         settings.sound_enabled = !settings.sound_enabled;
                         Some(MenuAction::SettingsChanged)
                     }
+                    (SettingsTab::Controls, row) if row < BIND_ACTIONS.len() => {
+                        self.binding_edit = Some(row);
+                        self.feedback("Press a key or mouse button; ESC cancels");
+                        None
+                    }
                     _ => None,
                 }
             }
@@ -252,6 +280,21 @@ impl MenuState {
         -> Option<MenuAction>
     {
         if !self.open { return None; }
+        if self.is_capturing_binding() {
+            if key == Key::Escape {
+                self.binding_edit = None;
+                self.feedback("Binding change canceled");
+                return None;
+            }
+            let name = format!("{key:?}");
+            let index = self.binding_edit.take().unwrap_or(usize::MAX);
+            if settings.bindings.set(index, &name) {
+                self.feedback(format!("{} -> {}", BIND_ACTIONS[index], name));
+                return Some(MenuAction::SettingsChanged);
+            }
+            self.feedback("Key is reserved or binding unchanged");
+            return None;
+        }
         if self.is_editing() {
             return match key {
                 Key::Escape => { self.nickname_edit = None; None }
@@ -317,6 +360,9 @@ impl MenuState {
         settings: &mut ClientSettings,
     ) -> Option<MenuAction> {
         if !self.open || !mouse.0.is_finite() || !mouse.1.is_finite() { return None; }
+        if self.binding_edit.is_some() {
+            return self.bind_mouse("MouseLeft", settings);
+        }
         if viewport.0 < 520 || viewport.1 < 350 { return None; }
         let lay = Layout::for_size(viewport.0, viewport.1);
         let (mx, my) = (mouse.0, mouse.1);
@@ -345,8 +391,11 @@ impl MenuState {
         } else {
             (lay.x+56, lay.content_y(), lay.w.saturating_sub(112))
         };
+        let row_height = if self.page == Page::Settings
+            && self.settings_tab == SettingsTab::Controls
+        { BIND_ROW_HEIGHT } else { ROW_HEIGHT };
         for row in 0..self.rows() {
-            if hit(x, y+row*ROW_HEIGHT, w, ROW_HEIGHT-4) {
+            if hit(x, y+row*row_height, w, row_height-4) {
                 self.selected = row;
                 let direction = if self.page == Page::Settings
                     && self.settings_tab == SettingsTab::Graphics
@@ -498,13 +547,25 @@ impl MenuState {
             SettingsTab::Sound => vec![
                 format!("ENABLE SOUND: {}",on_off(settings.sound_enabled)),
             ],
-            SettingsTab::Tee | SettingsTab::Appearance | SettingsTab::Controls => vec![],
+            SettingsTab::Controls => BIND_ACTIONS.iter().enumerate().map(|(i, action)| {
+                let key = if self.binding_edit == Some(i) {
+                    "[PRESS A KEY]".to_owned()
+                } else {
+                    settings.bindings.slots[i].clone()
+                };
+                format!("{action:<14}  {key}")
+            }).collect(),
+            SettingsTab::Tee | SettingsTab::Appearance => vec![],
         };
+        let row_height = if self.settings_tab == SettingsTab::Controls {
+            BIND_ROW_HEIGHT
+        } else { ROW_HEIGHT };
         for (i,label) in rows.iter().enumerate() {
-            let yy=y+i*ROW_HEIGHT;
-            rounded_panel(canvas,(x,yy,cw,ROW_HEIGHT-4),
+            let yy=y+i*row_height;
+            rounded_panel(canvas,(x,yy,cw,row_height-4),
                 if i==self.selected { SELECTED } else { HEADER },255);
-            canvas.write_text(x+12,yy+12,label,WHITE,cw.saturating_sub(22)/8);
+            canvas.write_text(x+12,yy+if row_height==BIND_ROW_HEIGHT { 6 } else { 12 },
+                label,WHITE,cw.saturating_sub(22)/8);
         }
         let caption: &str = match self.settings_tab {
             SettingsTab::General => "ENTER OR CLICK TO TOGGLE",
@@ -513,12 +574,13 @@ impl MenuState {
             SettingsTab::Sound => "MUTE APPLIES IMMEDIATELY",
             SettingsTab::Tee => "DEFAULT TEE ATLAS; CUSTOM SKINS NOT YET PORTED",
             SettingsTab::Appearance => "NATIVE DDNET THEME / ASSETS IN PROGRESS",
-            SettingsTab::Controls => "A/D MOVE  W/SPACE JUMP  MOUSE1 FIRE",
+            SettingsTab::Controls => "ENTER/CLICK TO BIND; ESC CANCELS",
         };
-        canvas.write_text(x, y+155, caption, PALE, cw/8);
+        canvas.write_text(x, y+if self.settings_tab==SettingsTab::Controls { 264 } else { 155 },
+            caption, PALE, cw/8);
         if self.settings_tab==SettingsTab::Controls {
-            canvas.write_text(x,y+179,"MOUSE2 / E HOOK; T/Y CHAT; 1-5 WEAPONS",PALE,cw/8);
-            canvas.write_text(x,y+202,"TAB SCOREBOARD; +/- ZOOM; ESC MENU",PALE,cw/8);
+            canvas.write_text(x,y+280,
+                "MOUSE BUTTONS CAN ALSO BE ASSIGNED",PALE,cw/8);
         }
     }
 }
@@ -598,6 +660,28 @@ mod tests {
     }
 
     #[cfg(feature = "gpu")]
+    #[test]
+    fn controls_tab_records_keyboard_and_mouse_rebinds() {
+        let mut menu=MenuState::new(); menu.toggle(); menu.page_select(Page::Settings);
+        menu.select_tab(SettingsTab::Controls);
+        let mut prefs=ClientSettings::default();
+        assert_eq!(menu.key(Key::Enter,&mut prefs),None);
+        assert!(menu.is_capturing_binding());
+        assert_eq!(menu.key(Key::Q,&mut prefs),Some(MenuAction::SettingsChanged));
+        assert_eq!(prefs.bindings.slots[0],"Q");
+        menu.key(Key::Down,&mut prefs);
+        menu.key(Key::Enter,&mut prefs);
+        assert!(menu.is_capturing_binding());
+        assert_eq!(menu.bind_mouse("MouseRight",&mut prefs),
+            Some(MenuAction::SettingsChanged));
+        assert_eq!(prefs.bindings.slots[1],"MouseRight");
+        assert!(prefs.bindings.validate());
+        menu.key(Key::Enter,&mut prefs);
+        menu.key(Key::Escape,&mut prefs);
+        assert!(!menu.is_capturing_binding());
+        assert!(menu.is_open());
+    }
+
     #[test]
     fn ui_paints_on_cpu_and_gpu_without_screen_upload() {
         let mut m=MenuState::new();m.toggle();
