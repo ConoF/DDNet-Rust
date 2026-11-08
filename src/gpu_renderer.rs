@@ -12,7 +12,6 @@ use crate::envelope::EnvelopeTimes;
 use crate::gpu_scene::{build_gpu_scene, GpuBatch, GpuScene, GpuVertex, VERTEX_STRIDE};
 use crate::graphics::{Camera, Framebuffer, BACKGROUND};
 use crate::map_visual::VisualMap;
-use crate::texture::Texture;
 
 pub const OVERLAY_KEY: u32 = 0x010203;
 const INITIAL_VERTICES: usize = 4096;
@@ -47,7 +46,7 @@ impl GpuRenderer {
     pub fn new(window: &Window, width: u32, height: u32) -> Result<Self, String> {
         let instance = wgpu::Instance::default();
         let raw = unsafe {
-            wgpu::SurfaceTargetUnsafe::from_display_and_window(window, window)
+            wgpu::SurfaceTargetUnsafe::from_window(window)
         }.map_err(|e| format!("window GPU handles: {e}"))?;
         let surface = unsafe { instance.create_surface_unsafe(raw) }
             .map_err(|e| format!("GPU surface: {e}"))?;

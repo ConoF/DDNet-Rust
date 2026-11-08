@@ -2,7 +2,9 @@
 //! Reference: the pinned upstream/ddnet source.
 //! This is NOT yet a playable client.
 
-#![forbid(unsafe_code)]
+// Enforce safe Rust throughout game/network/protocol code. The optional
+// wgpu native surface interop needs two documented unsafe calls only.
+#![deny(unsafe_code)]
 
 pub mod datafile;
 pub mod demo;
@@ -32,6 +34,7 @@ pub mod quad_render;
 pub mod envelope;
 pub mod gpu_scene;
 #[cfg(feature = "gpu")]
+#[allow(unsafe_code)]
 pub mod gpu_renderer;
 #[cfg(feature = "window")]
 pub mod window_assets;
