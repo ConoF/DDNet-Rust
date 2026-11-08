@@ -30,6 +30,7 @@ pub mod texture;
 pub mod map_visual;
 pub mod quad_render;
 pub mod envelope;
+pub mod gpu_scene;
 #[cfg(feature = "window")]
 pub mod window_assets;
 pub mod audio;
