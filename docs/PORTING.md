@@ -434,3 +434,22 @@ and active gameplay sends `PLAYERFLAG_PLAYING`. Existing movement, jump,
 hook and UDP sends remain unchanged. Regression tests cover timing-wire
 parsing, unsolicited/stale feedback, reconnect clearing, fire counter wrap,
 and capped clock adjustments. Public server connectivity remains unverified.
+
+
+## Stage: recovering from damaged or missing network snapshots
+
+The online DDNet 0.6 session now tracks the last **CRC-verified** snapshot
+ACK independently of the most recently received UDP tick. If a delta
+references a missing base, cannot be decoded, or fails CRC, the next
+`NETMSG_INPUT` sends `last_ack_snapshot=-1` to request a full snapshot.
+Recovery diagnostic events are emitted only once per failure episode,
+while the previous verified snapshot remains available for display.
+The ACK and recovery flag reset on map changes and reconnects; a new
+valid full snapshot restores the normal ACK. Stale UDP snapshots are
+ignored without breaking the session, and retransmitted completed
+single/multipart/empty snapshots are never emitted twice.
+
+Tests cover missing base, checksum corruption, malformed deltas, successful
+recovery, duplicate parts, state preservation, and reconnect resets.
+This is baseline resynchronization, **not** full client prediction or a
+guarantee that all public DDNet servers work.

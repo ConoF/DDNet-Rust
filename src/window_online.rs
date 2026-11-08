@@ -122,7 +122,6 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     let mut last_frame = Instant::now();
     let mut accumulator = Duration::ZERO;
     let mut intended_tick: i32 = 1;
-    let mut last_ack_snapshot: i32 = -1;
     let mut current_snapshot: Option<i32> = None;
     let mut previous_snapshot: Option<i32> = None;
     let mut last_snapshot_at = Instant::now();
@@ -164,17 +163,21 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                             }
                         }
                         reconnect_attempts = 0;
-                        last_ack_snapshot = tick;
                         previous_snapshot = current_snapshot;
                         current_snapshot = Some(tick);
                         last_snapshot_at = Instant::now();
                         intended_tick = intended_tick.max(tick.saturating_add(1));
                     }
+                    GameAction::SnapshotRecoveryRequested { tick, reason } => {
+                        eprintln!(
+                            "Snapshot {tick} rejected ({reason:?}); requesting full state"
+                        );
+                    }
                     GameAction::InputTiming { time_left_ms, .. } => {
                         // Bounded, one-time correction from feedback for a
                         // *locally sent* tick; never rewind our input stream.
                         intended_tick = correct_next_input_tick(
-                            intended_tick, last_ack_snapshot, time_left_ms,
+                            intended_tick, session.snapshot_ack_tick(), time_left_ms,
                         );
                         input_time_left_ms = Some(time_left_ms);
                     }
@@ -221,7 +224,6 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             last_keepalive = last_hello;
             last_receive = last_hello;
             last_snapshot_at = last_hello;
-            last_ack_snapshot = -1;
             intended_tick = 1;
             current_snapshot = None;
             previous_snapshot = None;
@@ -271,7 +273,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             accumulator -= TICK;
             if session.stage == Stage::EnterGameSent {
                 let frame = InputFrame {
-                    last_ack_snapshot,
+                    last_ack_snapshot: session.snapshot_ack_tick(),
                     intended_tick,
                     input: control,
                 };
@@ -314,8 +316,9 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         }
         if last_title.elapsed() > Duration::from_secs(1) {
             window.set_title(&format!(
-                "DDNet-Rust 0.6 prototype | {peer} | {:?} | tick {:?} | input timing {:?}ms",
-                session.stage, current_snapshot, input_time_left_ms,
+                "DDNet-Rust 0.6 prototype | {peer} | {:?} | tick {:?} | ACK {} | recovery {} | input {:?}ms",
+                session.stage, current_snapshot, session.snapshot_ack_tick(),
+                session.is_snapshot_recovering(), input_time_left_ms,
             ));
             last_title = Instant::now();
         }

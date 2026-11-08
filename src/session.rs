@@ -1,6 +1,6 @@
 //! Headless DDNet 0.6 client protocol flow: transport -> INFO -> map download
 //! -> READY -> ENTERGAME. Original flow: upstream/ddnet/src/engine/client/client.cpp
-//! DDNet 20.2.1. This is not a playable client: no snapshots, renderer or input.
+//! DDNet 20.2.1. This is still an experimental client, not fully playable.
 //!
 //! Tests simulate the real upstream wire format end-to-end with a tiny v3 map,
 //! including valid ACK sequences and CRC verification.
@@ -43,8 +43,18 @@ pub enum GameAction {
     EnterGameSent,
     SnapshotReceived { tick: i32, packed_bytes: usize },
     SnapshotDecoded { tick: i32, item_count: usize },
+    /// A missing reference, corrupt delta or CRC mismatch requires a fresh
+    /// complete snapshot. The next NETMSG_INPUT carries ACK=-1.
+    SnapshotRecoveryRequested { tick: i32, reason: SnapshotRecoveryReason },
     InputTiming { tick: i32, time_left_ms: i32 },
     Disconnected(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotRecoveryReason {
+    MissingBase,
+    InvalidDelta,
+    CrcMismatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +103,9 @@ pub struct GameSession06 {
     snapshots: SnapshotAssembler,
     decoder: DeltaDecoder,
     snapshot_states: BTreeMap<i32, SnapshotState>,
+    /// Last verified snapshot ACK to send; -1 requests a full snapshot.
+    snapshot_ack_tick: i32,
+    snapshot_recovering: bool,
     /// Only match feedback to inputs actually sent on this connection.
     /// Bound the queue to 128 recent ticks to prevent unbounded growth.
     pending_input_ticks: VecDeque<i32>,
@@ -115,6 +128,8 @@ impl GameSession06 {
             snapshots: SnapshotAssembler::new(),
             decoder: DeltaDecoder::for_vanilla_06(),
             snapshot_states: BTreeMap::new(),
+            snapshot_ack_tick: -1,
+            snapshot_recovering: false,
             pending_input_ticks: VecDeque::new(),
             last_input_timing: None,
         }
@@ -215,6 +230,8 @@ impl GameSession06 {
                 self.loaded_map_bytes = None;
                 self.snapshots = SnapshotAssembler::new();
                 self.snapshot_states.clear();
+                self.snapshot_ack_tick = -1;
+                self.snapshot_recovering = false;
                 self.pending_input_ticks.clear();
                 self.last_input_timing = None;
                 self.stage = Stage::Downloading;
@@ -263,7 +280,14 @@ impl GameSession06 {
                     return Err(SessionError::UnexpectedStage);
                 }
                 let packet = SnapshotPacket::parse(number, message.payload)?;
-                if let Some(snapshot) = self.snapshots.push(packet)? {
+                let assembled = match self.snapshots.push(packet) {
+                    Ok(snapshot) => snapshot,
+                    // A delayed UDP snapshot does not invalidate the active
+                    // stream, even when a newer multipart tick is underway.
+                    Err(SnapshotError::OldTick) => None,
+                    Err(error) => return Err(error.into()),
+                };
+                if let Some(snapshot) = assembled {
                     actions.push(GameAction::SnapshotReceived {
                         tick: snapshot.game_tick,
                         packed_bytes: snapshot.packed_bytes.len(),
@@ -304,26 +328,60 @@ impl GameSession06 {
         Ok(())
     }
 
-    /// Decode delta snapshots if their reference tick is available. Invalid
-    /// deltas/CRCs are ignored rather than poisoning the verified history.
+    /// Ask the server for an un-deltaed snapshot through the next input's
+    /// ACK=-1. Only emit the diagnostic once per recovery episode. Preserve
+    /// the last CRC-verified snapshots for rendering during the gap.
+    fn request_snapshot_recovery(
+        &mut self, tick: i32, reason: SnapshotRecoveryReason,
+        actions: &mut Vec<GameAction>,
+    ) {
+        self.snapshot_ack_tick = -1;
+        if !self.snapshot_recovering {
+            self.snapshot_recovering = true;
+            actions.push(GameAction::SnapshotRecoveryRequested { tick, reason });
+        }
+    }
+
+    /// Reconstruct verified snapshots. A damaged delta never advances the
+    /// ACK or overwrites state; recovery requests a fresh server baseline.
     fn try_decode_snapshot(
         &mut self,
         snapshot: &crate::snapshot::AssembledSnapshot,
         actions: &mut Vec<GameAction>,
     ) {
+        // A repeated accepted frame must not replay effects or move time back.
+        if self.snapshot_states.last_key_value()
+            .is_some_and(|(&last, _)| snapshot.game_tick <= last)
+        {
+            return;
+        }
         let empty = SnapshotState::default();
         let reference = if snapshot.delta_tick < 0 {
             Some(&empty)
         } else {
             self.snapshot_states.get(&snapshot.delta_tick)
         };
-        let Some(reference) = reference else { return; };
+        let Some(reference) = reference else {
+            self.request_snapshot_recovery(
+                snapshot.game_tick, SnapshotRecoveryReason::MissingBase, actions,
+            );
+            return;
+        };
         let Ok(state) = self.decoder.unpack(&snapshot.packed_bytes, reference) else {
+            self.request_snapshot_recovery(
+                snapshot.game_tick, SnapshotRecoveryReason::InvalidDelta, actions,
+            );
             return;
         };
         if snapshot.crc.is_some_and(|expected| expected != state.checksum()) {
+            self.request_snapshot_recovery(
+                snapshot.game_tick, SnapshotRecoveryReason::CrcMismatch, actions,
+            );
             return;
         }
+
+        self.snapshot_ack_tick = snapshot.game_tick;
+        self.snapshot_recovering = false;
         actions.push(GameAction::SnapshotDecoded {
             tick: snapshot.game_tick,
             item_count: state.items.len(),
@@ -335,6 +393,11 @@ impl GameSession06 {
             }
         }
     }
+
+    /// ACK used by NETMSG_INPUT. -1 requests a complete snapshot after
+    /// invalid or missing delta baselines.
+    pub fn snapshot_ack_tick(&self) -> i32 { self.snapshot_ack_tick }
+    pub fn is_snapshot_recovering(&self) -> bool { self.snapshot_recovering }
 
     /// Sends one 0.6 system NETMSG_INPUT as an *unreliable* chunk, matching
     /// upstream CClient::SendInput. The caller owns the 50 Hz scheduling.
@@ -732,6 +795,74 @@ mod tests {
     }
 
     #[test]
+    fn loss_and_crc_mismatch_recover_with_full_snapshots() {
+        use crate::snapshot::AssembledSnapshot;
+        fn snapshot(tick: i32, base: i32, x: i32, crc: u32) -> AssembledSnapshot {
+            let mut words = vec![0, 1, 0, 9, 0];
+            let mut character = vec![0; 22];
+            character[1] = x;
+            words.extend(character);
+            let mut packed = Vec::new();
+            for value in words { write_int(value, &mut packed); }
+            AssembledSnapshot {
+                game_tick: tick, delta_tick: base,
+                crc: Some(crc), packed_bytes: packed,
+            }
+        }
+        let mut session = GameSession06::new(String::new(), 4096, 1024);
+        let mut actions = Vec::new();
+        assert_eq!(session.snapshot_ack_tick(), -1);
+        session.try_decode_snapshot(&snapshot(100, -1, 100, 100), &mut actions);
+        assert_eq!(session.snapshot_ack_tick(), 100);
+        assert_eq!(session.snapshot_state(100).unwrap().find(9, 0).unwrap().words[1], 100);
+        actions.clear();
+
+        session.try_decode_snapshot(&snapshot(101, 99, 5, 105), &mut actions);
+        assert_eq!(actions, vec![GameAction::SnapshotRecoveryRequested {
+            tick: 101, reason: SnapshotRecoveryReason::MissingBase,
+        }]);
+        assert_eq!(session.snapshot_ack_tick(), -1);
+        assert!(session.is_snapshot_recovering());
+        // Subsequent bad frames cannot spam recovery messages.
+        actions.clear();
+        session.try_decode_snapshot(&snapshot(102, 99, 5, 105), &mut actions);
+        assert!(actions.is_empty());
+        assert!(session.snapshot_state(100).is_some());
+
+        session.try_decode_snapshot(&snapshot(103, -1, 200, 200), &mut actions);
+        assert_eq!(session.snapshot_ack_tick(), 103);
+        assert!(!session.is_snapshot_recovering());
+        assert!(actions.iter().any(|a| matches!(a,
+            GameAction::SnapshotDecoded { tick: 103, .. }
+        )));
+        actions.clear();
+        session.try_decode_snapshot(&snapshot(104, -1, 900, 1), &mut actions);
+        assert_eq!(actions, vec![GameAction::SnapshotRecoveryRequested {
+            tick: 104, reason: SnapshotRecoveryReason::CrcMismatch,
+        }]);
+        assert_eq!(session.snapshot_ack_tick(), -1);
+        assert!(session.snapshot_state(104).is_none());
+        assert!(session.snapshot_state(103).is_some());
+
+        actions.clear();
+        session.try_decode_snapshot(&snapshot(105, -1, 250, 250), &mut actions);
+        assert_eq!(session.snapshot_ack_tick(), 105);
+        assert!(!session.is_snapshot_recovering());
+        actions.clear();
+        let mut malformed = snapshot(106, 105, 0, 0);
+        malformed.packed_bytes = vec![0x80];
+        session.try_decode_snapshot(&malformed, &mut actions);
+        assert_eq!(actions, vec![GameAction::SnapshotRecoveryRequested {
+            tick: 106, reason: SnapshotRecoveryReason::InvalidDelta,
+        }]);
+        assert_eq!(session.snapshot_ack_tick(), -1);
+        actions.clear();
+        session.try_decode_snapshot(&snapshot(107, -1, 300, 300), &mut actions);
+        assert_eq!(session.snapshot_ack_tick(), 107);
+        assert!(!session.is_snapshot_recovering());
+    }
+
+    #[test]
     fn reconnect_resets_network_ack_map_and_snapshot_state() {
         let map = small_real_datafile_v3();
         let mut session = GameSession06::new("private".into(), 4096, 1024);
@@ -754,6 +885,8 @@ mod tests {
         assert!(session.loaded_map.is_none());
         assert!(session.loaded_map_bytes.is_none());
         assert!(session.snapshot_states.is_empty());
+        assert_eq!(session.snapshot_ack_tick(), -1);
+        assert!(!session.is_snapshot_recovering());
         assert!(session.pending_input_ticks.is_empty());
         assert_eq!(session.last_input_timing, None);
         assert_eq!(session.snapshots.last_tick(), None);

@@ -308,6 +308,9 @@ fn connect_headless(endpoint: &str, screenshot: Option<&str>) {
                             println!("The original DDNet sprite renderer is still missing.");
                             return;
                         }
+                        GameAction::SnapshotRecoveryRequested { tick, reason } => {
+                            println!("Snapshot {tick} rejected: {reason:?}; requesting full state");
+                        }
                         GameAction::InputTiming { tick, time_left_ms } => {
                             println!("Input timing: tick {tick}, {time_left_ms:+} ms");
                         }

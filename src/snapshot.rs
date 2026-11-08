@@ -110,6 +110,7 @@ pub struct SnapshotAssembler {
     delta: i32,
     crc: Option<u32>,
     pieces: Vec<Option<Vec<u8>>>,
+    completed: bool,
 }
 
 impl SnapshotAssembler {
@@ -123,7 +124,13 @@ impl SnapshotAssembler {
         if self.tick.is_some_and(|tick| frame.game_tick < tick) {
             return Err(SnapshotError::OldTick);
         }
+        // UDP can retransmit the final part (or a single packet) after
+        // reconstruction. Never emit the same completed tick twice.
+        if self.tick == Some(frame.game_tick) && self.completed {
+            return Ok(None);
+        }
         if frame.kind != SnapshotKind::Multipart {
+            self.completed = true;
             self.tick = Some(frame.game_tick);
             self.delta = frame.delta_tick;
             self.crc = frame.crc;
@@ -141,6 +148,7 @@ impl SnapshotAssembler {
             self.tick = Some(frame.game_tick);
             self.delta = frame.delta_tick;
             self.crc = frame.crc;
+            self.completed = false;
             self.pieces = vec![None; frame.part_count];
         } else if self.pieces.len() != frame.part_count
             || self.delta != frame.delta_tick || self.crc != frame.crc
@@ -168,6 +176,7 @@ impl SnapshotAssembler {
             buffer.extend_from_slice(piece.as_ref().ok_or(SnapshotError::MissingState)?);
         }
         self.pieces.clear();
+        self.completed = true;
         Ok(Some(AssembledSnapshot {
             game_tick: frame.game_tick, delta_tick: frame.delta_tick,
             crc: self.crc, packed_bytes: buffer,
@@ -236,6 +245,23 @@ mod tests {
         assert_eq!(output.packed_bytes.len(), 908);
         assert!(output.packed_bytes[..900].iter().all(|b| *b == 1));
         assert_eq!(&output.packed_bytes[900..], b"trailing");
+        // Duplicate last part after reconstruction is not a new snapshot.
+        assert_eq!(assembler.push(part_first), Ok(None));
+    }
+
+    #[test]
+    fn completed_single_and_empty_snapshots_are_not_delivered_twice() {
+        let mut assembler = SnapshotAssembler::new();
+        let full = SnapshotPacket::parse(NETMSG_SNAPSINGLE,
+            &message(NETMSG_SNAPSINGLE, 100, 101, None, 0, b"payload")
+        ).unwrap();
+        assert!(assembler.push(full.clone()).unwrap().is_some());
+        assert_eq!(assembler.push(full), Ok(None));
+        let empty = SnapshotPacket::parse(NETMSG_SNAPEMPTY,
+            &message(NETMSG_SNAPEMPTY, 101, 1, None, 0, b"")
+        ).unwrap();
+        assert!(assembler.push(empty.clone()).unwrap().is_some());
+        assert_eq!(assembler.push(empty), Ok(None));
     }
 
     #[test]
