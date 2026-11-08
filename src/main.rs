@@ -1,4 +1,6 @@
 use ddnet_rust::datafile::Datafile;
+use ddnet_rust::map_visual::VisualMap;
+use std::path::Path;
 use ddnet_rust::map::GameMap;
 use ddnet_rust::graphics::{Framebuffer, Camera};
 use ddnet_rust::physics::Vec2;
@@ -28,6 +30,7 @@ fn main() {
         [arg, path] if arg == "--inspect-game-map" => inspect_game_map(path),
         [arg, path, output] if arg == "--render-debug-map" => render_debug_map(path, output, false),
         [arg, path, output] if arg == "--render-debug-png" => render_debug_map(path, output, true),
+        [arg, path, assets, output] if arg == "--render-textured-png" => render_textured_map(path, assets, output),
         [arg, path] if arg == "--inspect-layers" => inspect_layers(path),
         [arg, addr] if arg == "--probe-server" => probe(addr),
         [arg, addr] if arg == "--connect-headless" => connect_headless(addr, None),
@@ -51,6 +54,7 @@ fn print_help() {
     println!("  --inspect-map PATH  Parse and validate a v3/v4 DDNet map's metadata");
     println!("  --render-debug-map MAP OUT.ppm  Export collision map to PPM");
     println!("  --render-debug-png MAP OUT.png  Export collision map to PNG");
+    println!("  --render-textured-png MAP DATA_DIR OUT.png  Render PNG/embedded visual tilemap layers");
     println!("  --probe-server HOST[:PORT]  Probe a live DDNet 0.6 UDP handshake");
     println!("  --connect-headless HOST[:PORT]  Test DDNet 0.6 login and map download");
     println!("  --capture-headless HOST[:PORT] OUT.png  Capture first decoded snapshot");
@@ -347,6 +351,50 @@ fn render_debug_map(path: &str, output: &str, png: bool) {
         std::process::exit(1);
     });
     println!("Wrote debug frame {output}: {}x{} tiles", map.width, map.height);
+}
+
+fn render_textured_map(path: &str, asset_root: &str, output: &str) {
+    let bytes = std::fs::read(path).unwrap_or_else(|error| {
+        eprintln!("Unable to open map {path}: {error}");
+        std::process::exit(1);
+    });
+    let datafile = Datafile::parse(&bytes).unwrap_or_else(|error| {
+        eprintln!("Invalid DDNet map {path}: {error:?}");
+        std::process::exit(1);
+    });
+    let visual = VisualMap::from_datafile(&datafile, Path::new(asset_root))
+        .unwrap_or_else(|error| {
+            eprintln!("Cannot load map textures {path}: {error:?}");
+            std::process::exit(1);
+        });
+    if visual.layers.is_empty() {
+        eprintln!("No regular image-backed tile layers in {path}");
+        std::process::exit(1);
+    }
+    // Use a meaningful map coordinate window instead of fitting a huge
+    // map to a tiny thumbnail (where each tile becomes subpixel).
+    let width = visual.layers.iter().map(|l| l.width).max().unwrap_or(30);
+    let height = visual.layers.iter().map(|l| l.height).max().unwrap_or(20);
+    let camera = Camera {
+        center: Vec2::new(width as f32 * 16.0, height as f32 * 16.0),
+        scale: (960.0 / (width as f32 * 32.0))
+            .min(540.0 / (height as f32 * 32.0))
+            .clamp(0.05, 2.0),
+    };
+    let mut frame = Framebuffer::new(960, 540).expect("fixed framebuffer");
+    let drawn = visual.render(&mut frame, camera).unwrap_or_else(|error| {
+        eprintln!("Texture render failed: {error:?}");
+        std::process::exit(1);
+    });
+    let png = frame.png_bytes().expect("bounded PNG encoding");
+    std::fs::write(output, png).unwrap_or_else(|error| {
+        eprintln!("Unable to write {output}: {error}");
+        std::process::exit(1);
+    });
+    println!(
+        "Rendered {drawn} tiles from {} textured layers / {} images to {output}",
+        visual.layers.len(), visual.images.len(),
+    );
 }
 
 fn capture_game_state(session: &GameSession06, tick: i32, output: &str) {

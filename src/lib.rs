@@ -19,6 +19,8 @@ pub mod huffman;
 pub mod layers;
 pub mod map;
 pub mod graphics;
+pub mod texture;
+pub mod map_visual;
 pub mod audio;
 #[cfg(feature = "window")]
 pub mod window;

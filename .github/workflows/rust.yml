@@ -62,6 +62,16 @@ jobs:
           cargo run --locked -- --render-debug-png upstream/ddnet/data/maps/ctf1.map target/ctf1-debug.png
           cargo run --locked -- --render-debug-png upstream/ddnet/data/maps/Tutorial.map target/tutorial-debug.png
           python3 -c "from pathlib import Path; p=Path('target/ctf1-debug.png'); assert p.read_bytes()[:8] == bytes((137,80,78,71,13,10,26,10))"
+      - name: Render original mapres and embedded map textures in Rust
+        run: |
+          cargo run --locked -- --render-textured-png upstream/ddnet/data/maps/ctf1.map upstream/ddnet/data target/ctf1-textured.png
+          python3 -c "from pathlib import Path; p=Path('target/ctf1-textured.png'); assert p.stat().st_size > 200; assert p.read_bytes()[:8] == bytes((137,80,78,71,13,10,26,10))"
+      - name: Publish textured visual-layer preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: ddnet-rust-textured-map-preview
+          path: target/ctf1-textured.png
+          if-no-files-found: error
       - name: Publish diagnostic PNGs
         uses: actions/upload-artifact@v4
         with:

@@ -176,3 +176,23 @@ freezing/teleport/tune layers, deterministic server reconciliation and
 the entire network snapshot prediction loop remain incomplete. The
 simple same-team and solo rule is an approximation, not a full port of
 DDNet team semantics.
+
+## Stage 4 — actual texture loading and map tile images (first increment)
+
+\`src/texture.rs\` provides a bounded **pure-Rust PNG decoder** for
+noninterlaced 8-bit grayscale, RGB, indexed, gray-alpha and RGBA images.
+It handles PNG row filters 0-4, palette transparency and chunk CRC
+validation via the already-pinned \`flate2\` Rust backend. \`src/map_visual.rs\`
+loads original \`mapres/*.png\` images and uncompressed embedded RGBA
+map images from official DDNet v3/v4 datafiles. The preview renders
+ordinary tile layers with texture atlases (16x16), tile flags, group
+offset/parallax, static tint and alpha blending to the CPU framebuffer.
+
+Try:
+\`cargo run --locked -- --render-textured-png upstream/ddnet/data/maps/ctf1.map upstream/ddnet/data target/ctf1-textured.png\`
+
+Linux CI opens the original upstream map and mapres images and uploads
+a PNG artifact. This is *not* the final DDNet renderer: quads, animated
+envelopes, decorative details, lighting, GPU batching, and full
+per-layer mapping need additional porting. Physics and protocol remain
+independent from this visual subsystem.
