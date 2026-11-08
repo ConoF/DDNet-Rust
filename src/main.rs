@@ -24,7 +24,8 @@ fn main() {
         [arg] if arg == "--huffman-vectors" => huffman_vectors(),
         [arg, path] if arg == "--inspect-map" => inspect_map(path),
         [arg, path] if arg == "--inspect-game-map" => inspect_game_map(path),
-        [arg, path, output] if arg == "--render-debug-map" => render_debug_map(path, output),
+        [arg, path, output] if arg == "--render-debug-map" => render_debug_map(path, output, false),
+        [arg, path, output] if arg == "--render-debug-png" => render_debug_map(path, output, true),
         [arg, path] if arg == "--inspect-layers" => inspect_layers(path),
         [arg, addr] if arg == "--probe-server" => probe(addr),
         [arg, addr] if arg == "--connect-headless" => connect_headless(addr),
@@ -41,6 +42,8 @@ fn print_help() {
     println!("  --codec-vectors     Emit integer vectors for C++ differential testing");
     println!("  --huffman-vectors   Compare compressed output against upstream C++");
     println!("  --inspect-map PATH  Parse and validate a v3/v4 DDNet map's metadata");
+    println!("  --render-debug-map MAP OUT.ppm  Export collision map to PPM");
+    println!("  --render-debug-png MAP OUT.png  Export collision map to PNG");
     println!("  --probe-server HOST[:PORT]  Probe a live DDNet 0.6 UDP handshake");
     println!("  --connect-headless HOST[:PORT]  Test DDNet 0.6 login and map download");
     println!("  --version           Print project and upstream versions");
@@ -281,7 +284,7 @@ fn connect_headless(endpoint: &str) {
     std::process::exit(1);
 }
 
-fn render_debug_map(path: &str, output: &str) {
+fn render_debug_map(path: &str, output: &str, png: bool) {
     let bytes = std::fs::read(path).unwrap_or_else(|error| {
         eprintln!("Unable to open map {path}: {error}");
         std::process::exit(1);
@@ -304,7 +307,12 @@ fn render_debug_map(path: &str, output: &str) {
         center: Vec2::new(world_width / 2.0, world_height / 2.0),
         scale,
     }).expect("bounded map camera");
-    std::fs::write(output, frame.ppm_bytes()).unwrap_or_else(|error| {
+    let rendered = if png {
+        frame.png_bytes().expect("bounded debug PNG encoding")
+    } else {
+        frame.ppm_bytes()
+    };
+    std::fs::write(output, rendered).unwrap_or_else(|error| {
         eprintln!("Unable to write debug frame {output}: {error}");
         std::process::exit(1);
     });
