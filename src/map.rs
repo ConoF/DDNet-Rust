@@ -21,6 +21,8 @@ pub enum MapError {
     InvalidTileLayer,
     InvalidDimensions,
     InvalidTileData,
+    InvalidMotion,
+    MotionTooLarge,
     Datafile(DatafileError),
 }
 
@@ -148,6 +150,124 @@ impl GameMap {
         self.is_solid_pixel(x.round() as i32, y.round() as i32)
     }
 
+    /// Mirrors CCollision::TestBox: collision at the four AABB corners.
+    pub fn test_box(&self, center: Vec2, size: Vec2) -> bool {
+        let half_x = size.x * 0.5;
+        let half_y = size.y * 0.5;
+        self.check_point(center.x - half_x, center.y - half_y)
+            || self.check_point(center.x + half_x, center.y - half_y)
+            || self.check_point(center.x - half_x, center.y + half_y)
+            || self.check_point(center.x + half_x, center.y + half_y)
+    }
+
+    /// Vanilla CCollision::MoveBox sub-step collision, with a safety cap
+    /// on motion length to prevent untrusted values from freezing the client.
+    /// Position/velocity are updated only on success.
+    pub fn move_box(
+        &self,
+        position: &mut Vec2,
+        velocity: &mut Vec2,
+        size: Vec2,
+        elasticity: Vec2,
+        grounded: &mut bool,
+    ) -> Result<(), MapError> {
+        if ![
+            position.x, position.y, velocity.x, velocity.y,
+            size.x, size.y, elasticity.x, elasticity.y,
+        ].iter().all(|x| x.is_finite()) || size.x < 0.0 || size.y < 0.0 {
+            return Err(MapError::InvalidMotion);
+        }
+
+        let mut pos = *position;
+        let mut vel = *velocity;
+        let distance = vel.x.hypot(vel.y);
+        if distance > 8192.0 {
+            return Err(MapError::MotionTooLarge);
+        }
+        if distance > 0.00001 {
+            let steps = distance as u32;
+            let fraction = 1.0 / (steps as f32 + 1.0);
+            let elastic_x = elasticity.x.clamp(-1.0, 1.0);
+            let elastic_y = elasticity.y.clamp(-1.0, 1.0);
+
+            for _ in 0..=steps {
+                if vel == Vec2::default() {
+                    break;
+                }
+                let mut next = Vec2::new(
+                    pos.x + vel.x * fraction,
+                    pos.y + vel.y * fraction,
+                );
+                if next == pos {
+                    break;
+                }
+                if self.test_box(next, size) {
+                    let mut hits = 0;
+                    if self.test_box(Vec2::new(pos.x, next.y), size) {
+                        if elastic_y > 0.0 && vel.y > 0.0 {
+                            *grounded = true;
+                        }
+                        next.y = pos.y;
+                        vel.y *= -elastic_y;
+                        hits += 1;
+                    }
+                    if self.test_box(Vec2::new(next.x, pos.y), size) {
+                        next.x = pos.x;
+                        vel.x *= -elastic_x;
+                        hits += 1;
+                    }
+                    if hits == 0 {
+                        if elastic_y > 0.0 && vel.y > 0.0 {
+                            *grounded = true;
+                        }
+                        next.y = pos.y;
+                        vel.y *= -elastic_y;
+                        next.x = pos.x;
+                        vel.x *= -elastic_x;
+                    }
+                }
+                pos = next;
+            }
+        }
+        *position = pos;
+        *velocity = vel;
+        Ok(())
+    }
+
+    /// Port of CCollision::MovePoint. Returns the number of axis bounces;
+    /// a diagonal corner collision without axis hits reflects both.
+    pub fn move_point(
+        &self,
+        position: &mut Vec2,
+        velocity: &mut Vec2,
+        elasticity: f32,
+    ) -> Result<u8, MapError> {
+        if ![position.x, position.y, velocity.x, velocity.y, elasticity]
+            .iter().all(|value| value.is_finite()) {
+            return Err(MapError::InvalidMotion);
+        }
+        let next = Vec2::new(position.x + velocity.x, position.y + velocity.y);
+        if !self.check_point(next.x, next.y) {
+            *position = next;
+            return Ok(0);
+        }
+
+        let mut hits = 0;
+        if self.check_point(position.x + velocity.x, position.y) {
+            velocity.x *= -elasticity;
+            hits += 1;
+        }
+        if self.check_point(position.x, position.y + velocity.y) {
+            velocity.y *= -elasticity;
+            hits += 1;
+        }
+        if hits == 0 {
+            velocity.x *= -elasticity;
+            velocity.y *= -elasticity;
+        }
+        Ok(hits)
+    }
+
     /// DDNet collision.cpp::IsOnGround. Position is the tee center.
     pub fn is_on_ground(&self, center: Vec2, physical_size: f32) -> bool {
         let y = center.y + physical_size / 2.0 + 5.0;
@@ -212,6 +332,77 @@ mod tests {
         assert_eq!(event, JumpEvent::Ground);
         assert_eq!(c.velocity.y, -13.2);
         assert_eq!(c.velocity.x, 2.0);
+    }
+
+    #[test]
+    fn moving_box_stops_at_vertical_wall() {
+        let mut bytes = vec![0u8; 3 * 2 * 4];
+        for y in 0..2 {
+            bytes[(y * 3 + 2) * 4] = 1;
+        }
+        let map = GameMap::from_tile_bytes(3, 2, &bytes).unwrap();
+        let mut pos = Vec2::new(48.0, 16.0);
+        let mut vel = Vec2::new(20.0, 0.0);
+        let mut grounded = false;
+        map.move_box(
+            &mut pos, &mut vel, Vec2::new(28.0, 28.0),
+            Vec2::default(), &mut grounded
+        ).unwrap();
+        assert!(pos.x > 48.0 && pos.x < 50.0, "pos={pos:?}");
+        assert_eq!(vel.x, 0.0);
+        assert!(!grounded);
+        assert!(!map.test_box(pos, Vec2::new(28.0, 28.0)));
+    }
+
+    #[test]
+    fn moving_box_ground_contact_and_bounce() {
+        let map = grid();
+        let mut pos = Vec2::new(48.0, 48.0);
+        let mut vel = Vec2::new(0.0, 10.0);
+        let mut grounded = false;
+        map.move_box(
+            &mut pos, &mut vel, Vec2::new(28.0, 28.0),
+            Vec2::new(0.0, 1.0), &mut grounded,
+        ).unwrap();
+        assert!(grounded);
+        assert_eq!(vel.y, -10.0);
+        assert!(!map.test_box(pos, Vec2::new(28.0, 28.0)));
+    }
+
+    #[test]
+    fn move_point_bounces_and_is_bounded() {
+        let map = grid();
+        let mut pos = Vec2::new(16.0, 48.0);
+        let mut vel = Vec2::new(0.0, 32.0);
+        assert_eq!(map.move_point(&mut pos, &mut vel, 1.0), Ok(1));
+        assert_eq!(pos.y, 48.0);
+        assert_eq!(vel.y, -32.0);
+
+        let mut pos = Vec2::new(16.0, 16.0);
+        let mut vel = Vec2::new(0.0, 9000.0);
+        assert_eq!(
+            map.move_box(&mut pos, &mut vel, Vec2::new(28.0, 28.0),
+                Vec2::default(), &mut false),
+            Err(MapError::MotionTooLarge),
+        );
+        assert_eq!(pos, Vec2::new(16.0, 16.0));
+        assert_eq!(vel.y, 9000.0);
+    }
+
+    #[test]
+    fn stationary_and_unobstructed_motion_are_exact() {
+        let map = grid();
+        let mut pos = Vec2::new(16.0, 16.0);
+        let mut vel = Vec2::new(0.0, 0.0);
+        let mut grounded = false;
+        map.move_box(&mut pos, &mut vel, Vec2::new(28.0, 28.0),
+            Vec2::default(), &mut grounded).unwrap();
+        assert_eq!(pos, Vec2::new(16.0, 16.0));
+        vel = Vec2::new(5.0, 0.0);
+        map.move_box(&mut pos, &mut vel, Vec2::new(28.0, 28.0),
+            Vec2::default(), &mut grounded).unwrap();
+        assert_eq!(pos, Vec2::new(21.0, 16.0));
+        assert_eq!(vel, Vec2::new(5.0, 0.0));
     }
 
     #[test]
