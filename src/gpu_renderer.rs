@@ -177,12 +177,12 @@ impl GpuRenderer {
         };
         let overlay_tee = Self::make_texture(
             &device, &queue, &layout, &sampler,
-            width, height, &vec![0; (width * height * 4) as usize],
+            (width, height), &vec![0; (width * height * 4) as usize],
             "DDNet tee overlay",
         );
         let overlay_hud = Self::make_texture(
             &device, &queue, &layout, &sampler,
-            width, height, &vec![0; (width * height * 4) as usize],
+            (width, height), &vec![0; (width * height * 4) as usize],
             "DDNet HUD overlay",
         );
         Ok(Self {
@@ -195,7 +195,7 @@ impl GpuRenderer {
     fn make_texture(
         device: &wgpu::Device, queue: &wgpu::Queue,
         layout: &wgpu::BindGroupLayout, sampler: &wgpu::Sampler,
-        width: u32, height: u32, rgba: &[u8], label: &'static str,
+        (width, height): (u32, u32), rgba: &[u8], label: &'static str,
     ) -> ImageBind {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
@@ -241,13 +241,13 @@ impl GpuRenderer {
             for image in &map.images {
                 self.images.push(Self::make_texture(
                     &self.device, &self.queue, &self.layout, &self.sampler,
-                    image.width, image.height, &image.rgba, "DDNet map atlas",
+                    (image.width, image.height), &image.rgba, "DDNet map atlas",
                 ));
             }
         }
         self.images.push(Self::make_texture(
             &self.device, &self.queue, &self.layout, &self.sampler,
-            1, 1, &WHITE, "DDNet solid white quad texture",
+            (1, 1), &WHITE, "DDNet solid white quad texture",
         ));
     }
 
