@@ -63,6 +63,9 @@ pub struct OnlineHud {
 pub trait HudCanvas {
     fn dimensions(&self) -> (usize, usize);
     fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32);
+    fn fill_translucent_rect(
+        &mut self, x: usize, y: usize, w: usize, h: usize, color: u32, alpha: u8,
+    );
     fn write_text(&mut self, x: usize, y: usize, value: &str,
         color: u32, max_chars: usize);
 }
@@ -79,6 +82,32 @@ impl HudCanvas for Framebuffer {
             let offset = row * self.width as usize;
             for col in x.min(max_x)..max_x {
                 self.pixels[offset + col] = color;
+            }
+        }
+    }
+
+    fn fill_translucent_rect(
+        &mut self, x: usize, y: usize, w: usize, h: usize, color: u32, alpha: u8,
+    ) {
+        if alpha == 255 {
+            self.fill_rect(x,y,w,h,color);
+            return;
+        }
+        if alpha == 0 { return; }
+        let limit_x=x.saturating_add(w).min(self.width as usize);
+        let limit_y=y.saturating_add(h).min(self.height as usize);
+        let a=u32::from(alpha);
+        let ia=255-a;
+        for yy in y.min(limit_y)..limit_y {
+            for xx in x.min(limit_x)..limit_x {
+                let index=yy*self.width as usize+xx;
+                let previous=self.pixels[index];
+                let c=|shift| {
+                    let src=(color>>shift)&255;
+                    let dst=(previous>>shift)&255;
+                    (src*a+dst*ia+127)/255
+                };
+                self.pixels[index]=c(16)<<16|c(8)<<8|c(0);
             }
         }
     }

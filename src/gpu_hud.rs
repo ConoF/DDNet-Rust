@@ -56,6 +56,12 @@ impl GpuHudScene {
     fn quad(&mut self, rect: (usize, usize, usize, usize),
         uv: [[f32; 2]; 4], color: u32, slot: usize)
     {
+        self.quad_alpha(rect,uv,color,255,slot);
+    }
+
+    fn quad_alpha(&mut self, rect: (usize, usize, usize, usize),
+        uv: [[f32; 2]; 4], color: u32, alpha: u8, slot: usize)
+    {
         let (x, y, w, h) = rect;
         if w == 0 || h == 0 || self.width == 0 || self.height == 0
             || self.vertices.len() > MAX_FRAME_VERTICES - 6
@@ -83,7 +89,7 @@ impl GpuHudScene {
             ((color >> 16) & 255) as u8,
             ((color >> 8) & 255) as u8,
             (color & 255) as u8,
-            255,
+            alpha,
         ];
         let start = self.vertices.len() as u32;
         for corner in [0, 1, 2, 1, 3, 2] {
@@ -115,6 +121,14 @@ impl HudCanvas for GpuHudScene {
         self.quad((x,y,w,h), [
             [0.0,0.0],[1.0,0.0],[0.0,1.0],[1.0,1.0],
         ], color, HUD_SOLID_SLOT);
+    }
+
+    fn fill_translucent_rect(
+        &mut self, x: usize, y: usize, w: usize, h: usize, color: u32, alpha: u8,
+    ) {
+        self.quad_alpha((x,y,w,h), [
+            [0.0,0.0],[1.0,0.0],[0.0,1.0],[1.0,1.0],
+        ], color, alpha, HUD_SOLID_SLOT);
     }
 
     fn write_text(&mut self, x: usize, y: usize, value: &str,

@@ -345,8 +345,10 @@ impl MenuState {
         let (width, height) = canvas.dimensions();
         if width < 520 || height < 350 { return; }
         let l = Layout::for_size(width, height);
-        canvas.fill_rect(0, 0, width, height, SHADOW);
-        canvas.fill_rect(l.x, l.y, l.w, l.h, PANEL);
+        // Preserve the animated world behind the original in-game UI.
+        // Both GPU and CPU backends blend these rectangles correctly.
+        canvas.fill_translucent_rect(0, 0, width, height, SHADOW, 185);
+        canvas.fill_translucent_rect(l.x, l.y, l.w, l.h, PANEL, 240);
         canvas.fill_rect(l.x, l.y, l.w, 48, HEADER);
         canvas.write_text(l.x+24, l.y+19, "DDNET", WHITE, 10);
         canvas.write_text(l.x+l.w.saturating_sub(228), l.y+19,
