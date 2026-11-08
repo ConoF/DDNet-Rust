@@ -96,7 +96,7 @@ impl Framebuffer {
     }
 
     fn circle_screen(&mut self, x: i64, y: i64, radius: i64, color: u32) {
-        if radius < 0 || radius > 4096 {
+        if !(0..=4096).contains(&radius) {
             return;
         }
         let min_x = (x - radius).max(0);
