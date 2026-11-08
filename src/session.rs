@@ -1,0 +1,403 @@
+//! Headless DDNet 0.6 client protocol flow: transport -> INFO -> map download
+//! -> READY -> ENTERGAME. Original flow: upstream/ddnet/src/engine/client/client.cpp
+//! DDNet 20.2.1. This is not a playable client: no snapshots, renderer or input.
+//!
+//! Tests simulate the real upstream wire format end-to-end with a tiny v3 map,
+//! including valid ACK sequences and CRC verification.
+
+use crate::datafile::{Datafile, DatafileError};
+use crate::game_protocol::{
+    client_enter_game, client_info, client_ping_reply, client_ready, decode_message,
+    request_map_chunk, MapChange, MapData, MapDownload, MessageError, MessageId,
+    NETMSG_CON_READY, NETMSG_MAP_CHANGE, NETMSG_MAP_DATA, NETMSG_PING,
+};
+use crate::map::{GameMap, MapError};
+use crate::transport::{Client06, Event, TransportError};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Offline,
+    Connecting,
+    WaitingMap,
+    Downloading,
+    WaitingConReady,
+    EnterGameSent,
+    Closed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GameAction {
+    /// Caller must transmit this datagram to the connected server.
+    Outgoing(Vec<u8>),
+    TransportConnected,
+    MapAnnounced { name: String, size: usize },
+    MapLoaded { name: String, width: usize, height: usize },
+    EnterGameSent,
+    Disconnected(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionError {
+    Transport(TransportError),
+    Message(MessageError),
+    Datafile(DatafileError),
+    Map(MapError),
+    UnexpectedStage,
+}
+impl From<TransportError> for SessionError {
+    fn from(value: TransportError) -> Self { Self::Transport(value) }
+}
+impl From<MessageError> for SessionError {
+    fn from(value: MessageError) -> Self { Self::Message(value) }
+}
+impl From<DatafileError> for SessionError {
+    fn from(value: DatafileError) -> Self { Self::Datafile(value) }
+}
+impl From<MapError> for SessionError {
+    fn from(value: MapError) -> Self { Self::Map(value) }
+}
+
+#[derive(Debug, Clone)]
+pub struct GameSession06 {
+    pub stage: Stage,
+    pub transport: Client06,
+    pub loaded_map: Option<GameMap>,
+    password: String,
+    max_map_bytes: usize,
+    max_tiles: usize,
+    pending_map: Option<MapDownload>,
+    map_name: Option<String>,
+}
+
+impl GameSession06 {
+    pub fn new(password: String, max_map_bytes: usize, max_tiles: usize) -> Self {
+        Self {
+            stage: Stage::Offline,
+            transport: Client06::new(),
+            loaded_map: None,
+            password,
+            max_map_bytes,
+            max_tiles,
+            pending_map: None,
+            map_name: None,
+        }
+    }
+
+    pub fn connect(&mut self) -> Result<Vec<u8>, SessionError> {
+        if self.stage != Stage::Offline {
+            return Err(SessionError::UnexpectedStage);
+        }
+        let start = self.transport.begin_connect()?;
+        self.stage = Stage::Connecting;
+        Ok(start)
+    }
+
+    /// Parse one server UDP datagram. All output packets are returned as actions.
+    pub fn receive(&mut self, data: &[u8]) -> Result<Vec<GameAction>, SessionError> {
+        let events = self.transport.receive(data)?;
+        let mut actions = Vec::new();
+        for event in events {
+            match event {
+                Event::Outgoing(packet) => actions.push(GameAction::Outgoing(packet)),
+                Event::Connected => {
+                    if self.stage != Stage::Connecting {
+                        return Err(SessionError::UnexpectedStage);
+                    }
+                    self.stage = Stage::WaitingMap;
+                    actions.push(GameAction::TransportConnected);
+                    let info = client_info(&self.password)?;
+                    let wire = self.transport.send_message(&info, true)?;
+                    actions.push(GameAction::Outgoing(wire));
+                }
+                Event::Message(payload) => {
+                    self.receive_message(&payload, &mut actions)?;
+                }
+                Event::Disconnected(reason) => {
+                    self.stage = Stage::Closed;
+                    actions.push(GameAction::Disconnected(reason));
+                }
+            }
+        }
+        Ok(actions)
+    }
+
+    fn send_system(
+        &mut self, packet: &[u8], vital: bool, actions: &mut Vec<GameAction>,
+    ) -> Result<(), SessionError> {
+        let bytes = self.transport.send_message(packet, vital)?;
+        actions.push(GameAction::Outgoing(bytes));
+        Ok(())
+    }
+
+    fn receive_message(
+        &mut self, bytes: &[u8], actions: &mut Vec<GameAction>,
+    ) -> Result<(), SessionError> {
+        let message = decode_message(bytes)?;
+        let MessageId::Regular { system: true, number } = message.id else {
+            // Vanilla game messages and UUID-based extensions will be
+            // handled by the future snapshot/game-protocol subsystem.
+            return Ok(());
+        };
+        match number {
+            NETMSG_MAP_CHANGE => {
+                if self.stage != Stage::WaitingMap && self.stage != Stage::Downloading {
+                    return Err(SessionError::UnexpectedStage);
+                }
+                let change = MapChange::parse(message.payload)?;
+                let pending = MapDownload::new(change.clone(), self.max_map_bytes)?;
+                self.pending_map = Some(pending);
+                self.map_name = Some(change.name.clone());
+                self.loaded_map = None;
+                self.stage = Stage::Downloading;
+                actions.push(GameAction::MapAnnounced {
+                    name: change.name, size: change.size,
+                });
+                self.send_system(&request_map_chunk(0)?, true, actions)?;
+            }
+            NETMSG_MAP_DATA => {
+                if self.stage != Stage::Downloading {
+                    return Err(SessionError::UnexpectedStage);
+                }
+                let chunk = MapData::parse(message.payload)?;
+                let progress = self.pending_map.as_mut()
+                    .ok_or(SessionError::UnexpectedStage)?
+                    .ingest(chunk)?;
+                if progress.complete {
+                    let map_bytes = self.pending_map.take()
+                        .ok_or(SessionError::UnexpectedStage)?
+                        .into_map_data()?;
+                    let datafile = Datafile::parse(&map_bytes)?;
+                    let map = GameMap::from_datafile(&datafile, self.max_tiles)?;
+                    let name = self.map_name.clone().unwrap_or_default();
+                    actions.push(GameAction::MapLoaded {
+                        name, width: map.width, height: map.height,
+                    });
+                    self.loaded_map = Some(map);
+                    self.stage = Stage::WaitingConReady;
+                    self.send_system(&client_ready(), true, actions)?;
+                } else {
+                    self.send_system(&request_map_chunk(progress.next_chunk)?, true, actions)?;
+                }
+            }
+            NETMSG_CON_READY => {
+                if self.stage != Stage::WaitingConReady {
+                    return Err(SessionError::UnexpectedStage);
+                }
+                self.send_system(&client_enter_game(), true, actions)?;
+                self.stage = Stage::EnterGameSent;
+                actions.push(GameAction::EnterGameSent);
+            }
+            NETMSG_PING => {
+                self.send_system(&client_ping_reply(), false, actions)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub fn map_name(&self) -> Option<&str> {
+        self.map_name.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game_protocol::{crc32_update, encode_message};
+    use crate::network::{
+        encode_packet_06, ChunkHeader, PacketHeader, CHUNK_VITAL, FLAG_CONTROL,
+    };
+    use crate::protocol::{write_int, write_string};
+    use std::time::Duration;
+    use std::net::UdpSocket;
+    use std::thread;
+
+    const TOKEN: u32 = 0x0102_0304;
+
+    fn server_control(code: u8, extra: &[u8]) -> Vec<u8> {
+        let mut data = vec![code];
+        data.extend_from_slice(extra);
+        encode_packet_06(
+            PacketHeader { flags: FLAG_CONTROL, ack: 0, num_chunks: 0 }, &data
+        ).unwrap()
+    }
+
+    fn server_message(id: u16, payload: &[u8], seq: u16, ack: u16) -> Vec<u8> {
+        let msg = encode_message(
+            MessageId::Regular { system: true, number: id }, payload
+        ).unwrap();
+        let mut chunk = ChunkHeader {
+            flags: CHUNK_VITAL, size: msg.len() as u16, sequence: Some(seq),
+        }.encode_06().unwrap();
+        chunk.extend_from_slice(&msg);
+        chunk.extend_from_slice(&TOKEN.to_be_bytes());
+        encode_packet_06(
+            PacketHeader { flags: 0, ack, num_chunks: 1 }, &chunk
+        ).unwrap()
+    }
+
+    fn push_i32(data: &mut Vec<u8>, value: i32) {
+        data.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn small_real_datafile_v3() -> Vec<u8> {
+        // Exact DATA v3 layout: one game layer item and one CTile.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"DATA");
+        for value in [3, 0, 0, 1, 1, 1, 68, 4] {
+            push_i32(&mut data, value);
+        }
+        for value in [5, 0, 1, 0, 0, 5 << 16, 60] {
+            push_i32(&mut data, value);
+        }
+        let mut item = [0i32; 15];
+        item[1] = 2; // LAYERTYPE_TILES
+        item[3] = 2; // Tilemap version 2
+        item[4] = 1; // Width
+        item[5] = 1; // Height
+        item[6] = 1; // Game physics layer flag
+        item[14] = 0; // Raw data block index
+        for value in item {
+            push_i32(&mut data, value);
+        }
+        data.extend_from_slice(&[1, 0, 0, 0]);
+        let size = i32::try_from(data.len() - 16).unwrap();
+        data[8..12].copy_from_slice(&size.to_le_bytes());
+        data
+    }
+
+    fn feed_handshake(session: &mut GameSession06) -> Vec<GameAction> {
+        assert_eq!(session.stage, Stage::Offline);
+        let hello = session.connect().unwrap();
+        assert_eq!(&hello[..4], &[0x10, 0, 0, 1]);
+        let mut extra = b"TKEN".to_vec();
+        extra.extend_from_slice(&TOKEN.to_be_bytes());
+        session.receive(&server_control(2, &extra)).unwrap()
+    }
+
+    fn make_map_change(data: &[u8]) -> Vec<u8> {
+        let mut wire = Vec::new();
+        write_string("mini", &mut wire).unwrap();
+        write_int(crc32_update(0, data) as i32, &mut wire);
+        write_int(data.len() as i32, &mut wire);
+        wire
+    }
+
+    fn make_map_data(data: &[u8]) -> Vec<u8> {
+        let mut wire = Vec::new();
+        for value in [1i32, crc32_update(0, data) as i32, 0, data.len() as i32] {
+            write_int(value, &mut wire);
+        }
+        wire.extend_from_slice(data);
+        wire
+    }
+
+    #[test]
+    fn full_headless_vanilla_06_map_login_simulation() {
+        let map = small_real_datafile_v3();
+        let mut client = GameSession06::new(String::new(), 1024 * 1024, 1024);
+        let hello = feed_handshake(&mut client);
+        assert_eq!(client.stage, Stage::WaitingMap);
+        assert!(hello.contains(&GameAction::TransportConnected));
+        assert_eq!(hello.iter().filter(|action| matches!(action, GameAction::Outgoing(_))).count(), 2);
+        assert_eq!(client.transport.sequence, 1); // INFO was vital.
+
+        let announced = client.receive(&server_message(
+            NETMSG_MAP_CHANGE, &make_map_change(&map), 1, 1
+        )).unwrap();
+        assert!(announced.contains(&GameAction::MapAnnounced {
+            name: "mini".into(), size: map.len(),
+        }));
+        assert_eq!(client.stage, Stage::Downloading);
+        assert_eq!(client.transport.sequence, 2); // REQUEST_MAP_DATA vital.
+
+        let downloaded = client.receive(&server_message(
+            NETMSG_MAP_DATA, &make_map_data(&map), 2, 2
+        )).unwrap();
+        assert!(downloaded.contains(&GameAction::MapLoaded {
+            name: "mini".into(), width: 1, height: 1,
+        }));
+        assert_eq!(client.stage, Stage::WaitingConReady);
+        assert_eq!(client.loaded_map.as_ref().unwrap().tiles[0].index, 1);
+        assert_eq!(client.transport.sequence, 3); // READY vital.
+
+        let joined = client.receive(&server_message(
+            NETMSG_CON_READY, &[], 3, 3
+        )).unwrap();
+        assert!(joined.contains(&GameAction::EnterGameSent));
+        assert_eq!(client.stage, Stage::EnterGameSent);
+        assert_eq!(client.transport.sequence, 4);
+    }
+
+    #[test]
+    fn bad_map_crc_does_not_mark_ready() {
+        let map = small_real_datafile_v3();
+        let mut client = GameSession06::new(String::new(), 1024 * 1024, 1024);
+        feed_handshake(&mut client);
+        client.receive(&server_message(
+            NETMSG_MAP_CHANGE, &make_map_change(&map), 1, 1
+        )).unwrap();
+        let mut bad = make_map_data(&map);
+        *bad.last_mut().unwrap() ^= 0x01;
+        let error = client.receive(&server_message(
+            NETMSG_MAP_DATA, &bad, 2, 2
+        )).unwrap_err();
+        assert_eq!(error, SessionError::Message(MessageError::MapCrcMismatch));
+        assert!(client.loaded_map.is_none());
+        assert_eq!(client.stage, Stage::Downloading);
+    }
+
+    #[test]
+    fn rejects_out_of_order_ready_or_map_payload() {
+        let mut client = GameSession06::new(String::new(), 1024, 1024);
+        feed_handshake(&mut client);
+        assert_eq!(
+            client.receive(&server_message(NETMSG_CON_READY, &[], 1, 1)),
+            Err(SessionError::UnexpectedStage),
+        );
+    }
+
+    #[test]
+    fn actual_loopback_udp_transport_accepts_info_message() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let target = server.local_addr().unwrap();
+        let join = thread::spawn(move || {
+            let mut buffer = [0u8; 1400];
+            let (_, peer) = server.recv_from(&mut buffer).unwrap();
+            let mut extra = b"TKEN".to_vec();
+            extra.extend_from_slice(&TOKEN.to_be_bytes());
+            server.send_to(&server_control(2, &extra), peer).unwrap();
+
+            let (n, _) = server.recv_from(&mut buffer).unwrap(); // ACCEPT
+            assert_eq!(&buffer[..n], &[0x10, 0, 0, 3, 1, 2, 3, 4]);
+
+            let (n, _) = server.recv_from(&mut buffer).unwrap(); // INFO vital
+            let data = &buffer[..n];
+            let crate::network::Packet::Connected { payload, header } =
+                crate::network::parse_packet_06(data).unwrap()
+            else { panic!("wrong packet kind"); };
+            assert_eq!(header.num_chunks, 1);
+            let chunks = crate::network::parse_chunks_06(
+                &payload[..payload.len() - 4], 1
+            ).unwrap();
+            let decoded = decode_message(chunks[0].payload).unwrap();
+            assert_eq!(decoded.id,
+                MessageId::Regular { system: true, number: 1 });
+        });
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket.connect(target).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut client = GameSession06::new(String::new(), 1024, 1024);
+        socket.send(&client.connect().unwrap()).unwrap();
+        let mut buffer = [0u8; 1400];
+        let n = socket.recv(&mut buffer).unwrap();
+        let actions = client.receive(&buffer[..n]).unwrap();
+        for action in actions {
+            if let GameAction::Outgoing(bytes) = action {
+                socket.send(&bytes).unwrap();
+            }
+        }
+        join.join().unwrap();
+    }
+}
