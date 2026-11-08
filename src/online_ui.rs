@@ -102,9 +102,9 @@ impl HudCanvas for Framebuffer {
             for xx in x.min(limit_x)..limit_x {
                 let index=yy*self.width as usize+xx;
                 let previous=self.pixels[index];
-                let c=|shift| {
-                    let src=(color>>shift)&255;
-                    let dst=(previous>>shift)&255;
+                let c=|shift: u32| {
+                    let src=(color>>shift)&255u32;
+                    let dst=(previous>>shift)&255u32;
                     (src*a+dst*ia+127)/255
                 };
                 self.pixels[index]=c(16)<<16|c(8)<<8|c(0);
