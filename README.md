@@ -6,7 +6,33 @@ A clean-room, **Rust-first port of the official DDNet client**, targeting gamepl
 
 ## Status
 
-**Under development; not a playable client.** The checked-in Rust modules are incremental, testable ports of specific upstream functions, not a complete game. Do not mistake a successful `cargo test` for full DDNet compatibility.
+**Under development; not a fully playable DDNet client.** An offline preview and a native server browser run, but live public-server gameplay is experimental. Do not mistake a successful `cargo test` for full DDNet compatibility.
+
+## Download a CachyOS/Linux x86_64 preview
+
+The **CachyOS/Linux x86_64 Preview** GitHub Actions workflow
+automatically compiles an x86_64 native binary and packages it with
+the original DDNet 20.2.1 textures, a demo map, default skin and audio.
+
+1. Open Actions -> **CachyOS/Linux x86_64 Preview** -> most recent
+   successful run -> **ddnet-rust-cachyos-x86_64** artifact.
+2. Download and extract the artifact ZIP; inside it is
+   **ddnet-rust-cachyos-x86_64.tar.gz** plus a SHA256 checksum.
+3. On CachyOS:
+
+\`\`\`bash
+tar -xzf ddnet-rust-cachyos-x86_64.tar.gz
+cd ddnet-rust-cachyos-x86_64
+./run.sh --offline
+\`\`\`
+
+To open the experimental browser: \`./run.sh\`.
+To inspect a .demo header: \`./run.sh --inspect-demo FILE.demo\`.
+See bundled README-CACHYOS.md for dependencies and controls.
+
+No local Rust compiler, Git clone or manual asset downloads required.
+**This preview does not guarantee connection to public DDNet servers.**
+The engine still lacks parts of DDNet physics, rendering and protocol.
 
 ## Checkout
 
@@ -39,6 +65,7 @@ The original project is [DDraceNetwork/DDNet](https://github.com/ddnet/ddnet), m
 - Teeworlds signed integer network codec, 0.6 packet/chunk header codecs,
   and offline 10-bit vital sequence / ACK simulation.
 
-These isolated components pass unit and CI tests. **No server connection,
-graphics output, gameplay loop, or playable release exists yet.** Remaining
-work is tracked in [docs/PORTING.md](docs/PORTING.md).
+The project has since gained an experimental 0.6 networking window,
+offline 50 Hz prototype, CPU texture renderer, audio and server browser.
+These are not equivalent to a finished client. Remaining work is
+tracked in [docs/PORTING.md](docs/PORTING.md).

@@ -351,3 +351,29 @@ count. No saved password/token is added.
 Limitations: selecting a saved favorite whose address is absent from the
 current master list is not yet possible in the window. The CLI can list
 it. Real public-server handshake compatibility remains experimental.
+
+
+## Stage 7 / demo file inspection
+
+\`src/demo.rs\` parses bounded \`TWDEMO\` v3-v6 headers from DDNet
+20.2.1, including version-specific timeline, big-endian map length,
+CRC, duration and optional UUID-tagged SHA-256 extension. It reads at
+most 484 bytes of any input .demo; the embedded map is checked against
+file size without allocation. Use \`--inspect-demo FILE.demo\`.
+Full demo playback, recording and editor UI remain unimplemented.
+
+## CachyOS preview bundle
+
+The workflow \`.github/workflows/cachyos-release.yml\` compiles the
+native Rust binary with \`window\` support on Ubuntu 24.04 x86_64 and
+packages original DDNet 20.2.1 \`game.png\`, \`mapres/\`, \`audio/\`,
+\`skins/default.png\`, and sample maps next to the binary. The
+\`run.sh\` launcher starts the master browser by default or opens an
+offline sandbox with \`--offline\`.
+
+The archive is tested **after extraction** without Cargo. CI checks
+ELF dependencies and starts the compiled binary in Xvfb, rendering
+both an offline screenshot and the browser screenshot. This is a
+glibc-linked native Linux build (not an AppImage/static build);
+CachyOS uses X11 or XWayland and system ALSA libraries. Live DDNet
+public-server compatibility is not guaranteed by these smoke tests.

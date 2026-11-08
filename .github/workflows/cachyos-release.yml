@@ -1,0 +1,97 @@
+name: CachyOS/Linux x86_64 Preview
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install native ALSA, X11 and virtual display libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libx11-dev libxext-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev pkg-config xvfb xauth
+      - name: Compile native release
+        run: cargo build --release --locked --features window
+      - name: Verify compiler and unit tests
+        run: |
+          cargo test --locked --all-targets --features window
+          cargo clippy --locked --all-targets --features window -- -D warnings
+      - name: Package runnable folder and upstream game assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle=ddnet-rust-cachyos-x86_64
+          mkdir -p "dist/$bundle/data/maps" "dist/$bundle/data/skins"
+          install -m 755 target/release/ddnet-rust "dist/$bundle/ddnet-rust"
+          install -m 755 packaging/cachyos/run.sh "dist/$bundle/run.sh"
+          cp -a upstream/ddnet/data/mapres "dist/$bundle/data/"
+          cp -a upstream/ddnet/data/audio "dist/$bundle/data/"
+          cp upstream/ddnet/data/game.png "dist/$bundle/data/game.png"
+          cp upstream/ddnet/data/skins/default.png "dist/$bundle/data/skins/"
+          cp upstream/ddnet/data/maps/ctf1.map "dist/$bundle/data/maps/"
+          cp upstream/ddnet/data/maps/Tutorial.map "dist/$bundle/data/maps/"
+          cp upstream/ddnet/data/maps/license.txt "dist/$bundle/data/maps/"
+          cp upstream/ddnet/license.txt "dist/$bundle/LICENSE-DDNET.txt"
+          cp LICENSE "dist/$bundle/LICENSE-RUST.txt"
+          cp packaging/cachyos/README.md "dist/$bundle/README-CACHYOS.md"
+          cp README.md "dist/$bundle/PROJECT-README.md"
+          printf '%s\n' "$GITHUB_SHA" > "dist/$bundle/BUILD-COMMIT"
+          tar -czf "dist/$bundle.tar.gz" -C dist "$bundle"
+          (cd dist && sha256sum "$bundle.tar.gz" > "$bundle.tar.gz.sha256")
+          test -s "dist/$bundle.tar.gz"
+          tar -tzf "dist/$bundle.tar.gz" | grep "$bundle/ddnet-rust$"
+      - name: Test the extracted binary, map, textures and native window
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/bundle-check
+          tar -xzf dist/ddnet-rust-cachyos-x86_64.tar.gz -C target/bundle-check
+          bundle="$PWD/target/bundle-check/ddnet-rust-cachyos-x86_64"
+          ldd "$bundle/ddnet-rust" | tee target/bundle-deps.txt
+          if grep 'not found' target/bundle-deps.txt; then exit 1; fi
+          "$bundle/run.sh" --version
+          "$bundle/run.sh" --self-test
+          xvfb-run -a "$bundle/ddnet-rust" --play-offline-smoke \
+            "$bundle/data/maps/ctf1.map" "$PWD/target/bundle-offline.png"
+          xvfb-run -a "$bundle/ddnet-rust" --browse-servers-smoke \
+            "$PWD/tests/fixtures/master.json" "$PWD/target/bundle-browser.png"
+          python3 - <<'PY'
+          from pathlib import Path
+          for path in ("target/bundle-offline.png", "target/bundle-browser.png"):
+              file = Path(path)
+              assert file.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+              assert file.stat().st_size > 1500
+              print("Validated packaged native screenshot:", file, file.stat().st_size)
+          PY
+      - name: Upload downloadable CachyOS x86_64 package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ddnet-rust-cachyos-x86_64
+          path: |
+            dist/ddnet-rust-cachyos-x86_64.tar.gz
+            dist/ddnet-rust-cachyos-x86_64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 90
+      - name: Upload native browser and offline screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: ddnet-rust-cachyos-preview-images
+          path: |
+            target/bundle-offline.png
+            target/bundle-browser.png
+          if-no-files-found: error
+          retention-days: 30
