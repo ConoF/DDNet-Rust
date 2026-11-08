@@ -89,14 +89,21 @@ fn intersect_static(map: &GameMap, from: Vec2, to: Vec2) -> (RayHit, Vec2) {
     (RayHit::Nothing, to)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HookInput {
+    pub held: bool,
+    pub aim: Vec2,
+    pub movement: i32,
+}
+
 impl Hook {
     /// One game tick for an isolated static-tile hook. Velocity changes only.
     /// Hook/player/tele collisions need other simulation subsystems.
     pub fn tick(
-        &mut self, held: bool, aim: Vec2, pos: Vec2, vel: &mut Vec2,
-        movement: i32, map: &GameMap, t: HookTuning,
+        &mut self, input: HookInput, pos: Vec2, vel: &mut Vec2,
+        map: &GameMap, t: HookTuning,
     ) -> Result<HookEvent, HookError> {
-        if ![aim.x, aim.y, pos.x, pos.y, vel.x, vel.y, t.length,
+        if ![input.aim.x, input.aim.y, pos.x, pos.y, vel.x, vel.y, t.length,
               t.fire_speed, t.drag_accel, t.drag_speed, t.duration,
               t.physical_size].iter().all(|x| x.is_finite()) {
             return Err(HookError::InvalidInput);
@@ -108,7 +115,7 @@ impl Hook {
             return Err(HookError::InvalidTuning);
         }
 
-        if !held {
+        if !input.held {
             let event = if self.state == HookState::Idle {
                 HookEvent::None
             } else { HookEvent::Released };
@@ -119,7 +126,7 @@ impl Hook {
 
         let mut event = HookEvent::None;
         if self.state == HookState::Idle {
-            let direction = normalize(aim);
+            let direction = normalize(input.aim);
             if direction == Vec2::default() { return Ok(event); }
             self.state = HookState::Flying;
             self.position = sum(pos, scaled(direction, t.physical_size * 1.5));
@@ -166,7 +173,7 @@ impl Hook {
             if length(delta) > 46.0 {
                 let mut drag = scaled(normalize(delta), t.drag_accel);
                 if drag.y > 0.0 { drag.y *= 0.3; }
-                if (drag.x < 0.0 && movement < 0) || (drag.x > 0.0 && movement > 0) {
+                if (drag.x < 0.0 && input.movement < 0) || (drag.x > 0.0 && input.movement > 0) {
                     drag.x *= 0.95;
                 } else {
                     drag.x *= 0.75;
@@ -210,12 +217,12 @@ mod tests {
         let mut velocity = Vec2::default();
         let tee = Vec2::new(100.0, 80.0);
         let tuning = HookTuning::default();
-        assert_eq!(hook.tick(true, Vec2::new(1.0, 0.0), tee,
-            &mut velocity, 1, &map, tuning), Ok(HookEvent::Launch));
+        assert_eq!(hook.tick(HookInput { held: true, aim: Vec2::new(1.0, 0.0), movement: 1 },
+            tee, &mut velocity, &map, tuning), Ok(HookEvent::Launch));
         assert_eq!(hook.state, HookState::Flying);
         assert_eq!(hook.position, Vec2::new(222.0, 80.0));
-        assert_eq!(hook.tick(true, Vec2::new(1.0, 0.0), tee,
-            &mut velocity, 1, &map, tuning), Ok(HookEvent::AttachGround));
+        assert_eq!(hook.tick(HookInput { held: true, aim: Vec2::new(1.0, 0.0), movement: 1 },
+            tee, &mut velocity, &map, tuning), Ok(HookEvent::AttachGround));
         assert_eq!(hook.state, HookState::Grabbed);
         assert!((223.0..=230.0).contains(&hook.position.x));
         assert!(velocity.x > 0.0 && velocity.x <= 3.0);
@@ -229,18 +236,24 @@ mod tests {
         let tee = Vec2::new(100.0, 80.0);
         let t = HookTuning::default();
         let aim = Vec2::new(1.0, 0.0);
-        hook.tick(true, aim, tee, &mut vel, 1, &map, t).unwrap();
-        assert_eq!(hook.tick(true, aim, tee, &mut vel, 1, &map, t),
+        hook.tick(HookInput { held: true, aim: aim, movement: 1 },
+            tee, &mut vel, &map, t).unwrap();
+        assert_eq!(hook.tick(HookInput { held: true, aim: aim, movement: 1 },
+            tee, &mut vel, &map, t),
             Ok(HookEvent::HitNoHook));
         assert_eq!(hook.state, HookState::RetractStart);
-        hook.tick(true, aim, tee, &mut vel, 1, &map, t).unwrap();
+        hook.tick(HookInput { held: true, aim: aim, movement: 1 },
+            tee, &mut vel, &map, t).unwrap();
         assert_eq!(hook.state, HookState::RetractMid);
-        hook.tick(true, aim, tee, &mut vel, 1, &map, t).unwrap();
+        hook.tick(HookInput { held: true, aim: aim, movement: 1 },
+            tee, &mut vel, &map, t).unwrap();
         assert_eq!(hook.state, HookState::RetractEnd);
-        assert_eq!(hook.tick(true, aim, tee, &mut vel, 1, &map, t),
+        assert_eq!(hook.tick(HookInput { held: true, aim: aim, movement: 1 },
+            tee, &mut vel, &map, t),
             Ok(HookEvent::Retracted));
         assert_eq!(hook.state, HookState::Retracted);
-        assert_eq!(hook.tick(false, aim, tee, &mut vel, 1, &map, t),
+        assert_eq!(hook.tick(HookInput { held: false, aim: aim, movement: 1 },
+            tee, &mut vel, &map, t),
             Ok(HookEvent::Released));
         assert_eq!(hook.state, HookState::Idle);
     }
@@ -252,14 +265,14 @@ mod tests {
         let mut velocity = Vec2::default();
         let tee = Vec2::new(100.0, 80.0);
         for _ in 0..10 {
-            hook.tick(true, Vec2::new(1.0, 0.0), tee, &mut velocity,
-                0, &empty, HookTuning::default()).unwrap();
+            hook.tick(HookInput { held: true, aim: Vec2::new(1.0, 0.0), movement: 0 },
+            tee, &mut velocity, &empty, HookTuning::default()).unwrap();
         }
         assert_eq!(hook.state, HookState::Retracted);
         assert!(hook.position.x - tee.x <= 380.01);
         let before = hook;
-        assert_eq!(hook.tick(true, Vec2::new(f32::NAN, 0.0), tee,
-            &mut velocity, 0, &empty, HookTuning::default()),
+        assert_eq!(hook.tick(HookInput { held: true, aim: Vec2::new(f32::NAN, 0.0), movement: 0 },
+            tee, &mut velocity, &empty, HookTuning::default()),
             Err(HookError::InvalidInput));
         assert_eq!(hook, before);
     }
