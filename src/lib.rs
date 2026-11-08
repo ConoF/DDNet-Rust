@@ -28,6 +28,7 @@ pub mod graphics;
 pub mod sprite_render;
 pub mod texture;
 pub mod map_visual;
+pub mod quad_render;
 #[cfg(feature = "window")]
 pub mod window_assets;
 pub mod audio;
