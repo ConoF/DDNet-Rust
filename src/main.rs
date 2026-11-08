@@ -2,6 +2,7 @@ use ddnet_rust::datafile::Datafile;
 use ddnet_rust::map::GameMap;
 use ddnet_rust::graphics::{Framebuffer, Camera};
 use ddnet_rust::physics::Vec2;
+use ddnet_rust::netobjects::CharacterCoreNet;
 use ddnet_rust::layers::PhysicsLayers;
 use ddnet_rust::physics::{Character, Input, JumpEvent, Tuning};
 use ddnet_rust::protocol::{decode_int, write_int};
@@ -28,7 +29,8 @@ fn main() {
         [arg, path, output] if arg == "--render-debug-png" => render_debug_map(path, output, true),
         [arg, path] if arg == "--inspect-layers" => inspect_layers(path),
         [arg, addr] if arg == "--probe-server" => probe(addr),
-        [arg, addr] if arg == "--connect-headless" => connect_headless(addr),
+        [arg, addr] if arg == "--connect-headless" => connect_headless(addr, None),
+        [arg, addr, out] if arg == "--capture-headless" => connect_headless(addr, Some(out)),
         _ => {
             eprintln!("Unknown arguments. Run ddnet-rust --help.");
             std::process::exit(2);
@@ -46,6 +48,7 @@ fn print_help() {
     println!("  --render-debug-png MAP OUT.png  Export collision map to PNG");
     println!("  --probe-server HOST[:PORT]  Probe a live DDNet 0.6 UDP handshake");
     println!("  --connect-headless HOST[:PORT]  Test DDNet 0.6 login and map download");
+    println!("  --capture-headless HOST[:PORT] OUT.png  Capture first decoded snapshot");
     println!("  --version           Print project and upstream versions");
 }
 
@@ -170,7 +173,7 @@ fn huffman_vectors() {
     }
 }
 
-fn connect_headless(endpoint: &str) {
+fn connect_headless(endpoint: &str, screenshot: Option<&str>) {
     use std::net::{ToSocketAddrs, UdpSocket};
     use std::time::{Duration, Instant};
 
@@ -245,7 +248,10 @@ fn connect_headless(endpoint: &str) {
                         }
                         GameAction::SnapshotDecoded { tick, item_count } => {
                             println!("Snapshot decoded: tick {tick}, {item_count} objects.");
-                            println!("Rendering and complete gameplay are still not implemented.");
+                            if let Some(path) = screenshot {
+                                capture_game_state(&session, tick, path);
+                            }
+                            println!("The original DDNet sprite renderer is still missing.");
                             return;
                         }
                         GameAction::Disconnected(reason) => {
@@ -317,4 +323,33 @@ fn render_debug_map(path: &str, output: &str, png: bool) {
         std::process::exit(1);
     });
     println!("Wrote debug frame {output}: {}x{} tiles", map.width, map.height);
+}
+
+fn capture_game_state(session: &GameSession06, tick: i32, output: &str) {
+    let Some(map) = session.loaded_map.as_ref() else {
+        eprintln!("Cannot capture: no validated DDNet map");
+        std::process::exit(1);
+    };
+    let Some(state) = session.snapshot_state(tick) else {
+        eprintln!("Cannot capture: snapshot history unavailable");
+        std::process::exit(1);
+    };
+
+    let center = state.items.iter()
+        .find_map(CharacterCoreNet::from_object)
+        .map(|character| Vec2::new(character.x as f32, character.y as f32))
+        .unwrap_or_else(|| Vec2::new(
+            map.width as f32 * 16.0,
+            map.height as f32 * 16.0,
+        ));
+    let camera = Camera { center, scale: 1.0 };
+    let mut frame = Framebuffer::new(960, 540).expect("fixed 960x540 capture");
+    frame.render_map(map, camera).expect("valid snapshot camera");
+    let rendered = frame.render_snapshot(state, camera).expect("bounded snapshot rendering");
+    let bytes = frame.png_bytes().expect("fixed-resolution PNG encoding");
+    std::fs::write(output, bytes).unwrap_or_else(|error| {
+        eprintln!("Failed to save PNG screenshot {output}: {error}");
+        std::process::exit(1);
+    });
+    println!("Saved snapshot {tick} to {output} (characters drawn: {rendered})");
 }
