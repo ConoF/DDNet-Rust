@@ -6,7 +6,7 @@
 //! objects and events in source order. Extended UUID objects use dynamic
 //! snapshot-size handling and are deliberately not included here.
 
-use crate::snapshot_delta::SnapshotObject;
+use crate::snapshot_delta::{SnapshotObject, SnapshotState};
 
 pub const VANILLA_OBJECT_WORDS: [u16; 21] = [
     0, // EX (UUID mapping)
@@ -59,6 +59,30 @@ pub const VANILLA_OBJECT_NAMES: [&str; 21] = [
 pub const CHARACTERCORE_TYPE: u16 = 8;
 pub const CHARACTER_TYPE: u16 = 9;
 pub const PLAYERINFO_TYPE: u16 = 10;
+pub const CLIENTINFO_TYPE: u16 = 11;
+
+/// DDNet 0.6 stores tee names as signed characters with an offset of 128,
+/// four bytes per network-order i32. The last byte is reserved for a terminator.
+pub fn decode_tw_int_string(words: &[i32]) -> Option<String> {
+    if words.is_empty() || words.len() > 16 { return None; }
+    let mut bytes = Vec::with_capacity(words.len() * 4);
+    for &word in words {
+        for shift in [24, 16, 8, 0] {
+            bytes.push(((word >> shift) as u8).wrapping_sub(128));
+        }
+    }
+    *bytes.last_mut()? = 0;
+    let end = bytes.iter().position(|&byte| byte == 0)?;
+    Some(std::str::from_utf8(&bytes[..end]).ok()?.to_owned())
+}
+
+pub fn player_name(snapshot: &SnapshotState, client_id: u16) -> Option<String> {
+    let object = snapshot.find(CLIENTINFO_TYPE, client_id)?;
+    if object.words.len() != usize::from(VANILLA_OBJECT_WORDS[CLIENTINFO_TYPE as usize]) {
+        return None;
+    }
+    decode_tw_int_string(&object.words[..4])
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CharacterCoreNet {
@@ -135,6 +159,36 @@ mod tests {
         assert_eq!(VANILLA_OBJECT_WORDS[14], 2);
         assert_eq!(VANILLA_OBJECT_WORDS[17], 3);
         assert_eq!(VANILLA_OBJECT_NAMES[9], "Character");
+    }
+
+    #[test]
+    fn decode_real_06_clientinfo_name_layout() {
+        fn pack_name(name: &str) -> [i32; 4] {
+            let mut bytes = [0u8; 16];
+            bytes[..name.len()].copy_from_slice(name.as_bytes());
+            let mut words = [0i32; 4];
+            for (index, word) in words.iter_mut().enumerate() {
+                let mut value = 0u32;
+                for byte_index in 0..4 {
+                    value |= u32::from(bytes[index * 4 + byte_index].wrapping_add(128))
+                        << (24 - byte_index * 8);
+                }
+                *word = value as i32;
+            }
+            words[3] &= !0xff;
+            words
+        }
+        let mut items = Vec::new();
+        for (id, name) in [(3, "ConoF"), (9, "Ти")] {
+            let mut words = vec![0; 17];
+            words[..4].copy_from_slice(&pack_name(name));
+            items.push(SnapshotObject { type_id: CLIENTINFO_TYPE, id, words });
+        }
+        let state = SnapshotState { items };
+        assert_eq!(player_name(&state, 3).as_deref(), Some("ConoF"));
+        assert_eq!(player_name(&state, 9).as_deref(), Some("Ти"));
+        assert_eq!(player_name(&state, 0), None);
+        assert!(decode_tw_int_string(&[i32::MAX; 4]).is_none());
     }
 
     #[test]

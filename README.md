@@ -70,3 +70,22 @@ The project has since gained an experimental 0.6 networking window,
 offline 50 Hz prototype, CPU texture renderer, audio and server browser.
 These are not equivalent to a finished client. Remaining work is
 tracked in [docs/PORTING.md](docs/PORTING.md).
+
+
+## Experimental online gameplay controls (0.6)
+
+To join a server, use `./run.sh --play-online HOST:PORT` from the CachyOS
+preview archive. The server browser also offers 0.6 server selection.
+
+- **A/D** or arrows: move, **W/Space**: jump.
+- **Left mouse**: fire, **right mouse / E**: hook.
+- **1–5**: hammer, gun, shotgun, grenade, laser; mouse wheel changes weapon.
+- **+/-**: camera zoom.
+- **T**: public chat, **Y**: team chat, Enter to send, Esc to cancel.
+- **Tab**: hold to view player scoreboard.
+- **F7**: spectate, **F8**: join, **F10**: normal kill/respawn.
+- **Esc** outside chat: leave the game window.
+
+Chat is sent as UTF-8, but the current bitmap HUD displays non-Latin
+glyphs as fallback characters. Live gameplay remains experimental and does
+not yet provide parity with original DDNet physics and server extensions.
