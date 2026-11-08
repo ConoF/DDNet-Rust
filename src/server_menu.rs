@@ -226,7 +226,7 @@ pub fn browse_servers() -> Result<(), String> {
     // Re-open the browser after an in-game Disconnect without recursive
     // menus and without leaking any network or window resources.
     loop {
-        let Some(endpoint) = show(servers.clone(), &url, None)? else {
+        let Some(endpoint) = show(servers.clone(), url, None)? else {
             return Ok(());
         };
         if let Err(error) = crate::window_online::play_online(&endpoint) {
