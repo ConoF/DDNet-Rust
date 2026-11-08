@@ -2,8 +2,8 @@
 //!
 //! This uses the native Rust transport, map downloader and snapshot decoder,
 //! not an embedded DDNet C++ client. It is NOT a full DDNet player client:
-//! missing full renderer/prediction/editor, custom skins, sound
-//! and some 0.6/0.7 protocol extensions.
+//! missing full renderer, authoritative prediction parity, editor, custom
+//! skins and some 0.6/0.7 protocol extensions.
 
 use std::io::ErrorKind;
 use std::net::{ToSocketAddrs, UdpSocket};
@@ -22,6 +22,7 @@ use crate::interpolation::interpolate_snapshots;
 use crate::input::{correct_next_input_tick, FireCounter, InputFrame, PlayerInput, PLAYERFLAG_PLAYING};
 use crate::netobjects::{CharacterCoreNet, PlayerInfoNet};
 use crate::physics::Vec2;
+use crate::prediction::{apply_visual_prediction, local_character_id, LocalPredictor};
 use crate::session::{GameAction, GameSession06, Stage};
 use crate::snapshot_delta::SnapshotState;
 use crate::transport::State;
@@ -34,7 +35,7 @@ fn preferred_character(snapshot: &SnapshotState) -> Option<Vec2> {
     let local_id = snapshot.items.iter().filter_map(PlayerInfoNet::from_object)
         .find(|player| player.local).map(|player| player.client_id);
     let local = local_id.and_then(|id| snapshot.items.iter()
-        .find(|obj| obj.id as i32 == id)
+        .find(|obj| obj.type_id == CHARACTER_TYPE && obj.id as i32 == id)
         .and_then(CharacterCoreNet::from_object));
     let first = snapshot.items.iter().find_map(CharacterCoreNet::from_object);
     local.or(first).map(|c| Vec2::new(c.x as f32, c.y as f32))
@@ -129,6 +130,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     let mut reconnect_attempts = 0u8;
     let mut fire_counter = FireCounter::default();
     let mut input_time_left_ms = None::<i32>;
+    let mut predictor = LocalPredictor::new();
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let now = Instant::now();
@@ -185,6 +187,9 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                         return Err(format!("Server disconnected: {reason}"));
                     }
                     GameAction::MapLoaded { width, height, .. } => {
+                        predictor.reset();
+                        previous_snapshot = None;
+                        current_snapshot = None;
                         camera.center = Vec2::new(width as f32 * 16.0, height as f32 * 16.0);
                         // The transport keeps CRC-checked original map bytes,
                         // not only the collision layer. Decode assets once.
@@ -233,6 +238,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             accumulator = Duration::ZERO;
             fire_counter = FireCounter::default();
             input_time_left_ms = None;
+            predictor.reset();
             continue;
         }
         if session.stage == Stage::Connecting &&
@@ -280,13 +286,14 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                 let bytes = session.send_input(frame)
                     .map_err(|e| format!("input encoding: {e:?}"))?;
                 socket.send(&bytes).map_err(|e| format!("send input: {e}"))?;
+                predictor.record_sent_input(frame);
                 intended_tick = intended_tick.saturating_add(1).min(0x6fff_ffff);
             }
         }
 
-        // Interpolation is display-only; input ACKs and prediction always use
-        // the unmodified decoded snapshots stored in GameSession06.
-        let display = current_snapshot
+        // Prediction only changes a cloned display snapshot. CRC-verified
+        // history and the NETMSG_INPUT ACK remain server-authoritative.
+        let mut display = current_snapshot
             .and_then(|tick| session.snapshot_state(tick))
             .map(|newest| {
                 if let Some(previous) = previous_snapshot
@@ -298,6 +305,17 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                     newest.clone()
                 }
             });
+        if let (Some(tick), Some(map), Some(display_state)) = (
+            current_snapshot, session.loaded_map.as_ref(), display.as_mut(),
+        ) {
+            if !session.is_snapshot_recovering() {
+                if let Some(authoritative) = session.snapshot_state(tick) {
+                    if let Some(prediction) = predictor.predict(tick, authoritative, map) {
+                        apply_visual_prediction(display_state, prediction);
+                    }
+                }
+            }
+        }
         if let Some(snapshot) = display.as_ref() {
             if let Some(pos) = preferred_character(snapshot) {
                 if let Some(out) = audio.as_ref() { out.listener(pos); }
@@ -348,6 +366,20 @@ mod tests {
         ] };
         assert_eq!(preferred_character(&state), Some(Vec2::new(100.0, 200.0)));
         assert_eq!(preferred_character(&SnapshotState::default()), None);
+    }
+
+    #[test]
+    fn invalid_local_info_does_not_override_first_character_fallback() {
+        let mut state = SnapshotState::default();
+        state.items.push(SnapshotObject {
+            type_id: 9, id: 5,
+            words: { let mut w = vec![0; 22]; w[1] = 123; w[2] = 456; w },
+        });
+        state.items.push(SnapshotObject {
+            type_id: 10, id: 5, words: vec![1, 5, 0, 0, 0],
+        });
+        assert_eq!(local_character_id(&state), Some(5));
+        assert_eq!(preferred_character(&state), Some(Vec2::new(123.0, 456.0)));
     }
 
     #[test]

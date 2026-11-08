@@ -453,3 +453,27 @@ Tests cover missing base, checksum corruption, malformed deltas, successful
 recovery, duplicate parts, state preservation, and reconnect resets.
 This is baseline resynchronization, **not** full client prediction or a
 guarantee that all public DDNet servers work.
+
+
+## Stage: local single-tee input prediction (partial)
+
+The experimental online 0.6 window now stores up to 256 **successfully sent**
+input ticks and replays at most 64 ticks from the latest CRC-verified local
+`Character` snapshot using the Rust movement/MoveBox simulator. After each
+new authoritative snapshot it restarts prediction from the server's
+position, velocity (/256), jump flags and direction, then replays the locally
+sent inputs (holding the last input across unsent intermediate ticks).
+Predicted x/y and velocity are applied **only** to a display snapshot clone;
+other players and the network ACK remain unchanged.
+
+Prediction automatically falls back to authoritative/interpolated display
+if there is no identified local player, no valid initial input, an active
+hook, nearby other tees, invalid motion or a prediction gap >64 ticks.
+It is reset on map change and reconnect. Tests cover snapshot rebase,
+input-history limits, unsupported player/hook scenarios, invalid data and
+isolation from authoritative snapshots.
+
+**Scope:** This is early local movement prediction, not exact DDNet client
+prediction: weapon recoil, hook interactions, switches, teleport/speedup/tune
+zones, other players and full clock synchronization still need server-side
+parity verification. Do not use this to claim public-server compatibility.
