@@ -308,6 +308,9 @@ fn connect_headless(endpoint: &str, screenshot: Option<&str>) {
                             println!("The original DDNet sprite renderer is still missing.");
                             return;
                         }
+                        GameAction::InputTiming { tick, time_left_ms } => {
+                            println!("Input timing: tick {tick}, {time_left_ms:+} ms");
+                        }
                         GameAction::Disconnected(reason) => {
                             eprintln!("Server closed connection: {reason}");
                             std::process::exit(1);
