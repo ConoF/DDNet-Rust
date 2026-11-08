@@ -3,6 +3,7 @@
 //! CPU rasterization is clipped to the viewport; envelopes and full GPU
 //! interpolation are handled by future renderer stages.
 
+use crate::envelope::{EnvelopeSet, EnvelopeTimes};
 use crate::graphics::{Camera, Framebuffer};
 use crate::map_visual::{GroupTransform, VisualError};
 use crate::texture::Texture;
@@ -179,10 +180,21 @@ fn triangle(
     }
 }
 
-/// Draws one ordinary non-animated quad layer, respecting group parallax.
+/// Backwards-compatible static frame for map previews and unit tests.
 pub fn draw_quads(
     layer: &QuadLayer, images: &[Texture],
     frame: &mut Framebuffer, camera: Camera,
+) -> Result<usize, VisualError> {
+    draw_quads_at(layer, images, frame, camera,
+        &EnvelopeSet::default(), EnvelopeTimes::default())
+}
+
+/// Animate position (offset + rotation) and vertex colors from original
+/// DDNet map envelopes before clipping the quad to the viewport.
+pub fn draw_quads_at(
+    layer: &QuadLayer, images: &[Texture],
+    frame: &mut Framebuffer, camera: Camera,
+    envelopes: &EnvelopeSet, times: EnvelopeTimes,
 ) -> Result<usize, VisualError> {
     let tex = match layer.image {
         Some(index) => Some(images.get(index).ok_or(VisualError::MissingImage)?),
@@ -194,11 +206,33 @@ pub fn draw_quads(
         - layer.transform.offset_y;
     let mut count = 0;
     for quad in &layer.quads {
-        let v = quad.vertices.map(|vertex| ScreenVertex {
-            x: (vertex.position[0] - cx) * camera.scale + frame.width as f32 / 2.0,
-            y: (vertex.position[1] - cy) * camera.scale + frame.height as f32 / 2.0,
-            uv: vertex.uv,
-            color: vertex.color,
+        let pos = envelopes.evaluate(quad.pos_env, quad.pos_env_offset,
+            times, [0.0; 4]);
+        let tint = envelopes.evaluate(quad.color_env, quad.color_env_offset,
+            times, [1.0; 4]);
+        let angle = pos[2].to_radians();
+        let (sin, cos) = angle.sin_cos();
+        let v = quad.vertices.map(|vertex| {
+            let rel_x = vertex.position[0] - quad.pivot[0];
+            let rel_y = vertex.position[1] - quad.pivot[1];
+            let x = if quad.pos_env >= 0 {
+                quad.pivot[0] + rel_x * cos - rel_y * sin + pos[0]
+            } else {
+                vertex.position[0]
+            };
+            let y = if quad.pos_env >= 0 {
+                quad.pivot[1] + rel_x * sin + rel_y * cos + pos[1]
+            } else {
+                vertex.position[1]
+            };
+            ScreenVertex {
+                x: (x - cx) * camera.scale + frame.width as f32 / 2.0,
+                y: (y - cy) * camera.scale + frame.height as f32 / 2.0,
+                uv: vertex.uv,
+                color: std::array::from_fn(|i| {
+                    (f32::from(vertex.color[i]) * tint[i]).clamp(0.0, 255.0) as u8
+                }),
+            }
         });
         if v.iter().any(|v| !v.x.is_finite() || !v.y.is_finite()) {
             continue;
@@ -246,6 +280,46 @@ mod tests {
             transform: GroupTransform::default(),
             image, quads: vec![quad],
         }
+    }
+
+    #[test]
+    fn position_and_color_envelopes_animate_quad_at_server_time() {
+        use crate::envelope::{Envelope, EnvelopePoint};
+        let mut quad = solid_quad([255, 0, 0, 255]);
+        quad.pos_env = 0;
+        quad.color_env = 1;
+        let envelopes = EnvelopeSet { envelopes: vec![
+            Envelope {
+                channels: 3, synchronized: true,
+                points: vec![
+                    EnvelopePoint { time_ms: 0, curve: 1,
+                        values: [0, 0, 0, 0], bezier: None },
+                    EnvelopePoint { time_ms: 1000, curve: 1,
+                        values: [16 * 1024, 0, 0, 0], bezier: None },
+                ],
+            },
+            Envelope {
+                channels: 4, synchronized: true,
+                points: vec![
+                    EnvelopePoint { time_ms: 0, curve: 1,
+                        values: [1024; 4], bezier: None },
+                    EnvelopePoint { time_ms: 1000, curve: 1,
+                        values: [0, 1024, 1024, 1024], bezier: None },
+                ],
+            },
+        ] };
+        let map = layer(None, quad);
+        let camera = Camera { center: Vec2::new(16.0, 8.0), scale: 1.0 };
+        let mut frame = Framebuffer::new(32, 16).unwrap();
+        frame.clear(0);
+        draw_quads_at(&map, &[], &mut frame, camera, &envelopes,
+            EnvelopeTimes { game_ms: 0.0, local_ms: 0.0 }).unwrap();
+        assert_eq!(frame.pixel(4, 4), Some(0xff0000));
+        frame.clear(0);
+        draw_quads_at(&map, &[], &mut frame, camera, &envelopes,
+            EnvelopeTimes { game_ms: 500.0, local_ms: 0.0 }).unwrap();
+        assert_eq!(frame.pixel(4, 4), Some(0));
+        assert_eq!(frame.pixel(14, 4), Some(0x7f0000));
     }
 
     #[test]
