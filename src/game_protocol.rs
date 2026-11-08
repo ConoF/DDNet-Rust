@@ -26,6 +26,27 @@ pub const NETMSG_PING_REPLY: u16 = 23;
 pub const NETMSGTYPE_SV_READYTOENTER: u16 = 8;
 pub const NETMSGTYPE_CL_STARTINFO: u16 = 20;
 
+/// Feedback sent by the DDNet 0.6 server for a previously transmitted
+/// NETMSG_INPUT (engine/server/server.cpp: input tick and milliseconds
+/// remaining until TickStartTime). Negative means the input was late.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputTiming {
+    pub intended_tick: i32,
+    pub time_left_ms: i32,
+}
+
+impl InputTiming {
+    pub fn parse(payload: &[u8]) -> Result<Self, MessageError> {
+        let mut reader = Reader::new(payload);
+        let intended_tick = reader.read_int()?;
+        let time_left_ms = reader.read_int()?;
+        if !(0..=0x6fff_ffff).contains(&intended_tick) || reader.remaining() != 0 {
+            return Err(MessageError::InvalidMessage);
+        }
+        Ok(Self { intended_tick, time_left_ms })
+    }
+}
+
 pub const MAX_MAP_BYTES: usize = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -337,6 +358,28 @@ impl MapDownload {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_timing_payload_matches_server_and_rejects_garbage() {
+        let mut payload = Vec::new();
+        write_int(12345, &mut payload);
+        write_int(-37, &mut payload);
+        assert_eq!(InputTiming::parse(&payload), Ok(InputTiming {
+            intended_tick: 12345, time_left_ms: -37,
+        }));
+        let mut extra = payload.clone();
+        extra.push(0);
+        assert_eq!(InputTiming::parse(&extra), Err(MessageError::InvalidMessage));
+        assert!(InputTiming::parse(&payload[..1]).is_err());
+        let mut negative = Vec::new();
+        write_int(-1, &mut negative);
+        write_int(0, &mut negative);
+        assert_eq!(InputTiming::parse(&negative), Err(MessageError::InvalidMessage));
+        let mut extreme = Vec::new();
+        write_int(12345, &mut extreme);
+        write_int(i32::MIN, &mut extreme);
+        assert_eq!(InputTiming::parse(&extreme).unwrap().time_left_ms, i32::MIN);
+    }
 
     #[test]
     fn original_game_startinfo_wire_fields() {

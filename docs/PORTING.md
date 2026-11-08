@@ -418,3 +418,19 @@ complete keyframe (some recordings contain an earlier empty tick marker).
 Tests cover non-mutating preview, forward/backward seeking, visibility at
 spawns/despawns, hook changes and teleport discontinuities. **This is display
 smoothing, not full DDNet replay prediction, physics or protocol parity.**
+
+## Stage: server input timing and actual firing control (0.6)
+
+The 0.6 session now parses the server's two-integer `NETMSG_INPUTTIMING`
+feedback, verifies that it refers to one of the last 128 inputs actually
+sent on the current connection, and ignores duplicate/out-of-order replies.
+The online window applies only bounded forward adjustments of up to three
+50 Hz ticks when the server reports that input arrived late; it also displays
+the latest timing measurement. This is not upstream DDNet's full
+`CSmoothTime` clock synchronization/prediction algorithm.
+
+Left mouse now uses DDNet's six-bit edge counter for fire (press AND release),
+and active gameplay sends `PLAYERFLAG_PLAYING`. Existing movement, jump,
+hook and UDP sends remain unchanged. Regression tests cover timing-wire
+parsing, unsolicited/stale feedback, reconnect clearing, fire counter wrap,
+and capped clock adjustments. Public server connectivity remains unverified.

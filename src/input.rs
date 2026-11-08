@@ -11,6 +11,40 @@
 use crate::game_protocol::{encode_message, MessageError, MessageId, NETMSG_INPUT};
 use crate::protocol::{write_int, Reader, CodecError};
 
+pub const PLAYERFLAG_PLAYING: i32 = 1;
+const INPUT_STATE_MASK: u8 = 63;
+
+/// Official 0.6 fire input is a 6-bit edge counter, not a boolean.
+/// Odd values mean pressed; even values mean released. Every transition
+/// advances once (including release), wrapping after 64 transitions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FireCounter {
+    state: u8,
+    held: bool,
+}
+impl FireCounter {
+    pub fn sample(&mut self, pressed: bool) -> i32 {
+        if self.held != pressed {
+            self.state = self.state.wrapping_add(1) & INPUT_STATE_MASK;
+            self.held = pressed;
+        }
+        i32::from(self.state)
+    }
+}
+
+/// A conservative feedback correction. Server TimeLeft is measured in ms
+/// until the input tick begins. If already late, advance the NEXT input tick
+/// by no more than 3 per valid feedback; never move time backwards.
+pub fn correct_next_input_tick(
+    next_tick: i32, last_snapshot_tick: i32, time_left_ms: i32,
+) -> i32 {
+    let floor = last_snapshot_tick.saturating_add(1).max(1);
+    let skipped = (i64::from(time_left_ms).saturating_neg() / 20)
+        .clamp(0, 3) as i32;
+    next_tick.max(floor).saturating_add(skipped).min(0x6fff_ffff)
+}
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputError {
     InvalidTick,
@@ -136,6 +170,31 @@ impl InputFrame {
 mod tests {
     use super::*;
     use crate::game_protocol::{decode_message, NETMSG_INPUT};
+
+    #[test]
+    fn fire_counter_tracks_press_release_and_six_bit_wrap() {
+        let mut fire = FireCounter::default();
+        assert_eq!(fire.sample(false), 0);
+        assert_eq!(fire.sample(true), 1);
+        assert_eq!(fire.sample(true), 1);
+        assert_eq!(fire.sample(false), 2);
+        for _ in 0..31 {
+            fire.sample(true);
+            fire.sample(false);
+        }
+        assert_eq!(fire.sample(false), 0);
+        assert_eq!(fire.sample(true), 1);
+    }
+
+    #[test]
+    fn input_timing_feedback_correction_is_bounded_and_monotonic() {
+        assert_eq!(correct_next_input_tick(150, 145, -45), 152);
+        assert_eq!(correct_next_input_tick(150, 145, -19), 150);
+        assert_eq!(correct_next_input_tick(150, 145, 500), 150);
+        assert_eq!(correct_next_input_tick(100, 200, -100), 204);
+        assert_eq!(correct_next_input_tick(150, 145, i32::MIN), 153);
+        assert_eq!(correct_next_input_tick(0x6fff_ffff, 0x6fff_ffff, -80), 0x6fff_ffff);
+    }
 
     #[test]
     fn neutral_input_matches_ddnet_cpp_wire_structure() {

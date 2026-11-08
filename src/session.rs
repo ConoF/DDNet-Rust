@@ -8,9 +8,9 @@
 use crate::datafile::{Datafile, DatafileError};
 use crate::game_protocol::{
     client_enter_game, client_info, client_ping_reply, client_ready, decode_message,
-    request_map_chunk, MapChange, MapData, MapDownload, MessageError, MessageId, StartInfo,
+    request_map_chunk, InputTiming, MapChange, MapData, MapDownload, MessageError, MessageId, StartInfo,
     NETMSGTYPE_SV_READYTOENTER,
-    NETMSG_CON_READY, NETMSG_MAP_CHANGE, NETMSG_MAP_DATA, NETMSG_PING,
+    NETMSG_CON_READY, NETMSG_MAP_CHANGE, NETMSG_MAP_DATA, NETMSG_PING, NETMSG_INPUTTIMING,
     NETMSG_SNAP, NETMSG_SNAPEMPTY, NETMSG_SNAPSINGLE,
 };
 use crate::map::{GameMap, MapError};
@@ -18,7 +18,7 @@ use crate::transport::{Client06, Event, TransportError};
 use crate::snapshot::{SnapshotAssembler, SnapshotError, SnapshotPacket};
 use crate::snapshot_delta::{DeltaDecoder, SnapshotState};
 use crate::input::{InputFrame, InputError};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
@@ -43,6 +43,7 @@ pub enum GameAction {
     EnterGameSent,
     SnapshotReceived { tick: i32, packed_bytes: usize },
     SnapshotDecoded { tick: i32, item_count: usize },
+    InputTiming { tick: i32, time_left_ms: i32 },
     Disconnected(String),
 }
 
@@ -92,6 +93,10 @@ pub struct GameSession06 {
     snapshots: SnapshotAssembler,
     decoder: DeltaDecoder,
     snapshot_states: BTreeMap<i32, SnapshotState>,
+    /// Only match feedback to inputs actually sent on this connection.
+    /// Bound the queue to 128 recent ticks to prevent unbounded growth.
+    pending_input_ticks: VecDeque<i32>,
+    pub last_input_timing: Option<InputTiming>,
 }
 
 impl GameSession06 {
@@ -110,6 +115,8 @@ impl GameSession06 {
             snapshots: SnapshotAssembler::new(),
             decoder: DeltaDecoder::for_vanilla_06(),
             snapshot_states: BTreeMap::new(),
+            pending_input_ticks: VecDeque::new(),
+            last_input_timing: None,
         }
     }
 
@@ -208,6 +215,8 @@ impl GameSession06 {
                 self.loaded_map_bytes = None;
                 self.snapshots = SnapshotAssembler::new();
                 self.snapshot_states.clear();
+                self.pending_input_ticks.clear();
+                self.last_input_timing = None;
                 self.stage = Stage::Downloading;
                 actions.push(GameAction::MapAnnounced {
                     name: change.name, size: change.size,
@@ -262,6 +271,31 @@ impl GameSession06 {
                     self.try_decode_snapshot(&snapshot, actions);
                 }
             }
+            NETMSG_INPUTTIMING => {
+                if self.stage != Stage::EnterGameSent {
+                    return Err(SessionError::UnexpectedStage);
+                }
+                let timing = InputTiming::parse(message.payload)?;
+                // Ignore unsolicited, stale, out-of-order or duplicated
+                // timing messages, rather than adjusting the clock from
+                // unconfirmed server data.
+                if let Some(pos) = self.pending_input_ticks.iter()
+                    .position(|&tick| tick == timing.intended_tick)
+                {
+                    for _ in 0..=pos {
+                        self.pending_input_ticks.pop_front();
+                    }
+                    if self.last_input_timing.is_none_or(|prev|
+                        timing.intended_tick > prev.intended_tick
+                    ) {
+                        self.last_input_timing = Some(timing);
+                        actions.push(GameAction::InputTiming {
+                            tick: timing.intended_tick,
+                            time_left_ms: timing.time_left_ms,
+                        });
+                    }
+                }
+            }
             NETMSG_PING => {
                 self.send_system(&client_ping_reply(), false, actions)?;
             }
@@ -308,7 +342,12 @@ impl GameSession06 {
         if self.stage != Stage::EnterGameSent {
             return Err(SessionError::UnexpectedStage);
         }
-        Ok(self.transport.send_message(&frame.pack()?, false)?)
+        let bytes = self.transport.send_message(&frame.pack()?, false)?;
+        self.pending_input_ticks.push_back(frame.intended_tick);
+        if self.pending_input_ticks.len() > 128 {
+            self.pending_input_ticks.pop_front();
+        }
+        Ok(bytes)
     }
 
     pub fn snapshot_state(&self, tick: i32) -> Option<&SnapshotState> {
@@ -626,6 +665,73 @@ mod tests {
     }
 
     #[test]
+    fn input_timing_only_accepts_recent_sent_ticks_and_deduplicates_feedback() {
+        let mut session = GameSession06::new(String::new(), 4096, 1024);
+        feed_handshake(&mut session);
+        session.stage = Stage::EnterGameSent;
+        for tick in 100..=102 {
+            session.send_input(InputFrame {
+                last_ack_snapshot: 99, intended_tick: tick,
+                input: crate::input::PlayerInput::default(),
+            }).unwrap();
+        }
+
+        let mut payload = Vec::new();
+        write_int(500, &mut payload);
+        write_int(i32::MIN, &mut payload);
+        let forged = session.receive(&server_message(
+            NETMSG_INPUTTIMING, &payload, 1, 1,
+        )).unwrap();
+        assert!(!forged.iter().any(|ev| matches!(ev, GameAction::InputTiming { .. })));
+        assert!(session.last_input_timing.is_none());
+
+        payload.clear();
+        write_int(101, &mut payload);
+        write_int(-40, &mut payload);
+        let valid = session.receive(&server_message(
+            NETMSG_INPUTTIMING, &payload, 2, 1,
+        )).unwrap();
+        assert!(valid.contains(&GameAction::InputTiming {
+            tick: 101, time_left_ms: -40,
+        }));
+        assert_eq!(session.pending_input_ticks.iter().copied().collect::<Vec<_>>(), vec![102]);
+        assert_eq!(session.last_input_timing.unwrap().intended_tick, 101);
+
+        // A duplicate vital datagram and a late reply cannot reapply timing.
+        let replay = session.receive(&server_message(
+            NETMSG_INPUTTIMING, &payload, 3, 1,
+        )).unwrap();
+        assert!(!replay.iter().any(|ev| matches!(ev, GameAction::InputTiming { .. })));
+        assert_eq!(session.last_input_timing.unwrap().time_left_ms, -40);
+
+        payload.clear();
+        write_int(102, &mut payload);
+        write_int(25, &mut payload);
+        let newer = session.receive(&server_message(
+            NETMSG_INPUTTIMING, &payload, 4, 1,
+        )).unwrap();
+        assert!(newer.contains(&GameAction::InputTiming {
+            tick: 102, time_left_ms: 25,
+        }));
+
+        assert!(session.pending_input_ticks.is_empty());
+        assert!(session.restart_connection().is_ok());
+        assert!(session.last_input_timing.is_none());
+        assert!(session.pending_input_ticks.is_empty());
+    }
+
+    #[test]
+    fn input_timing_rejects_malformed_wire_payload() {
+        let mut session = GameSession06::new(String::new(), 4096, 1024);
+        feed_handshake(&mut session);
+        session.stage = Stage::EnterGameSent;
+        let invalid = session.receive(&server_message(
+            NETMSG_INPUTTIMING, &[0x80], 1, 1,
+        ));
+        assert!(matches!(invalid, Err(SessionError::Message(_))));
+    }
+
+    #[test]
     fn reconnect_resets_network_ack_map_and_snapshot_state() {
         let map = small_real_datafile_v3();
         let mut session = GameSession06::new("private".into(), 4096, 1024);
@@ -648,6 +754,8 @@ mod tests {
         assert!(session.loaded_map.is_none());
         assert!(session.loaded_map_bytes.is_none());
         assert!(session.snapshot_states.is_empty());
+        assert!(session.pending_input_ticks.is_empty());
+        assert_eq!(session.last_input_timing, None);
         assert_eq!(session.snapshots.last_tick(), None);
         assert_eq!(session.transport.sequence, 0);
         assert_eq!(session.transport.peer_ack, 0);

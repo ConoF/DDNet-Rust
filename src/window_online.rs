@@ -19,7 +19,7 @@ use crate::sound_assets::GameSound;
 use crate::server_browser::ClientSettings;
 use crate::netobjects::CHARACTER_TYPE;
 use crate::interpolation::interpolate_snapshots;
-use crate::input::{InputFrame, PlayerInput};
+use crate::input::{correct_next_input_tick, FireCounter, InputFrame, PlayerInput, PLAYERFLAG_PLAYING};
 use crate::netobjects::{CharacterCoreNet, PlayerInfoNet};
 use crate::physics::Vec2;
 use crate::session::{GameAction, GameSession06, Stage};
@@ -40,12 +40,14 @@ fn preferred_character(snapshot: &SnapshotState) -> Option<Vec2> {
     local.or(first).map(|c| Vec2::new(c.x as f32, c.y as f32))
 }
 
-fn movement_input(direction: i32, jump: bool, hook: bool, target: Vec2) -> PlayerInput {
+fn movement_input(direction: i32, jump: bool, hook: bool, fire: i32, target: Vec2) -> PlayerInput {
     PlayerInput {
         direction: direction.clamp(-1, 1),
         target_x: target.x.round().clamp(-10000.0, 10000.0) as i32,
         target_y: target.y.round().clamp(-10000.0, 10000.0) as i32,
         jump: i32::from(jump),
+        fire,
+        player_flags: PLAYERFLAG_PLAYING,
         hook: i32::from(hook),
         wanted_weapon: 1,
         ..PlayerInput::default()
@@ -126,6 +128,8 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     let mut last_snapshot_at = Instant::now();
     let mut last_title = Instant::now();
     let mut reconnect_attempts = 0u8;
+    let mut fire_counter = FireCounter::default();
+    let mut input_time_left_ms = None::<i32>;
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let now = Instant::now();
@@ -165,6 +169,14 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                         current_snapshot = Some(tick);
                         last_snapshot_at = Instant::now();
                         intended_tick = intended_tick.max(tick.saturating_add(1));
+                    }
+                    GameAction::InputTiming { time_left_ms, .. } => {
+                        // Bounded, one-time correction from feedback for a
+                        // *locally sent* tick; never rewind our input stream.
+                        intended_tick = correct_next_input_tick(
+                            intended_tick, last_ack_snapshot, time_left_ms,
+                        );
+                        input_time_left_ms = Some(time_left_ms);
                     }
                     GameAction::Disconnected(reason) => {
                         return Err(format!("Server disconnected: {reason}"));
@@ -217,6 +229,8 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             // Reset event deduplication with the snapshot chain. Audio device
             // stays active and reusable across reconnects.
             accumulator = Duration::ZERO;
+            fire_counter = FireCounter::default();
+            input_time_left_ms = None;
             continue;
         }
         if session.stage == Stage::Connecting &&
@@ -246,6 +260,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             window.is_key_down(Key::Space) || window.is_key_down(Key::W)
                 || window.is_key_down(Key::Up),
             window.get_mouse_down(MouseButton::Right) || window.is_key_down(Key::E),
+            fire_counter.sample(window.get_mouse_down(MouseButton::Left)),
             Vec2::new(
                 (mouse.0 - WIDTH as f32 / 2.0) / camera.scale,
                 (mouse.1 - HEIGHT as f32 / 2.0) / camera.scale,
@@ -298,8 +313,10 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                 current_snapshot.unwrap_or(0).max(0) as u64)?;
         }
         if last_title.elapsed() > Duration::from_secs(1) {
-            window.set_title(&format!("DDNet-Rust 0.6 prototype | {peer} | {:?} | tick {:?}",
-                session.stage, current_snapshot));
+            window.set_title(&format!(
+                "DDNet-Rust 0.6 prototype | {peer} | {:?} | tick {:?} | input timing {:?}ms",
+                session.stage, current_snapshot, input_time_left_ms,
+            ));
             last_title = Instant::now();
         }
         window.update_with_buffer(&pixels.pixels, WIDTH, HEIGHT)
@@ -332,12 +349,14 @@ mod tests {
 
     #[test]
     fn outgoing_player_input_stays_inside_valid_ranges() {
-        let input = movement_input(-10, true, true, Vec2::new(30000.0, -20000.0));
+        let input = movement_input(-10, true, true, 3, Vec2::new(30000.0, -20000.0));
         assert_eq!(input.direction, -1);
         assert_eq!(input.target_x, 10000);
         assert_eq!(input.target_y, -10000);
         assert_eq!(input.jump, 1);
         assert_eq!(input.hook, 1);
+        assert_eq!(input.fire, 3);
+        assert_eq!(input.player_flags, PLAYERFLAG_PLAYING);
         assert_eq!(input.wanted_weapon, 1);
         assert!(input.validate().is_ok());
     }
