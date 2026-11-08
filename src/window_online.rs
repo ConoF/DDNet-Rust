@@ -23,6 +23,7 @@ use crate::window_assets::{WindowAssets, candidate_roots};
 use crate::game_audio::{attack_sound_for_weapon, try_start, GameAudio};
 use crate::sound_assets::GameSound;
 use crate::server_browser::ClientSettings;
+use crate::ingame_menu::{MenuAction, MenuState, ServerStatus};
 use crate::netobjects::CHARACTER_TYPE;
 use crate::interpolation::{
     camera_follow_fraction, interpolate_snapshots, online_interpolation_fraction,
@@ -31,7 +32,7 @@ use crate::envelope::EnvelopeTimes;
 use crate::frame_stats::FrameTiming;
 use crate::input::{
     correct_next_input_tick, FireCounter, InputFrame, PlayerInput,
-    PLAYERFLAG_CHATTING, PLAYERFLAG_PLAYING,
+    PLAYERFLAG_CHATTING, PLAYERFLAG_PLAYING, PLAYERFLAG_IN_MENU,
 };
 use crate::gameplay::WeaponControls;
 use crate::online_ui::{OnlineHud, TextInputCollector};
@@ -56,8 +57,14 @@ fn preferred_character(snapshot: &SnapshotState) -> Option<Vec2> {
 
 fn movement_input(
     direction: i32, jump: bool, hook: bool, fire: i32,
-    target: Vec2, weapons: WeaponControls, chatting: bool,
+    target: Vec2, weapons: WeaponControls, chatting: bool, in_menu: bool,
 ) -> PlayerInput {
+    if in_menu {
+        return PlayerInput {
+            fire, player_flags: PLAYERFLAG_IN_MENU,
+            ..PlayerInput::default()
+        };
+    }
     if chatting {
         return PlayerInput {
             fire, player_flags: PLAYERFLAG_CHATTING,
@@ -124,7 +131,11 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         "DDNet-Rust — online 0.6 protocol prototype",
         WIDTH, HEIGHT, WindowOptions::default(),
     ).map_err(|e| format!("window: {e}"))?;
-    window.set_target_fps(60);
+    // The menu may change the frame limiter while a connection is live.
+    let settings_path = ClientSettings::default_path();
+    let mut connection = ClientSettings::load(&settings_path)
+        .unwrap_or_default();
+    window.set_target_fps(usize::from(connection.fps_limit));
     let chars = Rc::new(RefCell::new(Vec::new()));
     window.set_input_callback(Box::new(TextInputCollector(Rc::clone(&chars))));
     let mut pixels = Framebuffer::new(WIDTH as u32, HEIGHT as u32)
@@ -149,11 +160,11 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         .map_err(|e| format!("GPU tee framebuffer: {e:?}"))?;
     #[cfg(feature = "gpu")]
     let mut gpu_hud = GpuHudScene::new(WIDTH, HEIGHT);
-    let mut camera = Camera { center: Vec2::default(), scale: 1.5 };
+    let mut camera = Camera {
+        center: Vec2::default(), scale: f32::from(connection.zoom_percent) / 100.0,
+    };
     let mut assets = WindowAssets::default();
     let mut audio = try_start(&candidate_roots(None));
-    let connection = ClientSettings::load(&ClientSettings::default_path())
-        .unwrap_or_default();
     let reconnect_limit = connection.reconnect_attempts;
     let receive_timeout = Duration::from_secs(connection.connect_timeout_secs);
     let mut session = GameSession06::new(String::new(), 64 * 1024 * 1024, 16_777_216);
@@ -181,6 +192,8 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     let mut predictor = LocalPredictor::new();
     let mut hud = OnlineHud::new();
     let mut weapons = WeaponControls::default();
+    let mut menu = MenuState::new();
+    let mut left_mouse_was_down = false;
     let mut exit_requested = false;
 
     while window.is_open() && !exit_requested {
@@ -195,7 +208,9 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         let was_typing = hud.is_typing();
         let typed = std::mem::take(&mut *chars.borrow_mut());
         if was_typing { hud.append_typed(&typed); }
-        let keys = window.get_keys_pressed(if was_typing {
+        if menu.is_editing() { menu.append_typed(&typed); }
+        let mut menu_actions = Vec::new();
+        let keys = window.get_keys_pressed(if was_typing || menu.is_editing() {
             KeyRepeat::Yes
         } else {
             KeyRepeat::No
@@ -221,9 +236,13 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                     }
                     _ => {}
                 }
+            } else if menu.is_open() {
+                if let Some(action) = menu.key(key, &mut connection) {
+                    menu_actions.push(action);
+                }
             } else {
                 match key {
-                    Key::Escape => exit_requested = true,
+                    Key::Escape => menu.toggle(),
                     Key::T => hud.open_chat(false),
                     Key::Y => hud.open_chat(true),
                     Key::Key1 => { weapons.select(1); }
@@ -243,6 +262,79 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                 }
             }
         }
+        // Mouse clicks use the same tested hitboxes as the menu renderer.
+        // A held fire button must not activate multiple menu entries.
+        let left_mouse_down = window.get_mouse_down(MouseButton::Left);
+        if menu.is_open() && left_mouse_down && !left_mouse_was_down {
+            if let Some(pos) = window.get_mouse_pos(MouseMode::Discard) {
+                if let Some(action) = menu.click(pos, (WIDTH, HEIGHT), &mut connection) {
+                    menu_actions.push(action);
+                }
+            }
+        }
+        left_mouse_was_down = left_mouse_down;
+
+        for action in menu_actions {
+            match action {
+                MenuAction::Resume => {}
+                MenuAction::Disconnect => {
+                    exit_requested = true;
+                }
+                MenuAction::Spectate | MenuAction::Join | MenuAction::Kill => {
+                    if session.stage != Stage::EnterGameSent {
+                        menu.feedback("Not in game yet");
+                        continue;
+                    }
+                    let result = match action {
+                        MenuAction::Spectate => session.set_team(-1),
+                        MenuAction::Join => session.set_team(0),
+                        _ => session.request_kill(),
+                    };
+                    match result {
+                        Ok(packet) => {
+                            socket.send(&packet).map_err(|e| format!("menu action UDP: {e}"))?;
+                            menu.close();
+                        }
+                        Err(error) => menu.feedback(format!("Server rejected action: {error:?}")),
+                    }
+                }
+                MenuAction::SettingsChanged => {
+                    window.set_target_fps(usize::from(connection.fps_limit));
+                    camera.scale = f32::from(connection.zoom_percent) / 100.0;
+                    if let Err(error) = connection.save(&settings_path) {
+                        menu.feedback(format!("Settings save failed: {error:?}"));
+                    }
+                }
+                MenuAction::ChangeNickname(name) => {
+                    // On a live server the change is a vital Cl_ChangeInfo;
+                    // during handshake the new name is used for StartInfo.
+                    let change = if session.stage == Stage::EnterGameSent {
+                        session.change_name(&name).map(Some)
+                    } else {
+                        session.start_info.name = name.clone();
+                        Ok(None)
+                    };
+                    match change {
+                        Ok(packet) => {
+                            if let Some(packet) = packet {
+                                socket.send(&packet)
+                                    .map_err(|e| format!("rename UDP: {e}"))?;
+                            }
+                            connection.nickname = name;
+                            match connection.save(&settings_path) {
+                                Ok(()) => menu.feedback("Nickname saved"),
+                                Err(error) => menu.feedback(
+                                    format!("Cannot save nickname: {error:?}")),
+                            }
+                        }
+                        Err(error) => menu.feedback(
+                            format!("Nickname update failed: {error:?}")),
+                    }
+                }
+            }
+        }
+        if exit_requested { break; }
+
         // Bound the datagrams processed in a single render frame.
         for _ in 0..256 {
             let count = match socket.recv(&mut packet) {
@@ -264,7 +356,9 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                         socket.send(&wire).map_err(|e| format!("UDP send: {e}"))?;
                     }
                     GameAction::SnapshotDecoded { tick, .. } => {
-                        if let (Some(out), Some(old_tick)) = (audio.as_mut(), current_snapshot) {
+                        if let (Some(out), Some(old_tick)) =
+                            (audio.as_mut().filter(|_| connection.sound_enabled), current_snapshot)
+                        {
                             if let (Some(previous), Some(current)) =
                                 (session.snapshot_state(old_tick), session.snapshot_state(tick))
                             {
@@ -397,11 +491,11 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         }
 
         if let Some((_, wheel)) = window.get_scroll_wheel() {
-            if !hud.is_typing() && wheel.abs() >= 1.0 {
+            if !hud.is_typing() && !menu.is_open() && wheel.abs() >= 1.0 {
                 weapons.scroll(wheel.round() as i32);
             }
         }
-        if !hud.is_typing() {
+        if !hud.is_typing() && !menu.is_open() {
             if window.is_key_down(Key::Equal) {
                 camera.scale = (camera.scale * 1.02).min(8.0);
             }
@@ -412,19 +506,20 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         let mouse = window.get_mouse_pos(MouseMode::Discard)
             .unwrap_or((WIDTH as f32 * 0.75, HEIGHT as f32 * 0.5));
         let typing = hud.is_typing();
+        let blocked = typing || menu.is_open();
         let control = movement_input(
             i32::from(window.is_key_down(Key::D) || window.is_key_down(Key::Right)) -
             i32::from(window.is_key_down(Key::A) || window.is_key_down(Key::Left)),
             window.is_key_down(Key::Space) || window.is_key_down(Key::W)
                 || window.is_key_down(Key::Up),
             window.get_mouse_down(MouseButton::Right) || window.is_key_down(Key::E),
-            fire_counter.sample(!typing && window.get_mouse_down(MouseButton::Left)),
+            fire_counter.sample(!blocked && window.get_mouse_down(MouseButton::Left)),
             Vec2::new(
                 (mouse.0 - WIDTH as f32 / 2.0) / camera.scale,
                 (mouse.1 - HEIGHT as f32 / 2.0) / camera.scale,
             ),
             weapons,
-            typing,
+            typing, menu.is_open(),
         );
         for _ in 0..5 {
             if accumulator < TICK { break; }
@@ -533,7 +628,8 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                 snapshot.find(CHARACTER_TYPE, id)
             )
         ).and_then(|obj| obj.words.get(19).copied());
-        let scoreboard = if window.is_key_down(Key::Tab) && !hud.is_typing() {
+        let scoreboard = if window.is_key_down(Key::Tab)
+            && !hud.is_typing() && !menu.is_open() {
             current_snapshot.and_then(|tick| session.snapshot_state(tick))
         } else {
             None
@@ -541,18 +637,34 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         #[cfg(feature = "gpu")]
         if using_gpu {
             gpu_hud.clear();
-            if let Some(snapshot) = display.as_ref() {
-                hud.draw_nameplates(&mut gpu_hud, snapshot, camera);
+            if connection.show_nameplates && !menu.is_open() {
+                if let Some(snapshot) = display.as_ref() {
+                    hud.draw_nameplates(&mut gpu_hud, snapshot, camera);
+                }
             }
-            hud.render(&mut gpu_hud, &format!("{:?}", session.stage),
-                local_weapon, current_snapshot, scoreboard);
+            hud.render_with_visibility(&mut gpu_hud, &format!("{:?}", session.stage),
+                local_weapon, current_snapshot, scoreboard, connection.show_chat);
+            menu.paint(&mut gpu_hud, &connection, display.as_ref(),
+                ServerStatus {
+                    endpoint, stage: &format!("{:?}", session.stage),
+                    map: session.map_name(), tick: current_snapshot,
+                    ack: session.snapshot_ack_tick(),
+                });
         }
         if !using_gpu {
-            if let Some(snapshot) = display.as_ref() {
-                hud.draw_nameplates(&mut pixels, snapshot, camera);
+            if connection.show_nameplates && !menu.is_open() {
+                if let Some(snapshot) = display.as_ref() {
+                    hud.draw_nameplates(&mut pixels, snapshot, camera);
+                }
             }
-            hud.render(&mut pixels, &format!("{:?}", session.stage),
-                local_weapon, current_snapshot, scoreboard);
+            hud.render_with_visibility(&mut pixels, &format!("{:?}", session.stage),
+                local_weapon, current_snapshot, scoreboard, connection.show_chat);
+            menu.paint(&mut pixels, &connection, display.as_ref(),
+                ServerStatus {
+                    endpoint, stage: &format!("{:?}", session.stage),
+                    map: session.map_name(), tick: current_snapshot,
+                    ack: session.snapshot_ack_tick(),
+                });
         }
         #[cfg(feature = "gpu")]
         if let Some(renderer) = gpu.as_mut() {
@@ -632,7 +744,7 @@ mod tests {
         let mut weapons = WeaponControls::default();
         weapons.select(3);
         let input = movement_input(-10, true, true, 3,
-            Vec2::new(30000.0, -20000.0), weapons, false);
+            Vec2::new(30000.0, -20000.0), weapons, false, false);
         assert_eq!(input.direction, -1);
         assert_eq!(input.target_x, 10000);
         assert_eq!(input.target_y, -10000);
@@ -643,12 +755,18 @@ mod tests {
         assert_eq!(input.wanted_weapon, 3);
         assert!(input.validate().is_ok());
         let chat = movement_input(1, true, true, 4,
-            Vec2::new(100.0, 80.0), weapons, true);
+            Vec2::new(100.0, 80.0), weapons, true, false);
         assert_eq!(chat.direction, 0);
         assert_eq!(chat.jump, 0);
         assert_eq!(chat.hook, 0);
         assert_eq!(chat.fire, 4);
         assert_eq!(chat.player_flags, PLAYERFLAG_CHATTING);
         assert_eq!(chat.wanted_weapon, 0);
+        let paused = movement_input(1, true, true, 4,
+            Vec2::new(100.0, 80.0), weapons, false, true);
+        assert_eq!(paused.player_flags, PLAYERFLAG_IN_MENU);
+        assert_eq!(paused.direction, 0);
+        assert_eq!(paused.fire, 4);
+        assert_eq!(paused.hook, 0);
     }
 }
