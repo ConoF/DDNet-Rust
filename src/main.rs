@@ -228,6 +228,9 @@ fn connect_headless(endpoint: &str) {
                             println!("Server map: {name}, {size} bytes"),
                         GameAction::MapLoaded { name, width, height } =>
                             println!("Map validated: {name} ({width}x{height} tiles)"),
+                        GameAction::StartInfoSent => {
+                            println!("Cl_StartInfo sent; waiting for Sv_ReadyToEnter");
+                        }
                         GameAction::EnterGameSent => {
                             println!("ENTERGAME transmitted; waiting for first snapshot...");
                         }

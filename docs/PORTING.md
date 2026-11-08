@@ -68,3 +68,5 @@ This is a limited differential test, not a full client simulation.
 > Important: a transport-level handshake is only the first part of DDNet's login. No rendering, player session or full compatibility has been implemented.
 
 Headless CLI: `cargo run --locked -- --connect-headless 127.0.0.1:8303` can test transport, map acquisition and wait for the first snapshot. This does not provide graphics or actual gameplay.
+
+Login order is checked against original `src/game/client/gameclient.cpp`: `CON_READY` -> `Cl_StartInfo` -> `Sv_ReadyToEnter` -> `ENTERGAME`. A mock protocol server tests this order; public-server compatibility is not yet established.

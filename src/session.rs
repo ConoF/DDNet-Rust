@@ -8,7 +8,8 @@
 use crate::datafile::{Datafile, DatafileError};
 use crate::game_protocol::{
     client_enter_game, client_info, client_ping_reply, client_ready, decode_message,
-    request_map_chunk, MapChange, MapData, MapDownload, MessageError, MessageId,
+    request_map_chunk, MapChange, MapData, MapDownload, MessageError, MessageId, StartInfo,
+    NETMSGTYPE_SV_READYTOENTER,
     NETMSG_CON_READY, NETMSG_MAP_CHANGE, NETMSG_MAP_DATA, NETMSG_PING,
     NETMSG_SNAP, NETMSG_SNAPEMPTY, NETMSG_SNAPSINGLE,
 };
@@ -25,6 +26,7 @@ pub enum Stage {
     WaitingMap,
     Downloading,
     WaitingConReady,
+    WaitingReadyToEnter,
     EnterGameSent,
     Closed,
 }
@@ -36,6 +38,7 @@ pub enum GameAction {
     TransportConnected,
     MapAnnounced { name: String, size: usize },
     MapLoaded { name: String, width: usize, height: usize },
+    StartInfoSent,
     EnterGameSent,
     SnapshotReceived { tick: i32, packed_bytes: usize },
     SnapshotDecoded { tick: i32, item_count: usize },
@@ -72,6 +75,7 @@ pub struct GameSession06 {
     pub stage: Stage,
     pub transport: Client06,
     pub loaded_map: Option<GameMap>,
+    pub start_info: StartInfo,
     password: String,
     max_map_bytes: usize,
     max_tiles: usize,
@@ -88,6 +92,7 @@ impl GameSession06 {
             stage: Stage::Offline,
             transport: Client06::new(),
             loaded_map: None,
+            start_info: StartInfo::default(),
             password,
             max_map_bytes,
             max_tiles,
@@ -149,6 +154,17 @@ impl GameSession06 {
         &mut self, bytes: &[u8], actions: &mut Vec<GameAction>,
     ) -> Result<(), SessionError> {
         let message = decode_message(bytes)?;
+        if let MessageId::Regular {
+            system: false, number: NETMSGTYPE_SV_READYTOENTER,
+        } = message.id {
+            if self.stage != Stage::WaitingReadyToEnter {
+                return Err(SessionError::UnexpectedStage);
+            }
+            self.send_system(&client_enter_game(), true, actions)?;
+            self.stage = Stage::EnterGameSent;
+            actions.push(GameAction::EnterGameSent);
+            return Ok(());
+        }
         let MessageId::Regular { system: true, number } = message.id else {
             // Vanilla game messages and UUID-based extensions will be
             // handled by the future snapshot/game-protocol subsystem.
@@ -201,9 +217,10 @@ impl GameSession06 {
                 if self.stage != Stage::WaitingConReady {
                     return Err(SessionError::UnexpectedStage);
                 }
-                self.send_system(&client_enter_game(), true, actions)?;
-                self.stage = Stage::EnterGameSent;
-                actions.push(GameAction::EnterGameSent);
+                let info = self.start_info.pack()?;
+                self.send_system(&info, true, actions)?;
+                self.stage = Stage::WaitingReadyToEnter;
+                actions.push(GameAction::StartInfoSent);
             }
             NETMSG_SNAP | NETMSG_SNAPSINGLE | NETMSG_SNAPEMPTY => {
                 if self.stage != Stage::EnterGameSent {
@@ -303,6 +320,18 @@ mod tests {
         ).unwrap()
     }
 
+    fn server_game_message(id: u16, payload: &[u8], seq: u16, ack: u16) -> Vec<u8> {
+        let msg = encode_message(
+            MessageId::Regular { system: false, number: id }, payload
+        ).unwrap();
+        let mut chunk = ChunkHeader {
+            flags: CHUNK_VITAL, size: msg.len() as u16, sequence: Some(seq),
+        }.encode_06().unwrap();
+        chunk.extend_from_slice(&msg);
+        chunk.extend_from_slice(&TOKEN.to_be_bytes());
+        encode_packet_06(PacketHeader { flags: 0, ack, num_chunks: 1 }, &chunk).unwrap()
+    }
+
     fn push_i32(data: &mut Vec<u8>, value: i32) {
         data.extend_from_slice(&value.to_le_bytes());
     }
@@ -388,12 +417,30 @@ mod tests {
         assert_eq!(client.loaded_map.as_ref().unwrap().tiles[0].index, 1);
         assert_eq!(client.transport.sequence, 3); // READY vital.
 
-        let joined = client.receive(&server_message(
+        let started = client.receive(&server_message(
             NETMSG_CON_READY, &[], 3, 3
+        )).unwrap();
+        assert!(started.contains(&GameAction::StartInfoSent));
+        assert_eq!(client.stage, Stage::WaitingReadyToEnter);
+        assert_eq!(client.transport.sequence, 4);
+        let outgoing = started.iter().find_map(|event| match event {
+            GameAction::Outgoing(packet) => {
+                let crate::network::Packet::Connected { payload, .. } =
+                    crate::network::parse_packet_06(packet).ok()?
+                else { return None };
+                let chunks = crate::network::parse_chunks_06(&payload[..payload.len()-4], 1).ok()?;
+                Some(chunks[0].payload.to_vec())
+            }
+            _ => None,
+        }).unwrap();
+        let start_info = decode_message(&outgoing).unwrap();
+        assert_eq!(start_info.id, MessageId::Regular { system: false, number: 20 });
+        let joined = client.receive(&server_game_message(
+            NETMSGTYPE_SV_READYTOENTER, &[], 4, 4
         )).unwrap();
         assert!(joined.contains(&GameAction::EnterGameSent));
         assert_eq!(client.stage, Stage::EnterGameSent);
-        assert_eq!(client.transport.sequence, 4);
+        assert_eq!(client.transport.sequence, 5);
 
         // A first snapshot is not decoded into game objects yet, but its
         // wire envelope is parsed and delivered to the game session.
@@ -402,7 +449,7 @@ mod tests {
             write_int(value, &mut snap);
         }
         let received = client.receive(&server_message(
-            NETMSG_SNAPSINGLE, &snap, 4, 4
+            NETMSG_SNAPSINGLE, &snap, 5, 5
         )).unwrap();
         assert!(received.contains(&GameAction::SnapshotReceived {
             tick: 100, packed_bytes: 0,
@@ -449,6 +496,10 @@ mod tests {
             NETMSG_MAP_DATA, &make_map_data(&map), 2, 2
         )).unwrap();
         session.receive(&server_message(NETMSG_CON_READY, &[], 3, 3)).unwrap();
+        assert_eq!(session.stage, Stage::WaitingReadyToEnter);
+        session.receive(&server_game_message(
+            NETMSGTYPE_SV_READYTOENTER, &[], 4, 4
+        )).unwrap();
         assert_eq!(session.stage, Stage::EnterGameSent);
 
         let mut first_data = vec![0, 1, 0, 9, 1];
@@ -467,7 +518,7 @@ mod tests {
         }
         snapshot.extend_from_slice(&packed);
         let events = session.receive(&server_message(
-            NETMSG_SNAPSINGLE, &snapshot, 4, 4
+            NETMSG_SNAPSINGLE, &snapshot, 5, 5
         )).unwrap();
         assert!(events.contains(&GameAction::SnapshotDecoded {
             tick: 100, item_count: 1
@@ -488,12 +539,22 @@ mod tests {
         }
         next_snap.extend_from_slice(&packed_next);
         let events = session.receive(&server_message(
-            NETMSG_SNAPSINGLE, &next_snap, 5, 4
+            NETMSG_SNAPSINGLE, &next_snap, 6, 5
         )).unwrap();
         assert!(events.contains(&GameAction::SnapshotDecoded {
             tick: 101, item_count: 1
         }));
         assert_eq!(session.snapshot_state(101).unwrap().find(9, 1).unwrap().words[1], 133);
+    }
+
+    #[test]
+    fn unexpected_ready_to_enter_before_startinfo_is_rejected() {
+        let mut client = GameSession06::new(String::new(), 1024, 1024);
+        feed_handshake(&mut client);
+        assert_eq!(client.receive(&server_game_message(
+            NETMSGTYPE_SV_READYTOENTER, &[], 1, 1
+        )), Err(SessionError::UnexpectedStage));
+        assert_eq!(client.stage, Stage::WaitingMap);
     }
 
     #[test]
