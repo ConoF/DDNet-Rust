@@ -18,6 +18,8 @@ pub mod huffman;
 pub mod layers;
 pub mod map;
 pub mod graphics;
+#[cfg(feature = "window")]
+pub mod window;
 pub mod physics;
 pub mod hook;
 pub mod simulator;

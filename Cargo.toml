@@ -7,7 +7,12 @@ publish = false
 license-file = "LICENSE"
 description = "Incremental Rust port of vanilla DDNet 20.2.1"
 
+[features]
+default = []
+window = ["dep:minifb"]
+
 [dependencies]
+minifb = { version = "0.29", default-features = false, features = ["x11"], optional = true }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [lib]

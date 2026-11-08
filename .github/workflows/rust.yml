@@ -14,12 +14,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Resolve temporary window dependency lock
+        run: |
+          cargo generate-lockfile
+          echo DDNET_LOCK_BEGIN
+          cat Cargo.lock
+          echo DDNET_LOCK_END
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release --locked --features window
       - name: Unit tests and tick simulation
-        run: cargo test --all-targets --locked
+        run: cargo test --all-targets --locked --features window
       - name: Clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --all-targets --locked --features window -- -D warnings
       - name: CLI smoke test
         run: cargo run -- --self-test
       - name: Compare variable integers with unmodified upstream C++
@@ -79,5 +85,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --all-targets --locked
-      - run: cargo build --release --locked
+      - run: cargo build --release --locked --features window
       - run: cargo run -- --self-test

@@ -74,3 +74,7 @@ Headless CLI: `cargo run --locked -- --connect-headless 127.0.0.1:8303` can test
 Login order is checked against original `src/game/client/gameclient.cpp`: `CON_READY` -> `Cl_StartInfo` -> `Sv_ReadyToEnter` -> `ENTERGAME`. A mock protocol server tests this order; public-server compatibility is not yet established.
 
 Collision-only visualization: `cargo run --locked -- --render-debug-map upstream/ddnet/data/maps/ctf1.map target/ctf1-debug.ppm`. This PPM is not the vanilla DDNet graphical renderer.
+
+## Optional offline desktop window
+
+Use `cargo run --features window -- --play-offline upstream/ddnet/data/maps/ctf1.map`. Keys: A/D/arrows move, W/Space jump, E/right mouse hook, wheel zoom, R respawn, Escape exit. This is only a collision-map movement prototype: it does not show vanilla DDNet graphics, support live gameplay, editor, audio or networking.
