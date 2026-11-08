@@ -53,6 +53,19 @@ jobs:
           cargo run --locked -- --render-debug-map upstream/ddnet/data/maps/ctf1.map target/ctf1-debug.ppm
           test -s target/ctf1-debug.ppm
           test "$(head -c 2 target/ctf1-debug.ppm)" = "P6"
+      - name: Export real collision maps to PNG
+        run: |
+          cargo run --locked -- --render-debug-png upstream/ddnet/data/maps/ctf1.map target/ctf1-debug.png
+          cargo run --locked -- --render-debug-png upstream/ddnet/data/maps/Tutorial.map target/tutorial-debug.png
+          python3 -c "from pathlib import Path; p=Path('target/ctf1-debug.png'); assert p.read_bytes()[:8] == bytes((137,80,78,71,13,10,26,10))"
+      - name: Publish diagnostic PNGs
+        uses: actions/upload-artifact@v4
+        with:
+          name: ddnet-rust-collision-preview
+          path: |
+            target/ctf1-debug.png
+            target/tutorial-debug.png
+          if-no-files-found: error
       - name: Decode official extra DDNet physics layers
         run: |
           cargo run --locked -- --inspect-layers upstream/ddnet/data/maps/ctf1.map
