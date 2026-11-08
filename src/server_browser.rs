@@ -188,6 +188,7 @@ pub fn valid_binding(name: &str) -> bool {
         | "Up" | "Down" | "Left" | "Right"
         | "LeftShift" | "RightShift" | "LeftCtrl" | "RightCtrl"
         | "LeftAlt" | "RightAlt" | "Enter" | "Backspace"
+        | "PageUp" | "PageDown"
         | "Equal" | "Minus" | "Comma" | "Period"
     ) {
         return true;

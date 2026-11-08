@@ -325,6 +325,14 @@ impl MenuState {
                 self.page_select(Page::ALL[index]);
                 None
             }
+            Key::PageUp if self.page == Page::Settings => {
+                self.cycle_settings(-1);
+                None
+            }
+            Key::PageDown if self.page == Page::Settings => {
+                self.cycle_settings(1);
+                None
+            }
             Key::Up => {
                 self.selected = self.selected.saturating_sub(1);
                 None
@@ -452,7 +460,11 @@ impl MenuState {
         canvas.fill_rect(l.x+22, l.y+l.h.saturating_sub(48),
             l.w.saturating_sub(44), 1, SELECTED);
         canvas.write_text(l.x+27, l.y+l.h.saturating_sub(33),
-            "MOUSE / ARROWS + ENTER   |   TAB NEXT PAGE",
+            if self.page == Page::Settings {
+                "ARROWS + ENTER   |   PGUP/PGDN SECTION   |   ESC RESUME"
+            } else {
+                "MOUSE / ARROWS + ENTER   |   TAB NEXT PAGE"
+            },
             PALE, l.w.saturating_sub(54)/8);
         if let Some(message) = &self.feedback {
             canvas.write_text(l.x+26, l.y+l.h.saturating_sub(20),
@@ -686,6 +698,21 @@ mod tests {
             (lay.content_y()+8) as f32),(960,540),&mut s),
             Some(MenuAction::SettingsChanged));
         assert!(!s.sound_enabled);
+    }
+
+    #[test]
+    fn page_up_down_switch_settings_sections_without_mouse() {
+        let mut menu = MenuState::new();
+        menu.toggle();
+        let mut prefs = ClientSettings::default();
+        menu.key(Key::Key4,&mut prefs);
+        assert_eq!(menu.page,Page::Settings);
+        for _ in 0..4 { menu.key(Key::PageDown,&mut prefs); }
+        assert_eq!(menu.settings_tab,SettingsTab::Controls);
+        menu.key(Key::PageUp,&mut prefs);
+        assert_eq!(menu.settings_tab,SettingsTab::Appearance);
+        menu.key(Key::PageDown,&mut prefs);
+        assert_eq!(menu.settings_tab,SettingsTab::Controls);
     }
 
     #[test]
