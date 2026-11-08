@@ -140,11 +140,7 @@ impl ChunkHeader {
                 return Err(NetworkError::InvalidChunkHeader);
             }
             second |= ((sequence >> 2) as u8) & 0xf0;
-            let mut bytes = Vec::with_capacity(3);
-            bytes.push(first);
-            bytes.push(second);
-            bytes.push(sequence as u8);
-            Ok(bytes)
+            Ok(vec![first, second, sequence as u8])
         } else {
             Ok(vec![first, second])
         }
