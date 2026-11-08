@@ -43,6 +43,8 @@ pub mod game_audio;
 pub mod window;
 #[cfg(feature = "window")]
 pub mod window_online;
+#[cfg(feature = "window")]
+pub mod online_ui;
 pub mod physics;
 pub mod hook;
 pub mod simulator;
