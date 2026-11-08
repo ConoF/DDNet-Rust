@@ -148,6 +148,20 @@ fn triangle(
     let max_y = a.y.max(b.y).max(c.y).ceil().min(frame.height as f32) as usize;
     if min_x >= max_x || min_y >= max_y { return; }
 
+    // Flat-colored, untextured geometry is common in DDNet backgrounds.
+    // Compute its RGBA once per triangle instead of interpolating four
+    // channels three times for each covered pixel.
+    let flat_color = if tex.is_none()
+        && a.color == b.color && b.color == c.color
+    {
+        Some((
+            std::array::from_fn(|i| u32::from(a.color[i])),
+            u32::from(a.color[3]),
+        ))
+    } else {
+        None
+    };
+
     for y in min_y..max_y {
         for x in min_x..max_x {
             let px = x as f32 + 0.5;
@@ -162,13 +176,14 @@ fn triangle(
             // is between TR and BL: w[0] == 0 in the first and w[1] == 0
             // in the second. Give shared pixels to triangle one.
             if second && w[1].abs() <= 0.000001 { continue; }
-            let (rgb, alpha) = sample_color(verts, w, tex);
+            let (rgb, alpha) = flat_color
+                .unwrap_or_else(|| sample_color(verts, w, tex));
             if alpha == 0 { continue; }
             let index = y * frame.width as usize + x;
-            let old = frame.pixels[index];
             let out = if alpha == 255 {
                 rgb[0] << 16 | rgb[1] << 8 | rgb[2]
             } else {
+                let old = frame.pixels[index];
                 let prev = [(old >> 16) & 255, (old >> 8) & 255, old & 255];
                 let blend = |i: usize| {
                     (rgb[i] * alpha + prev[i] * (255 - alpha) + 127) / 255
