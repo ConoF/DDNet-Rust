@@ -30,7 +30,8 @@ The Rust executable does not use any C++ code or FFI.
 | Front/switch/tune/teleport gameplay logic and full collision | Not implemented | None |
 | Hook, player interactions, full prediction | Not implemented | None |
 | UDP 0.6 handshake probe (not game login) | Partial | Loopback UDP mock server; public server compatibility unverified |
-| Snapshot decoding and playable server session | Not implemented | None |
+| Snapshot packet headers and multipart reassembly | Partial | Truncation, duplicate, out-of-order 900-byte pieces, 64-part cap |
+| Complete delta snapshot decoding and playable game state | Not implemented | None |
 | Map download, graphics, input devices, UI, audio | Not implemented | None |
 | Server browser, gameplay, editor and demos | Not implemented | None |
 
@@ -65,3 +66,5 @@ compares its integer encoding output byte-for-byte with the Rust implementation.
 This is a limited differential test, not a full client simulation.
 
 > Important: a transport-level handshake is only the first part of DDNet's login. No rendering, player session or full compatibility has been implemented.
+
+Headless CLI: `cargo run --locked -- --connect-headless 127.0.0.1:8303` can test transport, map acquisition and wait for the first snapshot. This does not provide graphics or actual gameplay.

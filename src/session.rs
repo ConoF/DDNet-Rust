@@ -10,9 +10,11 @@ use crate::game_protocol::{
     client_enter_game, client_info, client_ping_reply, client_ready, decode_message,
     request_map_chunk, MapChange, MapData, MapDownload, MessageError, MessageId,
     NETMSG_CON_READY, NETMSG_MAP_CHANGE, NETMSG_MAP_DATA, NETMSG_PING,
+    NETMSG_SNAP, NETMSG_SNAPEMPTY, NETMSG_SNAPSINGLE,
 };
 use crate::map::{GameMap, MapError};
 use crate::transport::{Client06, Event, TransportError};
+use crate::snapshot::{SnapshotAssembler, SnapshotError, SnapshotPacket};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
@@ -33,6 +35,7 @@ pub enum GameAction {
     MapAnnounced { name: String, size: usize },
     MapLoaded { name: String, width: usize, height: usize },
     EnterGameSent,
+    SnapshotReceived { tick: i32, packed_bytes: usize },
     Disconnected(String),
 }
 
@@ -42,6 +45,7 @@ pub enum SessionError {
     Message(MessageError),
     Datafile(DatafileError),
     Map(MapError),
+    Snapshot(SnapshotError),
     UnexpectedStage,
 }
 impl From<TransportError> for SessionError {
@@ -56,6 +60,9 @@ impl From<DatafileError> for SessionError {
 impl From<MapError> for SessionError {
     fn from(value: MapError) -> Self { Self::Map(value) }
 }
+impl From<SnapshotError> for SessionError {
+    fn from(value: SnapshotError) -> Self { Self::Snapshot(value) }
+}
 
 #[derive(Debug, Clone)]
 pub struct GameSession06 {
@@ -67,6 +74,7 @@ pub struct GameSession06 {
     max_tiles: usize,
     pending_map: Option<MapDownload>,
     map_name: Option<String>,
+    snapshots: SnapshotAssembler,
 }
 
 impl GameSession06 {
@@ -80,6 +88,7 @@ impl GameSession06 {
             max_tiles,
             pending_map: None,
             map_name: None,
+            snapshots: SnapshotAssembler::new(),
         }
     }
 
@@ -186,6 +195,18 @@ impl GameSession06 {
                 self.send_system(&client_enter_game(), true, actions)?;
                 self.stage = Stage::EnterGameSent;
                 actions.push(GameAction::EnterGameSent);
+            }
+            NETMSG_SNAP | NETMSG_SNAPSINGLE | NETMSG_SNAPEMPTY => {
+                if self.stage != Stage::EnterGameSent {
+                    return Err(SessionError::UnexpectedStage);
+                }
+                let packet = SnapshotPacket::parse(number, message.payload)?;
+                if let Some(snapshot) = self.snapshots.push(packet)? {
+                    actions.push(GameAction::SnapshotReceived {
+                        tick: snapshot.game_tick,
+                        packed_bytes: snapshot.packed_bytes.len(),
+                    });
+                }
             }
             NETMSG_PING => {
                 self.send_system(&client_ping_reply(), false, actions)?;
@@ -327,6 +348,19 @@ mod tests {
         assert!(joined.contains(&GameAction::EnterGameSent));
         assert_eq!(client.stage, Stage::EnterGameSent);
         assert_eq!(client.transport.sequence, 4);
+
+        // A first snapshot is not decoded into game objects yet, but its
+        // wire envelope is parsed and delivered to the game session.
+        let mut snap = Vec::new();
+        for value in [100, 100, 0, 0] {
+            write_int(value, &mut snap);
+        }
+        let received = client.receive(&server_message(
+            NETMSG_SNAPSINGLE, &snap, 4, 4
+        )).unwrap();
+        assert!(received.contains(&GameAction::SnapshotReceived {
+            tick: 100, packed_bytes: 0,
+        }));
     }
 
     #[test]

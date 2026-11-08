@@ -229,7 +229,11 @@ fn connect_headless(endpoint: &str) {
                         GameAction::MapLoaded { name, width, height } =>
                             println!("Map validated: {name} ({width}x{height} tiles)"),
                         GameAction::EnterGameSent => {
-                            println!("ENTERGAME transmitted. Snapshot/rendering not implemented yet.");
+                            println!("ENTERGAME transmitted; waiting for first snapshot...");
+                        }
+                        GameAction::SnapshotReceived { tick, packed_bytes } => {
+                            println!("Snapshot received: tick {tick}, {packed_bytes} packed bytes.");
+                            println!("Rendering and full gameplay state decoding are still missing.");
                             return;
                         }
                         GameAction::Disconnected(reason) => {
