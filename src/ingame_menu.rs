@@ -200,6 +200,24 @@ impl MenuState {
         }
     }
 
+    /// Scroll the Controls list without changing gameplay weapons or capturing a binding.
+    /// Small trackpad deltas still advance one row; large bursts are bounded.
+    pub fn scroll_wheel(&mut self, wheel: f32) {
+        if !self.open || self.page != Page::Settings
+            || self.settings_tab != SettingsTab::Controls
+            || self.binding_edit.is_some() || !wheel.is_finite()
+        {
+            return;
+        }
+        let steps = wheel.abs().ceil().min(3.0) as usize;
+        if wheel > 0.0 {
+            self.selected = self.selected.saturating_sub(steps);
+        } else if wheel < 0.0 {
+            self.selected = self.selected.saturating_add(steps)
+                .min(BIND_ACTIONS.len().saturating_sub(1));
+        }
+    }
+
     pub fn append_typed(&mut self, chars: &[char]) {
         let Some(edit) = self.nickname_edit.as_mut() else { return };
         for &ch in chars {
@@ -623,7 +641,7 @@ impl MenuState {
             SettingsTab::Sound => "LEFT/RIGHT: MASTER VOLUME; ENTER: TOGGLE",
             SettingsTab::Tee => "DEFAULT TEE ATLAS; CUSTOM SKINS NOT YET PORTED",
             SettingsTab::Appearance => "NATIVE DDNET THEME / ASSETS IN PROGRESS",
-            SettingsTab::Controls => "ENTER/CLICK TO BIND; ESC CANCELS",
+            SettingsTab::Controls => "ENTER/CLICK TO BIND; WHEEL/ARROWS TO SCROLL",
         };
         canvas.write_text(x, y+if self.settings_tab==SettingsTab::Controls { 264 } else { 155 },
             caption, PALE, cw/8);
@@ -777,6 +795,42 @@ mod tests {
             Some(MenuAction::SettingsChanged));
         assert_eq!(settings.bindings.slots[10], "F6");
         assert!(settings.bindings.validate());
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_controls_without_leaking_to_other_pages_or_capture() {
+        let mut menu = MenuState::new();
+        let mut prefs = ClientSettings::default();
+        menu.scroll_wheel(-1.0);
+        assert_eq!(menu.selected, 0); // closed menus do not consume wheel
+        menu.toggle();
+        menu.page_select(Page::Settings);
+        menu.select_tab(SettingsTab::Controls);
+        menu.scroll_wheel(-0.25);
+        assert_eq!(menu.selected, 1);
+        menu.scroll_wheel(-100.0);
+        assert_eq!(menu.selected, 4); // large deltas are bounded
+        for _ in 0..10 { menu.scroll_wheel(-3.0); }
+        assert_eq!(menu.selected, BIND_ACTIONS.len()-1);
+        assert_eq!(menu.first_control_row(), 10);
+        menu.scroll_wheel(f32::NAN);
+        menu.scroll_wheel(f32::INFINITY);
+        assert_eq!(menu.selected, BIND_ACTIONS.len()-1);
+        menu.scroll_wheel(2.0);
+        assert_eq!(menu.selected, BIND_ACTIONS.len()-3);
+        let before = prefs.bindings.clone();
+        menu.key(Key::Enter, &mut prefs);
+        assert!(menu.is_capturing_binding());
+        menu.scroll_wheel(-2.0);
+        assert_eq!(menu.selected, BIND_ACTIONS.len()-3);
+        assert_eq!(prefs.bindings, before);
+        menu.key(Key::Escape, &mut prefs);
+        menu.select_tab(SettingsTab::Graphics);
+        menu.scroll_wheel(-2.0);
+        assert_eq!(menu.selected, 0);
+        menu.page_select(Page::Game);
+        menu.scroll_wheel(-2.0);
+        assert_eq!(menu.selected, 0);
     }
 
     #[cfg(feature = "gpu")]

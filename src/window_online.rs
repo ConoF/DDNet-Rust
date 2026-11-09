@@ -557,7 +557,9 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         }
 
         if let Some((_, wheel)) = window.get_scroll_wheel() {
-            if !hud.is_typing() && !menu.is_open() && wheel.abs() >= 1.0 {
+            if menu.is_open() {
+                menu.scroll_wheel(wheel);
+            } else if !hud.is_typing() && wheel.abs() >= 1.0 {
                 weapons.scroll(wheel.round() as i32);
             }
         }

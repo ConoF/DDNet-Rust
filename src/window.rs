@@ -270,7 +270,9 @@ fn play_offline_impl(
             accumulator = Duration::ZERO;
         }
         if let Some((_, wheel)) = window.get_scroll_wheel() {
-            if !menu.is_open() {
+            if menu.is_open() {
+                menu.scroll_wheel(wheel);
+            } else {
                 if wheel > 0.0 { camera.scale = (camera.scale * 1.12).min(8.0); }
                 if wheel < 0.0 { camera.scale = (camera.scale / 1.12).max(0.1); }
             }
