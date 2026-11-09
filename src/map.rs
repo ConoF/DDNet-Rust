@@ -42,6 +42,12 @@ const ALL_MOVE_RESTRICTIONS: u8 =
 const TILEFLAG_XFLIP: u8 = 1;
 const TILEFLAG_YFLIP: u8 = 2;
 const TILEFLAG_ROTATE: u8 = 8;
+const ENTITY_OFFSET: u8 = 191;
+const ENTITY_DOOR: u8 = ENTITY_OFFSET + 49;
+const ENTITY_LASER_SHORT: u8 = ENTITY_OFFSET + 19;
+const ENTITY_LASER_LONG: u8 = ENTITY_OFFSET + 21;
+/// Bound CPU work on untrusted maps with many door generator entities.
+const MAX_PREDICTABLE_DOOR_BEAMS: usize = 16384;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapError {
@@ -105,6 +111,15 @@ pub struct SwitchTile {
     pub delay: u8,
 }
 
+/// CDoorTile's collision result after CDoor::ResetCollision. All generated
+/// door collisions are TILE_STOPA with zero flags; the per-team switch
+/// number determines whether the blocker is currently active.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DoorTile {
+    pub number: u8,
+    pub active_area: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameMap {
     pub width: usize,
@@ -120,6 +135,8 @@ pub struct GameMap {
     tele_check_outs: Vec<Vec<usize>>,
     front_tiles: Option<Vec<Tile>>,
     switch_tiles: Option<Vec<SwitchTile>>,
+    door_tiles: Option<Vec<DoorTile>>,
+    unknown_door_geometry: bool,
 }
 
 fn layer_int(payload: &[u8], offset: usize) -> Option<i32> {
@@ -254,6 +271,7 @@ impl GameMap {
             map.switch_tiles = Some(raw.chunks_exact(4).map(|v| SwitchTile {
                 number: v[0], tile_type: v[1], flags: v[2], delay: v[3],
             }).collect());
+            map.rebuild_static_door_beams();
         }
         Ok(map)
     }
@@ -284,7 +302,8 @@ impl GameMap {
         Ok(Self {
             width, height, tiles, tune_tiles: None, speedup_tiles: None,
             tele_tiles: None, tele_outs: Vec::new(),
-            tele_check_outs: Vec::new(), front_tiles: None, switch_tiles: None,
+            tele_check_outs: Vec::new(), front_tiles: None,
+            switch_tiles: None, door_tiles: None, unknown_door_geometry: false,
         })
     }
 
@@ -300,6 +319,79 @@ impl GameMap {
         let x = (pos.x as i32 / 32).clamp(0, self.width as i32 - 1) as usize;
         let y = (pos.y as i32 / 32).clamp(0, self.height as i32 - 1) as usize;
         Some(y * self.width + x)
+    }
+
+    /// Port of CGameController::OnEntity + CDoor::ResetCollision. A door
+    /// generator (ENTITY_DOOR) reads its 8 neighboring laser-length markers
+    /// in the switch layer, then writes TILE_STOPA onto every crossed tile
+    /// until hitting collision. These door masks are *team dependent*: this
+    /// reconstructs geometry only; actual activation needs SwitchStateNet.
+    fn rebuild_static_door_beams(&mut self) {
+        let Some(tiles) = self.switch_tiles.as_ref() else { return; };
+        let mut door = vec![DoorTile::default(); self.tiles.len()];
+        let directions = [
+            (0isize, 1isize), (1, 1), (1, 0), (1, -1),
+            (0, -1), (-1, -1), (-1, 0), (-1, 1),
+        ];
+        let mut beams = 0usize;
+        let mut any = false;
+        for (origin_index, tile) in tiles.iter().enumerate() {
+            if tile.tile_type != ENTITY_DOOR { continue; }
+            let x = origin_index % self.width;
+            let y = origin_index / self.width;
+            // CDoor::ResetCollision does not construct its beam if the
+            // generator origin is in a normal solid/front collision tile.
+            let base = self.tiles[origin_index].index;
+            let front = self.front_tiles.as_ref().map_or(0, |v| v[origin_index].index);
+            if (1..=TILE_NOLASER).contains(&base)
+                || (1..=TILE_NOLASER).contains(&front)
+            {
+                continue;
+            }
+            for (side, (dx, dy)) in directions.iter().enumerate() {
+                let Some(nx) = x.checked_add_signed(*dx) else { continue; };
+                let Some(ny) = y.checked_add_signed(*dy) else { continue; };
+                if nx >= self.width || ny >= self.height { continue; }
+                let modifier = tiles[ny * self.width + nx].tile_type;
+                if !(ENTITY_LASER_SHORT..=ENTITY_LASER_LONG).contains(&modifier) {
+                    continue;
+                }
+                beams += 1;
+                if beams > MAX_PREDICTABLE_DOOR_BEAMS {
+                    // Never silently simulate an incomplete collision grid.
+                    self.door_tiles = None;
+                    self.unknown_door_geometry = true;
+                    return;
+                }
+                any = true;
+                let angle = side as f32 * std::f32::consts::FRAC_PI_4;
+                let direction = Vec2::new(angle.sin(), angle.cos());
+                let length = 96 + 96 * usize::from(modifier - ENTITY_LASER_SHORT);
+                let origin = self.tile_center(origin_index);
+                for step in 0..length - 1 {
+                    let pos = Vec2::new(
+                        origin.x + direction.x * step as f32,
+                        origin.y + direction.y * step as f32,
+                    );
+                    if self.check_point(pos.x, pos.y) { break; }
+                    if let Some(index) = self.tile_index_at(Vec2::new(
+                        pos.x.round(), pos.y.round(),
+                    )) {
+                        door[index] = DoorTile {
+                            number: tile.number, active_area: true,
+                        };
+                    }
+                }
+            }
+        }
+        if any { self.door_tiles = Some(door); }
+    }
+
+    /// Dynamic switch door beams are separate from the regular switch
+    /// control tiles. Their collision is active only for the matching team.
+    pub fn door_at(&self, pos: Vec2) -> Option<DoorTile> {
+        let tile = *self.door_tiles.as_ref()?.get(self.tile_index_at(pos)?)?;
+        tile.active_area.then_some(tile)
     }
 
     /// Port of collision.cpp::GetMoveRestrictionsRaw. Only rotation and
@@ -486,6 +578,7 @@ impl GameMap {
     /// modeled. A special tile within 32px of the tee can alter a tick.
     /// Fail closed in local prediction instead of displaying fake physics.
     pub fn has_unsupported_physics_near(&self, pos: Vec2) -> bool {
+        if self.unknown_door_geometry { return true; }
         let Some(center) = self.tile_index_at(pos) else { return true; };
         let cx = center % self.width;
         let cy = center / self.width;
@@ -515,6 +608,7 @@ impl GameMap {
                             0 | TILE_TELE_OUT | TILE_TELE_CHECK_OUT)
                     })
                     || self.switch_tiles.as_ref().is_some_and(|layer| layer[index].tile_type != 0)
+                    || self.door_tiles.as_ref().is_some_and(|layer| layer[index].active_area)
                 {
                     return true;
                 }
@@ -1146,6 +1240,60 @@ mod tests {
                 Vec2::new(4.0, -5.0)), Vec2::new(0.0, -5.0));
             assert_eq!(map.clamp_restricted_velocity(center,
                 Vec2::new(-4.0, 5.0)), Vec2::new(-4.0, 5.0));
+        }
+    }
+
+    #[test]
+    fn switch_layer_door_beams_follow_upstream_entities_and_stop_at_walls() {
+        use crate::datafile::{Item, RawBlock};
+        const W: usize = 9;
+        const H: usize = 7;
+        for version in [2i32, 3i32] {
+            let mut game_data = vec![0u8; W * H * 4];
+            let mut switch_data = vec![0u8; W * H * 4];
+            // Door at (2,3), laser-length modifier at (3,3) => +X beam.
+            // A wall at (4,3) stops the beam before it reaches (5,3).
+            switch_data[(3*W+2)*4..(3*W+2)*4+4]
+                .copy_from_slice(&[7, ENTITY_DOOR, 0, 0]);
+            switch_data[(3*W+3)*4..(3*W+3)*4+4]
+                .copy_from_slice(&[7, ENTITY_LASER_SHORT, 0, 0]);
+            game_data[(3*W+4)*4] = TILE_SOLID;
+            let mut game = [0u8; 60];
+            game[4..8].copy_from_slice(&LAYERTYPE_TILES.to_le_bytes());
+            game[16..20].copy_from_slice(&(W as i32).to_le_bytes());
+            game[20..24].copy_from_slice(&(H as i32).to_le_bytes());
+            game[24..28].copy_from_slice(&TILESLAYERFLAG_GAME.to_le_bytes());
+            let offset = if version == 2 { 72 } else { 84 };
+            let mut switch = vec![0u8; offset + 4];
+            switch[4..8].copy_from_slice(&LAYERTYPE_TILES.to_le_bytes());
+            switch[12..16].copy_from_slice(&version.to_le_bytes());
+            switch[16..20].copy_from_slice(&(W as i32).to_le_bytes());
+            switch[20..24].copy_from_slice(&(H as i32).to_le_bytes());
+            switch[24..28].copy_from_slice(&TILESLAYERFLAG_SWITCH.to_le_bytes());
+            switch[offset..offset+4].copy_from_slice(&1i32.to_le_bytes());
+            let file = Datafile {
+                version: 3, item_types: vec![],
+                items: vec![
+                    Item { type_id: MAPITEMTYPE_LAYER, id: 0, payload: &game },
+                    Item { type_id: MAPITEMTYPE_LAYER, id: 1, payload: &switch },
+                ],
+                raw_blocks: vec![
+                    RawBlock { encoded: &game_data, uncompressed_size: None },
+                    RawBlock { encoded: &switch_data, uncompressed_size: None },
+                ],
+            };
+            let map = GameMap::from_datafile(&file, W*H).unwrap();
+            let origin = Vec2::new(80.0, 112.0);
+            assert_eq!(map.door_at(origin), Some(DoorTile {
+                number: 7, active_area: true,
+            }));
+            assert_eq!(map.door_at(Vec2::new(112.0, 112.0)),
+                Some(DoorTile { number: 7, active_area: true }));
+            assert_eq!(map.door_at(Vec2::new(144.0, 112.0)), None);
+            assert!(map.has_unsupported_physics_near(Vec2::new(80.0, 112.0)));
+            assert!(map.has_unsupported_physics_near(Vec2::new(112.0, 112.0)));
+            assert!(!map.has_unsupported_physics_near(Vec2::new(240.0, 176.0)));
+            assert!(!map.unknown_door_geometry);
         }
     }
 
