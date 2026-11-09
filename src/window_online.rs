@@ -31,6 +31,8 @@ use crate::interpolation::{
 };
 use crate::envelope::EnvelopeTimes;
 use crate::frame_stats::FrameTiming;
+#[cfg(feature = "gpu")]
+use crate::frame_stats::GpuProfileWindow;
 use crate::input::{
     correct_next_input_tick, FireCounter, InputFrame, PlayerInput,
     PLAYERFLAG_CHATTING, PLAYERFLAG_PLAYING, PLAYERFLAG_IN_MENU,
@@ -227,6 +229,8 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     let mut reconnect_attempts = 0u8;
     let mut frames_in_sample = 0u32;
     let mut frame_times = FrameTiming::default();
+    #[cfg(feature = "gpu")]
+    let mut gpu_profile_window = GpuProfileWindow::default();
     let mut fire_counter = FireCounter::default();
     let mut input_time_left_ms = None::<i32>;
     let mut predictor = LocalPredictor::new();
@@ -804,6 +808,9 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                     skin: assets.default_skin.as_ref(),
                     game: assets.game_sprites.as_ref(),
                 }, &gpu_tee, &gpu_hud)?;
+            if let Some(profile) = renderer.last_frame_profile() {
+                gpu_profile_window.record(profile);
+            }
             window.update();
         } else {
             window.update_with_buffer(&pixels.pixels, WIDTH, HEIGHT)
@@ -817,11 +824,22 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         let sample_seconds = last_title.elapsed().as_secs_f32();
         if sample_seconds >= 1.0 {
             let displayed_fps = frames_in_sample as f32 / sample_seconds;
+            #[cfg(feature = "gpu")]
+            let gpu_detail = gpu_profile_window.take_means().map_or_else(
+                String::new,
+                |avg| format!(
+                    " | GPU CPU map {:.1} tee+HUD {:.1} upload {:.1} present {:.1} ms | {:.2} MiB/frame | map reuse {:.0}%",
+                    avg.map_ms, avg.sprites_ms, avg.upload_ms, avg.present_ms,
+                    avg.uploaded_mib_per_frame, avg.reuse_percent,
+                ),
+            );
+            #[cfg(not(feature = "gpu"))]
+            let gpu_detail = String::new();
             if let Some(metrics) = frame_times.take_metrics() {
                 window.set_title(&format!(
-                    "DDNet-Rust | {peer} | FPS {:.0} | draw p50 {:.1} p95 {:.1} p99 {:.1} ms | tick {:?} | ACK {} | recovery {} | input {:?}ms",
+                    "DDNet-Rust | {peer} | FPS {:.0} | draw p50 {:.1} p95 {:.1} p99 {:.1} ms{} | tick {:?} | ACK {} | recovery {} | input {:?}ms",
                     displayed_fps, metrics.p50_ms, metrics.p95_ms, metrics.p99_ms,
-                    current_snapshot, session.snapshot_ack_tick(),
+                    gpu_detail, current_snapshot, session.snapshot_ack_tick(),
                     session.is_snapshot_recovering(), input_time_left_ms,
                 ));
             }

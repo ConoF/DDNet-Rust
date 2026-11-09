@@ -7,6 +7,7 @@
 //! are native GPU geometry; original scalable DDNet fonts remain pending.
 
 use minifb::Window;
+use std::time::{Duration, Instant};
 
 use crate::envelope::EnvelopeTimes;
 use crate::gpu_scene::{
@@ -24,6 +25,20 @@ use crate::texture::Texture;
 use crate::online_ui::HudCanvas;
 use crate::graphics::{Camera, Framebuffer, BACKGROUND};
 use crate::map_visual::VisualMap;
+
+/// CPU-side timing of one successfully presented frame. This includes
+/// wgpu queue/surface calls, but not asynchronous GPU execution time.
+/// None indicates that presentation timed out or the frame was rejected.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuFrameProfile {
+    pub map_build: Duration,
+    pub sprites_and_hud: Duration,
+    pub upload: Duration,
+    pub present: Duration,
+    pub uploaded_bytes: usize,
+    pub map_vertices: usize,
+    pub reused_map: bool,
+}
 
 pub const OVERLAY_KEY: u32 = 0x010203;
 const INITIAL_VERTICES: usize = 4096;
@@ -68,6 +83,8 @@ pub struct GpuRenderer {
     overlay_upload: Vec<u8>,
     scene_cache: GpuScene,
     tee_cache: GpuTeeScene,
+    hud_batches: Vec<GpuBatch>,
+    last_frame_profile: Option<GpuFrameProfile>,
     cached_map_camera: Option<Camera>,
     cached_map_vertices: usize,
     quad_bounds: QuadBounds,
@@ -225,6 +242,8 @@ impl GpuRenderer {
             overlay_upload: Vec::new(),
             scene_cache: GpuScene::default(),
             tee_cache: GpuTeeScene::default(),
+            hud_batches: Vec::new(),
+            last_frame_profile: None,
             cached_map_camera: None, cached_map_vertices: 0,
             quad_bounds: Vec::new(),
             occupied_tiles: Vec::new(),
@@ -340,6 +359,12 @@ impl GpuRenderer {
         self.last_hud_vertices
     }
 
+    /// Most recent successful presentation, not a stale profile from a
+    /// previous frame. A timed-out surface acquisition leaves this at None.
+    pub fn last_frame_profile(&self) -> Option<GpuFrameProfile> {
+        self.last_frame_profile
+    }
+
     fn upload_overlay(
         queue: &wgpu::Queue, image: &wgpu::Texture,
         frame: &Framebuffer, upload: &mut Vec<u8>,
@@ -384,11 +409,13 @@ impl GpuRenderer {
         &mut self, map: Option<&VisualMap>, camera: Camera, times: EnvelopeTimes,
         tee: TeeFrame<'_>, tees: &Framebuffer, hud: &GpuHudScene,
     ) -> Result<(), String> {
+        self.last_frame_profile = None;
         if tees.width != self.config.width || tees.height != self.config.height
             || hud.dimensions() != (self.config.width as usize, self.config.height as usize)
         {
             return Err("GPU frame dimensions changed without surface reconfiguration".into());
         }
+        let map_started = Instant::now();
         // Static map vertices already live in the GPU buffer. If the camera
         // has not changed and the map has no time-dependent envelopes, only
         // the tee and HUD tail must be regenerated and transferred.
@@ -414,6 +441,8 @@ impl GpuRenderer {
             scene.foreground.clear();
         }
         let map_vertex_count = scene.vertices.len();
+        let map_build = map_started.elapsed();
+        let sprite_started = Instant::now();
         // For maps with graphics and usable skins, all tee sprites are now
         // actual native vertices. No tee framebuffer or full-screen tee
         // texture is uploaded in this path.
@@ -447,14 +476,14 @@ impl GpuRenderer {
         self.last_hud_vertices = hud.vertices.len();
         let hud_base = u32::try_from(scene.vertices.len())
             .map_err(|_| String::from("GPU HUD vertex offset overflow"))?;
-        let mut hud_batches = Vec::with_capacity(hud.batches.len());
+        self.hud_batches.clear();
         for batch in &hud.batches {
             let index = match batch.texture {
                 HUD_SOLID_SLOT => self.map_image_count,
                 HUD_FONT_SLOT => self.map_image_count + 3,
                 _ => return Err("unknown GPU HUD atlas slot".to_owned()),
             };
-            hud_batches.push(GpuBatch {
+            self.hud_batches.push(GpuBatch {
                 texture: index,
                 start: batch.start.checked_add(hud_base)
                     .ok_or("GPU HUD batch offset overflow")?,
@@ -466,6 +495,8 @@ impl GpuRenderer {
         if scene.vertices.len() > crate::gpu_scene::MAX_FRAME_VERTICES {
             return Err("GPU map, tee and HUD vertex count exceeds frame limit".into());
         }
+        let sprites_and_hud = sprite_started.elapsed();
+        let upload_started = Instant::now();
         let needs_growth = scene.vertices.len() > self.capacity;
         // A newly allocated GPU buffer has no cached prefix.
         let first_uploaded = if reuse_map && !needs_growth {
@@ -493,6 +524,10 @@ impl GpuRenderer {
                 tees, &mut self.overlay_upload,
             );
         }
+        let uploaded_bytes = self.vertex_upload.len()
+            + if native { 0 } else { self.overlay_upload.len() };
+        let upload = upload_started.elapsed();
+        let present_started = Instant::now();
         let output = match self.surface.get_current_texture() {
             Ok(output) => output,
             Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
@@ -545,7 +580,7 @@ impl GpuRenderer {
             }
             pass.set_vertex_buffer(0, self.vertices.slice(..));
             Self::draw_batches(&mut pass, &scene.foreground, &self.images, size);
-            Self::draw_batches(&mut pass, &hud_batches, &self.images, size);
+            Self::draw_batches(&mut pass, &self.hud_batches, &self.images, size);
         }
         self.queue.submit(Some(encoder.finish()));
         output.present();
@@ -556,6 +591,10 @@ impl GpuRenderer {
         };
         self.cached_map_vertices = map_vertex_count;
         self.scene_cache = scene;
+        self.last_frame_profile = Some(GpuFrameProfile {
+            map_build, sprites_and_hud, upload, present: present_started.elapsed(),
+            uploaded_bytes, map_vertices: map_vertex_count, reused_map: reuse_map,
+        });
         Ok(())
     }
 }
