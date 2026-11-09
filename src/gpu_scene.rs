@@ -20,6 +20,13 @@ pub type QuadBounds = Vec<Vec<Option<[f32; 4]>>>;
 /// entire visible rows on every camera movement.
 pub type OccupiedTileRows = Vec<Vec<Vec<usize>>>;
 
+/// Per-map geometry caches built once when new visual assets are loaded.
+#[derive(Clone, Copy, Default)]
+pub struct SceneCaches<'a> {
+    pub quad_bounds: Option<&'a QuadBounds>,
+    pub occupied_tiles: Option<&'a OccupiedTileRows>,
+}
+
 pub fn cache_occupied_tiles(map: &VisualMap) -> OccupiedTileRows {
     map.layers.iter().map(|layer| {
         if layer.width == 0 || layer.width.checked_mul(layer.height) != Some(layer.tiles.len()) {
@@ -315,7 +322,8 @@ pub fn build_gpu_scene_into(
     times: EnvelopeTimes, width: u32, height: u32,
     scene: &mut GpuScene,
 ) -> Result<(), VisualError> {
-    build_gpu_scene_into_cached(map, camera, times, width, height, scene, None, None)
+    build_gpu_scene_into_cached(map, camera, times, width, height, scene,
+        SceneCaches::default())
 }
 
 /// The renderer supplies bounds computed only when a new map is loaded.
@@ -323,8 +331,7 @@ pub fn build_gpu_scene_into(
 pub fn build_gpu_scene_into_cached(
     map: &VisualMap, camera: Camera,
     times: EnvelopeTimes, width: u32, height: u32,
-    scene: &mut GpuScene, bounds: Option<&QuadBounds>,
-    occupied_tiles: Option<&OccupiedTileRows>,
+    scene: &mut GpuScene, caches: SceneCaches<'_>,
 ) -> Result<(), VisualError> {
     if width == 0 || height == 0
         || !(0.05..=16.0).contains(&camera.scale)
@@ -351,7 +358,7 @@ pub fn build_gpu_scene_into_cached(
                     tile += 1;
                     if layer.foreground == foreground {
                         builder.tile_layer(map, layer, camera, times,
-                            occupied_tiles.and_then(|rows| rows.get(tile - 1))
+                            caches.occupied_tiles.and_then(|rows| rows.get(tile - 1))
                                 .map(Vec::as_slice))?;
                     }
                 } else {
@@ -359,7 +366,7 @@ pub fn build_gpu_scene_into_cached(
                     quad += 1;
                     if layer.foreground == foreground {
                         builder.quads(map, layer, camera, times,
-                            bounds.and_then(|b| b.get(quad - 1)).map(Vec::as_slice))?;
+                            caches.quad_bounds.and_then(|b| b.get(quad - 1)).map(Vec::as_slice))?;
                     }
                 }
             }
@@ -507,7 +514,9 @@ mod tests {
             let direct = build_gpu_scene(&map, c, EnvelopeTimes::default(), 32, 32).unwrap();
             let mut cached = GpuScene::default();
             build_gpu_scene_into_cached(&map, c, EnvelopeTimes::default(),
-                32, 32, &mut cached, Some(&quad_cache), None).unwrap();
+                32, 32, &mut cached, SceneCaches {
+                    quad_bounds: Some(&quad_cache), ..SceneCaches::default()
+                }).unwrap();
             assert_eq!(cached, direct);
         }
         map.quad_layers[0].quads[0].pos_env = 0;
@@ -536,7 +545,9 @@ mod tests {
                 .unwrap();
             let mut actual = GpuScene::default();
             build_gpu_scene_into_cached(&m, c, EnvelopeTimes::default(),
-                256, 96, &mut actual, None, Some(&cache)).unwrap();
+                256, 96, &mut actual, SceneCaches {
+                    occupied_tiles: Some(&cache), ..SceneCaches::default()
+                }).unwrap();
             assert_eq!(actual, expected, "camera x={x}");
         }
     }

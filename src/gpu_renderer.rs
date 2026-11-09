@@ -11,7 +11,7 @@ use minifb::Window;
 use crate::envelope::EnvelopeTimes;
 use crate::gpu_scene::{
     build_gpu_scene_into_cached, cache_quad_bounds, cache_occupied_tiles,
-    QuadBounds, OccupiedTileRows, GpuBatch, GpuScene, GpuVertex, VERTEX_STRIDE,
+    QuadBounds, OccupiedTileRows, SceneCaches, GpuBatch, GpuScene, GpuVertex, VERTEX_STRIDE,
 };
 use crate::gpu_tees::{build_gpu_tees, GpuTeeScene, SpriteTextureSlots};
 use crate::gpu_hud::{
@@ -390,7 +390,10 @@ impl GpuRenderer {
         } else if let Some(map) = map {
             build_gpu_scene_into_cached(map, camera, times,
                 self.config.width, self.config.height, &mut scene,
-                Some(&self.quad_bounds), Some(&self.occupied_tiles))
+                SceneCaches {
+                    quad_bounds: Some(&self.quad_bounds),
+                    occupied_tiles: Some(&self.occupied_tiles),
+                })
                 .map_err(|e| format!("GPU scene geometry: {e:?}"))?;
         } else {
             scene.vertices.clear();
