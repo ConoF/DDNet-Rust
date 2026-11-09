@@ -6,6 +6,8 @@
 
 use std::time::Duration;
 use crate::snapshot_delta::SnapshotState;
+use crate::map::GameMap;
+use crate::physics::Vec2;
 
 /// DDNet's network game ticks run at 50Hz. A snapshot's tick distance,
 /// not window render FPS or an assumed one-tick packet period, determines
@@ -93,6 +95,32 @@ pub fn interpolate_snapshots(
     display
 }
 
+
+/// Preserve authoritative snapshot positions when the server may have
+/// teleported a tee between frames. Plain interpolation checks distance
+/// >256px, but teleports can cross only a few tiles and still appear as a
+/// physically impossible glide through walls. A map entry tile determines
+/// whether the transition should snap, not an invented velocity threshold.
+pub fn interpolate_snapshots_with_map(
+    previous: &SnapshotState, current: &SnapshotState,
+    progress: f32, map: &GameMap,
+) -> SnapshotState {
+    let mut display = interpolate_snapshots(previous, current, progress);
+    for item in &mut display.items {
+        if !matches!(item.type_id, 8 | 9) || item.words.len() < 15 {
+            continue;
+        }
+        let Some(old) = previous.find(item.type_id, item.id) else { continue; };
+        let Some(actual) = current.find(item.type_id, item.id) else { continue; };
+        if old.words.len() < 15 || actual.words.len() < 15 { continue; }
+        let old_pos = Vec2::new(old.words[1] as f32, old.words[2] as f32);
+        let new_pos = Vec2::new(actual.words[1] as f32, actual.words[2] as f32);
+        if map.crosses_tee_teleport(old_pos, new_pos) {
+            *item = actual.clone();
+        }
+    }
+    display
+}
 
 /// Interpolate recorded frames for presentation only. Unlike live snapshot
 /// interpolation, a replay must keep the *earlier* frame's object inventory
@@ -213,6 +241,59 @@ mod tests {
         let render = interpolate_snapshots(&old, &released, 0.5);
         assert_eq!(render.find(9, 2).unwrap().words[1], 20);
         assert_eq!(render.find(9, 2).unwrap().words[11], 110);
+    }
+
+    #[test]
+    fn short_teleport_snaps_without_interpolating_across_portal() {
+        use crate::datafile::{Datafile, Item, RawBlock};
+        const W: usize = 10;
+        const H: usize = 3;
+        let mut game = [0u8; 60];
+        game[4..8].copy_from_slice(&2i32.to_le_bytes());
+        game[16..20].copy_from_slice(&(W as i32).to_le_bytes());
+        game[20..24].copy_from_slice(&(H as i32).to_le_bytes());
+        game[24..28].copy_from_slice(&1i32.to_le_bytes());
+        let mut tele = [0u8; 64];
+        tele[4..8].copy_from_slice(&2i32.to_le_bytes());
+        tele[12..16].copy_from_slice(&2i32.to_le_bytes());
+        tele[16..20].copy_from_slice(&(W as i32).to_le_bytes());
+        tele[20..24].copy_from_slice(&(H as i32).to_le_bytes());
+        tele[24..28].copy_from_slice(&2i32.to_le_bytes());
+        tele[60..64].copy_from_slice(&1i32.to_le_bytes());
+        let game_tiles = [0u8; W * H * 4];
+        let mut tele_tiles = [0u8; W * H * 2];
+        tele_tiles[(W + 1) * 2..(W + 1) * 2 + 2]
+            .copy_from_slice(&[1, crate::map::TILE_TELE_IN]);
+        tele_tiles[(W + 7) * 2..(W + 7) * 2 + 2]
+            .copy_from_slice(&[1, crate::map::TILE_TELE_OUT]);
+        let file = Datafile {
+            version: 3, item_types: vec![],
+            items: vec![
+                Item { type_id: 5, id: 0, payload: &game },
+                Item { type_id: 5, id: 1, payload: &tele },
+            ],
+            raw_blocks: vec![
+                RawBlock { encoded: &game_tiles, uncompressed_size: None },
+                RawBlock { encoded: &tele_tiles, uncompressed_size: None },
+            ],
+        };
+        let map = GameMap::from_datafile(&file, W * H).unwrap();
+        let previous = snap(2, 16, 48, 0, 0);
+        let current = snap(2, 240, 48, 0, 0);
+        assert_eq!(
+            interpolate_snapshots(&previous, &current, 0.5)
+                .find(9, 2).unwrap().words[1], 128,
+        );
+        assert_eq!(
+            interpolate_snapshots_with_map(&previous, &current, 0.5, &map),
+            current,
+        );
+        let no_portal = GameMap::from_tile_bytes(W, H, &game_tiles).unwrap();
+        assert_eq!(
+            interpolate_snapshots_with_map(&previous, &current, 0.5, &no_portal)
+                .find(9, 2).unwrap().words[1], 128,
+        );
+        assert_eq!(previous.find(9, 2).unwrap().words[1], 16);
     }
 
     #[test]

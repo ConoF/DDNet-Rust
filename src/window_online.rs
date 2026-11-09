@@ -27,7 +27,7 @@ use crate::ingame_menu::{MenuAction, MenuState, ServerStatus};
 use crate::keybinds::BindSnapshot;
 use crate::netobjects::CHARACTER_TYPE;
 use crate::interpolation::{
-    camera_follow_fraction, interpolate_snapshots, online_interpolation_fraction,
+    camera_follow_fraction, interpolate_snapshots_with_map, online_interpolation_fraction,
 };
 use crate::envelope::EnvelopeTimes;
 use crate::frame_stats::FrameTiming;
@@ -56,6 +56,26 @@ const MAX_RECEIVE_TIME: Duration = Duration::from_millis(3);
 fn receive_budget_exhausted(processed: usize, elapsed: Duration) -> bool {
     processed >= MAX_PACKETS_PER_FRAME
         || (processed >= 8 && elapsed >= MAX_RECEIVE_TIME)
+}
+
+fn authoritative_local_teleport(
+    previous: &SnapshotState, current: &SnapshotState,
+    map: &crate::map::GameMap,
+) -> Option<Vec2> {
+    let id = local_character_id(current)?;
+    let old = previous.find(CHARACTER_TYPE, id)
+        .and_then(CharacterCoreNet::from_object)?;
+    let new = current.find(CHARACTER_TYPE, id)
+        .and_then(CharacterCoreNet::from_object)?;
+    let start = Vec2::new(old.x as f32, old.y as f32);
+    let end = Vec2::new(new.x as f32, new.y as f32);
+    let dx = i64::from(new.x) - i64::from(old.x);
+    let dy = i64::from(new.y) - i64::from(old.y);
+    if dx.abs() > 256 || dy.abs() > 256 || map.crosses_tee_teleport(start, end) {
+        Some(end)
+    } else {
+        None
+    }
 }
 
 fn preferred_character(snapshot: &SnapshotState) -> Option<Vec2> {
@@ -419,6 +439,21 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                         socket.send(&wire).map_err(|e| format!("UDP send: {e}"))?;
                     }
                     GameAction::SnapshotDecoded { tick, .. } => {
+                        if let (Some(old_tick), Some(map), Some(current)) = (
+                            current_snapshot, session.loaded_map.as_ref(),
+                            session.snapshot_state(tick),
+                        ) {
+                            if let Some(previous) = session.snapshot_state(old_tick) {
+                                if let Some(destination) =
+                                    authoritative_local_teleport(previous, current, map)
+                                {
+                                    // Snap the camera and clear old input replay
+                                    // when crossing an authoritative teleport.
+                                    camera.center = destination;
+                                    predictor.reset();
+                                }
+                            }
+                        }
                         if let (Some(out), Some(old_tick)) =
                             (audio.as_mut().filter(|_| connection.sound_enabled), current_snapshot)
                         {
@@ -636,7 +671,11 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                         current_snapshot.unwrap_or_default(),
                         last_snapshot_at.elapsed(),
                     );
-                    interpolate_snapshots(previous, newest, progress)
+                    if let Some(map) = session.loaded_map.as_ref() {
+                        interpolate_snapshots_with_map(previous, newest, progress, map)
+                    } else {
+                        newest.clone()
+                    }
                 } else {
                     newest.clone()
                 }
