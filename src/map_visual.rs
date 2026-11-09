@@ -465,10 +465,11 @@ fn blit_tile(
     let mut clipped_bottom = bottom.clamp(0, i64::from(frame.height));
     if let Some([x0,y0,x1,y1]) = clip {
         if x1 <= x0 || y1 <= y0 { return; }
-        clipped_left = clipped_left.max(x0.ceil() as i64);
-        clipped_top = clipped_top.max(y0.ceil() as i64);
-        clipped_right = clipped_right.min(x1.ceil() as i64);
-        clipped_bottom = clipped_bottom.min(y1.ceil() as i64);
+        // DDNet's Graphics::ClipEnable uses rounded framebuffer coordinates.
+        clipped_left = clipped_left.max(x0.round() as i64);
+        clipped_top = clipped_top.max(y0.round() as i64);
+        clipped_right = clipped_right.min(x1.round() as i64);
+        clipped_bottom = clipped_bottom.min(y1.round() as i64);
     }
     for sy in clipped_top..clipped_bottom {
         for sx in clipped_left..clipped_right {
