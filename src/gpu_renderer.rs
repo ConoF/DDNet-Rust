@@ -9,7 +9,7 @@
 use minifb::Window;
 
 use crate::envelope::EnvelopeTimes;
-use crate::gpu_scene::{build_gpu_scene, GpuBatch, GpuScene, GpuVertex, VERTEX_STRIDE};
+use crate::gpu_scene::{build_gpu_scene_into, GpuBatch, GpuScene, GpuVertex, VERTEX_STRIDE};
 use crate::gpu_tees::{build_gpu_tees, GpuTeeScene, SpriteTextureSlots};
 use crate::gpu_hud::{
     font_atlas_rgba, GpuHudScene, FONT_WIDTH, FONT_HEIGHT,
@@ -60,6 +60,7 @@ pub struct GpuRenderer {
     overlay_vertices: wgpu::Buffer,
     // Reused every frame; prevents large temporary CPU upload allocations.
     vertex_upload: Vec<u8>,
+    scene_cache: GpuScene,
 }
 
 impl GpuRenderer {
@@ -210,6 +211,7 @@ impl GpuRenderer {
             overlay_tee,
             vertices, capacity: INITIAL_VERTICES, overlay_vertices,
             vertex_upload: Vec::with_capacity(INITIAL_VERTICES * VERTEX_STRIDE),
+            scene_cache: GpuScene::default(),
         })
     }
 
@@ -359,10 +361,18 @@ impl GpuRenderer {
         {
             return Err("GPU frame dimensions changed without surface reconfiguration".into());
         }
-        let mut scene = map.map(|map| {
-            build_gpu_scene(map, camera, times, self.config.width, self.config.height)
-        }).transpose().map_err(|e| format!("GPU scene geometry: {e:?}"))?
-            .unwrap_or_default();
+        // Reuse map geometry allocations even when the camera moves and
+        // envelopes require a full rebuild of the visible triangles.
+        let mut scene = std::mem::take(&mut self.scene_cache);
+        if let Some(map) = map {
+            build_gpu_scene_into(map, camera, times,
+                self.config.width, self.config.height, &mut scene)
+                .map_err(|e| format!("GPU scene geometry: {e:?}"))?;
+        } else {
+            scene.vertices.clear();
+            scene.background.clear();
+            scene.foreground.clear();
+        }
         // For maps with graphics and usable skins, all tee sprites are now
         // actual native vertices. No tee framebuffer or full-screen tee
         // texture is uploaded in this path.
@@ -481,6 +491,7 @@ impl GpuRenderer {
         }
         self.queue.submit(Some(encoder.finish()));
         output.present();
+        self.scene_cache = scene;
         Ok(())
     }
 }

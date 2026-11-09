@@ -210,14 +210,30 @@ pub fn build_gpu_scene(
     map: &VisualMap, camera: Camera,
     times: EnvelopeTimes, width: u32, height: u32,
 ) -> Result<GpuScene, VisualError> {
+    let mut scene = GpuScene::default();
+    build_gpu_scene_into(map, camera, times, width, height, &mut scene)?;
+    Ok(scene)
+}
+
+/// Rebuild only visible geometry while preserving Vec capacities from the
+/// previous frame. No stale foreground/background batches survive a redraw.
+pub fn build_gpu_scene_into(
+    map: &VisualMap, camera: Camera,
+    times: EnvelopeTimes, width: u32, height: u32,
+    scene: &mut GpuScene,
+) -> Result<(), VisualError> {
     if width == 0 || height == 0
         || !(0.05..=16.0).contains(&camera.scale)
         || !camera.center.x.is_finite() || !camera.center.y.is_finite()
     {
         return Err(VisualError::Render(RenderError::InvalidCamera));
     }
+    scene.vertices.clear();
+    scene.background.clear();
+    scene.foreground.clear();
+    // Reborrow existing storage without reallocating the largest scene arrays.
     let mut builder = Builder {
-        scene: GpuScene::default(), w: width as f32, h: height as f32,
+        scene: std::mem::take(scene), w: width as f32, h: height as f32,
     };
     for foreground in [false, true] {
         let mut tile = 0;
@@ -240,7 +256,8 @@ pub fn build_gpu_scene(
             }
         }
     }
-    Ok(builder.scene)
+    *scene = builder.scene;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -314,6 +331,27 @@ mod tests {
         assert_eq!(buffer.capacity(), capacity);
         GpuScene::default().write_vertex_bytes(&mut buffer);
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn in_place_scene_rebuild_reuses_capacity_and_drops_stale_batches() {
+        let m = map();
+        let mut reused = GpuScene::default();
+        build_gpu_scene_into(&m, camera(), EnvelopeTimes::default(),
+            32, 32, &mut reused).unwrap();
+        let previous_capacity = reused.vertices.capacity();
+        let expected = reused.clone();
+        build_gpu_scene_into(&m, camera(), EnvelopeTimes::default(),
+            32, 32, &mut reused).unwrap();
+        assert_eq!(reused, expected);
+        assert_eq!(reused.vertices.capacity(), previous_capacity);
+        let mut foreground = m.clone();
+        foreground.quad_layers[0].foreground = true;
+        build_gpu_scene_into(&foreground, camera(), EnvelopeTimes::default(),
+            32, 32, &mut reused).unwrap();
+        assert_eq!(reused.background.len(), 1);
+        assert_eq!(reused.foreground.len(), 1);
+        assert_eq!(reused.vertices.len(), 12);
     }
 
     #[test]
