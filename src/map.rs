@@ -1102,6 +1102,54 @@ mod tests {
     }
 
     #[test]
+    fn front_layer_stoppers_apply_to_prediction_in_both_map_versions() {
+        use crate::datafile::{Item, RawBlock};
+        const W: usize = 5;
+        const H: usize = 5;
+        let game_data = [0u8; W * H * 4];
+        let mut front_data = [0u8; W * H * 4];
+        // A rotated STOP to the right of the tee. It does not need a
+        // corresponding game tile to restrict movement.
+        let right = (2 * W + 3) * 4;
+        front_data[right] = TILE_STOP;
+        front_data[right + 1] = 11; // ROTATION_270 -> CANTMOVE_RIGHT
+        for version in [2i32, 3i32] {
+            let mut game = [0u8; 60];
+            game[4..8].copy_from_slice(&LAYERTYPE_TILES.to_le_bytes());
+            game[16..20].copy_from_slice(&(W as i32).to_le_bytes());
+            game[20..24].copy_from_slice(&(H as i32).to_le_bytes());
+            game[24..28].copy_from_slice(&TILESLAYERFLAG_GAME.to_le_bytes());
+            let offset = if version == 2 { 68 } else { 80 };
+            let mut front = vec![0u8; offset + 4];
+            front[4..8].copy_from_slice(&LAYERTYPE_TILES.to_le_bytes());
+            front[12..16].copy_from_slice(&version.to_le_bytes());
+            front[16..20].copy_from_slice(&(W as i32).to_le_bytes());
+            front[20..24].copy_from_slice(&(H as i32).to_le_bytes());
+            front[24..28].copy_from_slice(&TILESLAYERFLAG_FRONT.to_le_bytes());
+            front[offset..offset + 4].copy_from_slice(&1i32.to_le_bytes());
+            let file = Datafile {
+                version: 3, item_types: vec![],
+                items: vec![
+                    Item { type_id: MAPITEMTYPE_LAYER, id: 0, payload: &game },
+                    Item { type_id: MAPITEMTYPE_LAYER, id: 1, payload: &front },
+                ],
+                raw_blocks: vec![
+                    RawBlock { encoded: &game_data, uncompressed_size: None },
+                    RawBlock { encoded: &front_data, uncompressed_size: None },
+                ],
+            };
+            let map = GameMap::from_datafile(&file, W * H).unwrap();
+            let center = Vec2::new(80.0, 80.0);
+            assert!(!map.has_unsupported_physics_near(center));
+            assert_eq!(map.move_restrictions(center, 18.0), CANTMOVE_RIGHT);
+            assert_eq!(map.clamp_restricted_velocity(center,
+                Vec2::new(4.0, -5.0)), Vec2::new(0.0, -5.0));
+            assert_eq!(map.clamp_restricted_velocity(center,
+                Vec2::new(-4.0, 5.0)), Vec2::new(-4.0, 5.0));
+        }
+    }
+
+    #[test]
     fn legacy_and_modern_tune_layers_decode_zone_numbers() {
         use crate::datafile::{Item, RawBlock};
         for version in [2i32, 3i32] {
