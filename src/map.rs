@@ -19,6 +19,12 @@ const TILESLAYERFLAG_SWITCH: i32 = 1 << 4;
 const TILESLAYERFLAG_TUNE: i32 = 1 << 5;
 pub const TILE_SPEED_BOOST_OLD: u8 = 28;
 pub const TILE_SPEED_BOOST: u8 = 29;
+pub const TILE_TELE_IN: u8 = 26;
+pub const TILE_TELE_OUT: u8 = 27;
+pub const TILE_TELE_CHECK_OUT: u8 = 30;
+pub const TILE_TELE_CHECK_IN: u8 = 31;
+pub const TILE_TELE_EVIL_IN: u8 = 10;
+pub const TILE_TELE_CHECK_EVIL_IN: u8 = 63;
 const TILE_SOLID: u8 = 1;
 const TILE_NOHOOK: u8 = 3;
 const TILE_NOLASER: u8 = 4;
@@ -94,6 +100,10 @@ pub struct GameMap {
     tune_tiles: Option<Vec<TuneTile>>,
     speedup_tiles: Option<Vec<SpeedupTile>>,
     tele_tiles: Option<Vec<TeleTile>>,
+    /// Indexed by the map's visible teleporter number (1..=255).
+    /// The server randomly selects an exit when there are several.
+    tele_outs: Vec<Vec<usize>>,
+    tele_check_outs: Vec<Vec<usize>>,
     front_tiles: Option<Vec<Tile>>,
     switch_tiles: Option<Vec<SwitchTile>>,
 }
@@ -196,8 +206,26 @@ impl GameMap {
         if let Some(raw) = load_special_layer(
             file, width, height, tile_count, TILESLAYERFLAG_TELE, 60, 2,
         )? {
-            map.tele_tiles = Some(raw.chunks_exact(2)
-                .map(|v| TeleTile { number: v[0], tile_type: v[1] }).collect());
+            let tiles: Vec<TeleTile> = raw.chunks_exact(2)
+                .map(|v| TeleTile { number: v[0], tile_type: v[1] }).collect();
+            // Same grouping as CCollision::Init: number N uses bucket N-1,
+            // and CTeleTile at (x,y) represents its pixel center (32x+16,32y+16).
+            // Store grid indices to keep GameMap Eq and avoid allocating Vec2
+            // objects for every teleport destination.
+            let mut outs = vec![Vec::new(); 256];
+            let mut check_outs = vec![Vec::new(); 256];
+            for (index, tile) in tiles.iter().enumerate() {
+                if tile.number == 0 { continue; }
+                match tile.tile_type {
+                    TILE_TELE_OUT => outs[usize::from(tile.number)].push(index),
+                    TILE_TELE_CHECK_OUT =>
+                        check_outs[usize::from(tile.number)].push(index),
+                    _ => {}
+                }
+            }
+            map.tele_outs = outs;
+            map.tele_check_outs = check_outs;
+            map.tele_tiles = Some(tiles);
         }
         if let Some(raw) = load_special_layer(
             file, width, height, tile_count, TILESLAYERFLAG_FRONT, 68, 4,
@@ -241,7 +269,8 @@ impl GameMap {
             .collect();
         Ok(Self {
             width, height, tiles, tune_tiles: None, speedup_tiles: None,
-            tele_tiles: None, front_tiles: None, switch_tiles: None,
+            tele_tiles: None, tele_outs: Vec::new(),
+            tele_check_outs: Vec::new(), front_tiles: None, switch_tiles: None,
         })
     }
 
@@ -257,6 +286,73 @@ impl GameMap {
         let x = (pos.x as i32 / 32).clamp(0, self.width as i32 - 1) as usize;
         let y = (pos.y as i32 / 32).clamp(0, self.height as i32 - 1) as usize;
         Some(y * self.width + x)
+    }
+
+    /// A CTeleTile with zero number/type has no active teleport behavior.
+    pub fn tele_tile_at(&self, position: Vec2) -> Option<TeleTile> {
+        let tile = *self.tele_tiles.as_ref()?.get(self.tile_index_at(position)?)?;
+        (tile.number != 0 && tile.tile_type != 0).then_some(tile)
+    }
+
+    /// An unambiguous normal exit is the only destination the client may
+    /// know without the server's random choice. No exit or >1 exits -> None.
+    pub fn unique_tele_exit(&self, number: u8) -> Option<Vec2> {
+        let &[index] = self.tele_outs.get(usize::from(number))?.as_slice() else {
+            return None;
+        };
+        Some(self.tile_center(index))
+    }
+
+    /// Count actual normal teleporter destinations, for diagnostics.
+    pub fn tele_exit_count(&self, number: u8) -> usize {
+        self.tele_outs.get(usize::from(number)).map_or(0, Vec::len)
+    }
+
+    /// Server checkpoint teleport logic searches checkpoint N down to 1
+    /// and falls back to spawn when none exists. A multi-exit checkpoint
+    /// cannot be predicted because the server chooses randomly.
+    pub fn unique_checkpoint_exit(&self, last_checkpoint: u8) -> Option<Vec2> {
+        for number in (1..=last_checkpoint).rev() {
+            match self.tele_check_outs.get(usize::from(number))?.as_slice() {
+                [] => continue,
+                &[index] => return Some(self.tile_center(index)),
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    fn tile_center(&self, index: usize) -> Vec2 {
+        Vec2::new(
+            (index % self.width) as f32 * 32.0 + 16.0,
+            (index / self.width) as f32 * 32.0 + 16.0,
+        )
+    }
+
+    /// Only tee-entry teleports can cause a coordinate discontinuity.
+    /// Weapon/hook portal types and exit markers do not teleport tees.
+    fn is_tee_tele_entry_at(&self, position: Vec2) -> bool {
+        self.tele_tile_at(position).is_some_and(|tile| matches!(
+            tile.tile_type, TILE_TELE_IN | TILE_TELE_EVIL_IN
+                | TILE_TELE_CHECK_IN | TILE_TELE_CHECK_EVIL_IN
+        ))
+    }
+
+    /// Detect teleports traversed within one server snapshot interval, even
+    /// when the tee jumps across a single 32px portal between endpoints.
+    pub fn crosses_tee_teleport(&self, start: Vec2, end: Vec2) -> bool {
+        if self.tele_tiles.is_none() { return false; }
+        let delta_x = end.x - start.x;
+        let delta_y = end.y - start.y;
+        let distance = delta_x.hypot(delta_y);
+        if !distance.is_finite() || distance > 8192.0 { return true; }
+        let steps = (distance / 16.0).ceil().max(1.0) as usize;
+        (0..=steps).any(|i| {
+            let t = i as f32 / steps as f32;
+            self.is_tee_tele_entry_at(Vec2::new(
+                start.x + delta_x * t, start.y + delta_y * t,
+            ))
+        })
     }
 
     /// Return only active speedup tiles; upstream IsSpeedup checks Force > 0.
@@ -763,6 +859,73 @@ mod tests {
                 }).collect(),
             };
             assert!(GameMap::from_datafile(&bad_file, W * H).is_err());
+        }
+    }
+
+    #[test]
+    fn teleporter_exits_and_checkpoint_fallback_follow_ddnet_numbering() {
+        use crate::datafile::{Item, RawBlock};
+        const W: usize = 12;
+        const H: usize = 4;
+        for version in [2i32, 3i32] {
+            let mut game = vec![0u8; 60];
+            game[4..8].copy_from_slice(&LAYERTYPE_TILES.to_le_bytes());
+            game[16..20].copy_from_slice(&(W as i32).to_le_bytes());
+            game[20..24].copy_from_slice(&(H as i32).to_le_bytes());
+            game[24..28].copy_from_slice(&TILESLAYERFLAG_GAME.to_le_bytes());
+            let tele_offset = if version == 2 { 60 } else { 72 };
+            let mut tele = vec![0u8; tele_offset + 4];
+            tele[4..8].copy_from_slice(&LAYERTYPE_TILES.to_le_bytes());
+            tele[12..16].copy_from_slice(&version.to_le_bytes());
+            tele[16..20].copy_from_slice(&(W as i32).to_le_bytes());
+            tele[20..24].copy_from_slice(&(H as i32).to_le_bytes());
+            tele[24..28].copy_from_slice(&TILESLAYERFLAG_TELE.to_le_bytes());
+            tele[tele_offset..tele_offset+4].copy_from_slice(&1i32.to_le_bytes());
+            let game_data = vec![0u8; W * H * 4];
+            let mut tele_data = vec![0u8; W * H * 2];
+            let mut place = |x: usize, y: usize, number: u8, kind: u8| {
+                let index = (y * W + x) * 2;
+                tele_data[index..index+2].copy_from_slice(&[number, kind]);
+            };
+            place(1, 1, 4, TILE_TELE_IN);
+            place(8, 1, 4, TILE_TELE_OUT);
+            place(3, 2, 7, TILE_TELE_OUT);
+            place(6, 2, 7, TILE_TELE_OUT);
+            place(9, 2, 2, TILE_TELE_CHECK_OUT);
+            place(10, 2, 5, TILE_TELE_CHECK_OUT);
+            place(11, 2, 5, TILE_TELE_CHECK_OUT);
+            let file = Datafile {
+                version: 3, item_types: vec![],
+                items: vec![
+                    Item { type_id: MAPITEMTYPE_LAYER, id: 0, payload: &game },
+                    Item { type_id: MAPITEMTYPE_LAYER, id: 1, payload: &tele },
+                ],
+                raw_blocks: vec![
+                    RawBlock { encoded: &game_data, uncompressed_size: None },
+                    RawBlock { encoded: &tele_data, uncompressed_size: None },
+                ],
+            };
+            let map = GameMap::from_datafile(&file, W * H).unwrap();
+            assert_eq!(map.tele_exit_count(4), 1);
+            assert_eq!(map.unique_tele_exit(4), Some(Vec2::new(272.0, 48.0)));
+            assert_eq!(map.tele_exit_count(7), 2);
+            assert_eq!(map.unique_tele_exit(7), None);
+            assert_eq!(map.tele_exit_count(0), 0);
+            assert_eq!(map.unique_tele_exit(0), None);
+            assert_eq!(map.unique_checkpoint_exit(4),
+                Some(Vec2::new(304.0, 80.0)));
+            assert_eq!(map.unique_checkpoint_exit(8), None,
+                "server randomly chooses between checkpoint 5 exits");
+            assert_eq!(map.unique_checkpoint_exit(1), None);
+            assert!(map.crosses_tee_teleport(
+                Vec2::new(16.0, 48.0), Vec2::new(100.0, 48.0),
+            ));
+            assert!(!map.crosses_tee_teleport(
+                Vec2::new(16.0, 16.0), Vec2::new(100.0, 16.0),
+            ));
+            assert!(!map.crosses_tee_teleport(
+                Vec2::new(245.0, 48.0), Vec2::new(290.0, 48.0),
+            ), "a teleport exit is not a tee teleport input");
         }
     }
 
