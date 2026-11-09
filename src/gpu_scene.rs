@@ -41,13 +41,22 @@ impl GpuScene {
     /// Explicit byte layout, avoiding unsafe casts and alignment assumptions.
     pub fn vertex_bytes(&self) -> Vec<u8> {
         let mut result = Vec::with_capacity(self.byte_len());
+        self.write_vertex_bytes(&mut result);
+        result
+    }
+
+    /// Serialize into a reusable upload buffer. The GPU frame loop keeps this
+    /// allocation between frames instead of allocating up to 10 MiB of
+    /// temporary vertex data on every redraw.
+    pub fn write_vertex_bytes(&self, result: &mut Vec<u8>) {
+        result.clear();
+        result.reserve(self.byte_len());
         for v in &self.vertices {
             for n in v.clip.iter().chain(v.uv.iter()) {
                 result.extend_from_slice(&n.to_le_bytes());
             }
             result.extend_from_slice(&v.color);
         }
-        result
     }
 }
 
@@ -289,6 +298,22 @@ mod tests {
         let bytes = scene.vertex_bytes();
         assert_eq!(bytes.len(), 12 * VERTEX_STRIDE);
         assert_eq!(&bytes[..4], &(-1.0f32).to_le_bytes());
+    }
+
+    #[test]
+    fn reusable_vertex_upload_matches_fresh_serialization_and_clears_old_data() {
+        let scene = build_gpu_scene(&map(), camera(),
+            EnvelopeTimes::default(), 32, 32).unwrap();
+        let expected = scene.vertex_bytes();
+        let mut buffer = vec![0xff; expected.len() + 50];
+        scene.write_vertex_bytes(&mut buffer);
+        assert_eq!(buffer, expected);
+        let capacity = buffer.capacity();
+        scene.write_vertex_bytes(&mut buffer);
+        assert_eq!(buffer, expected);
+        assert_eq!(buffer.capacity(), capacity);
+        GpuScene::default().write_vertex_bytes(&mut buffer);
+        assert!(buffer.is_empty());
     }
 
     #[test]

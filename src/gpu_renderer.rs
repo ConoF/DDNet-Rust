@@ -58,6 +58,8 @@ pub struct GpuRenderer {
     vertices: wgpu::Buffer,
     capacity: usize,
     overlay_vertices: wgpu::Buffer,
+    // Reused every frame; prevents large temporary CPU upload allocations.
+    vertex_upload: Vec<u8>,
 }
 
 impl GpuRenderer {
@@ -207,6 +209,7 @@ impl GpuRenderer {
             last_sprite_vertices: 0, last_hud_vertices: 0,
             overlay_tee,
             vertices, capacity: INITIAL_VERTICES, overlay_vertices,
+            vertex_upload: Vec::with_capacity(INITIAL_VERTICES * VERTEX_STRIDE),
         })
     }
 
@@ -408,7 +411,7 @@ impl GpuRenderer {
         if scene.vertices.len() > crate::gpu_scene::MAX_FRAME_VERTICES {
             return Err("GPU map, tee and HUD vertex count exceeds frame limit".into());
         }
-        let bytes = scene.vertex_bytes();
+        scene.write_vertex_bytes(&mut self.vertex_upload);
         if scene.vertices.len() > self.capacity {
             self.capacity = scene.vertices.len().next_power_of_two();
             self.vertices = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -418,7 +421,9 @@ impl GpuRenderer {
                 mapped_at_creation: false,
             });
         }
-        if !bytes.is_empty() { self.queue.write_buffer(&self.vertices, 0, &bytes); }
+        if !self.vertex_upload.is_empty() {
+            self.queue.write_buffer(&self.vertices, 0, &self.vertex_upload);
+        }
         if !native {
             Self::upload_overlay(&self.queue, &self.overlay_tee._texture, tees);
         }
