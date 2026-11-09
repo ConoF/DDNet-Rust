@@ -3,6 +3,7 @@
 
 use crate::game_protocol::{encode_message, MessageError, MessageId};
 use crate::protocol::{write_int, write_string, Reader};
+use crate::tuning_wire::{ServerTuning, SV_TUNEPARAMS};
 
 pub const SV_MOTD: u16 = 1;
 pub const SV_BROADCAST: u16 = 2;
@@ -18,6 +19,7 @@ pub enum ServerGameplayMessage {
     Motd(String),
     Broadcast(String),
     Chat { team: i32, client_id: i32, text: String },
+    Tuning(ServerTuning),
 }
 
 /// Unknown game messages are not an error. This is essential for servers
@@ -37,6 +39,9 @@ pub fn decode_server_message(
             } else {
                 ServerGameplayMessage::Broadcast(text.to_owned())
             }
+        }
+        SV_TUNEPARAMS => {
+            return Ok(Some(ServerGameplayMessage::Tuning(ServerTuning::decode(payload)?)));
         }
         SV_CHAT => {
             let team = reader.read_int()?;
@@ -188,6 +193,20 @@ mod tests {
         write_int(1, &mut invalid);
         write_string("bad", &mut invalid).unwrap();
         assert_eq!(decode_server_message(SV_CHAT, &invalid), Err(MessageError::InvalidMessage));
+    }
+
+    #[test]
+    fn tune_params_is_regular_game_message_six() {
+        let mut payload = Vec::new();
+        for _ in 0..47 { write_int(100, &mut payload); }
+        let wire = crate::game_protocol::encode_message(
+            MessageId::Regular { system: false, number: 6 }, &payload,
+        ).unwrap();
+        let decoded = decode_message(&wire).unwrap();
+        match decode_server_message(6, decoded.payload).unwrap() {
+            Some(ServerGameplayMessage::Tuning(t)) => assert_eq!(t.values, [100; 47]),
+            other => panic!("unexpected message {other:?}"),
+        }
     }
 
     #[test]
