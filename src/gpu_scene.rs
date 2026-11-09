@@ -235,29 +235,34 @@ pub fn build_gpu_scene_into(
     let mut builder = Builder {
         scene: std::mem::take(scene), w: width as f32, h: height as f32,
     };
-    for foreground in [false, true] {
-        let mut tile = 0;
-        let mut quad = 0;
-        while tile < map.layers.len() || quad < map.quad_layers.len() {
-            let next_tile = map.layers.get(tile).map_or(usize::MAX, |l| l.order);
-            let next_quad = map.quad_layers.get(quad).map_or(usize::MAX, |l| l.order);
-            if next_tile <= next_quad {
-                let layer = &map.layers[tile];
-                tile += 1;
-                if layer.foreground == foreground {
-                    builder.tile_layer(map, layer, camera, times)?;
-                }
-            } else {
-                let layer = &map.quad_layers[quad];
-                quad += 1;
-                if layer.foreground == foreground {
-                    builder.quads(map, layer, camera, times)?;
+    let result = (|| {
+        for foreground in [false, true] {
+            let mut tile = 0;
+            let mut quad = 0;
+            while tile < map.layers.len() || quad < map.quad_layers.len() {
+                let next_tile = map.layers.get(tile).map_or(usize::MAX, |l| l.order);
+                let next_quad = map.quad_layers.get(quad).map_or(usize::MAX, |l| l.order);
+                if next_tile <= next_quad {
+                    let layer = &map.layers[tile];
+                    tile += 1;
+                    if layer.foreground == foreground {
+                        builder.tile_layer(map, layer, camera, times)?;
+                    }
+                } else {
+                    let layer = &map.quad_layers[quad];
+                    quad += 1;
+                    if layer.foreground == foreground {
+                        builder.quads(map, layer, camera, times)?;
+                    }
                 }
             }
         }
-    }
+        Ok(())
+    })();
+    // Always hand the allocation back, including on invalid maps. The next
+    // frame clears incomplete geometry before generating fresh batches.
     *scene = builder.scene;
-    Ok(())
+    result
 }
 
 #[cfg(test)]
@@ -352,6 +357,24 @@ mod tests {
         assert_eq!(reused.background.len(), 1);
         assert_eq!(reused.foreground.len(), 1);
         assert_eq!(reused.vertices.len(), 12);
+    }
+
+    #[test]
+    fn invalid_map_keeps_reusable_scene_allocation_for_recovery() {
+        let mut m = map();
+        let mut reusable = GpuScene::default();
+        build_gpu_scene_into(&m, camera(), EnvelopeTimes::default(),
+            32, 32, &mut reusable).unwrap();
+        let capacity = reusable.vertices.capacity();
+        m.layers[0].width = 2; // Inconsistent tile count: error after first quad.
+        assert_eq!(build_gpu_scene_into(&m, camera(), EnvelopeTimes::default(),
+            32, 32, &mut reusable), Err(VisualError::InvalidMap));
+        assert_eq!(reusable.vertices.capacity(), capacity);
+        m.layers[0].width = 1;
+        build_gpu_scene_into(&m, camera(), EnvelopeTimes::default(),
+            32, 32, &mut reusable).unwrap();
+        assert_eq!(reusable, build_gpu_scene(&m, camera(),
+            EnvelopeTimes::default(), 32, 32).unwrap());
     }
 
     #[test]
