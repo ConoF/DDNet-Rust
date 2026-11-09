@@ -16,6 +16,8 @@ use crate::gpu_renderer::{GpuRenderer, TeeFrame, OVERLAY_KEY};
 #[cfg(feature = "gpu")]
 use crate::gpu_hud::GpuHudScene;
 #[cfg(feature = "gpu")]
+use crate::frame_stats::GpuProfileWindow;
+#[cfg(feature = "gpu")]
 use crate::online_ui::HudCanvas;
 use crate::hook::HookState;
 use crate::map::GameMap;
@@ -172,6 +174,8 @@ fn play_offline_impl(
     let mut previous = Instant::now();
     let mut accumulator = Duration::ZERO;
     let mut frames: usize = 0;
+    #[cfg(feature = "gpu")]
+    let mut gpu_smoke_profile = GpuProfileWindow::default();
     let mut menu = MenuState::new();
     if let Some((page, tab)) = menu_page {
         menu.toggle();
@@ -415,6 +419,11 @@ fn play_offline_impl(
                     skin: assets.default_skin.as_ref(),
                     game: assets.game_sprites.as_ref(),
                 }, &gpu_tee, &gpu_hud)?;
+            if gpu_smoke {
+                if let Some(profile) = renderer.last_frame_profile() {
+                    gpu_smoke_profile.record(profile);
+                }
+            }
             if gpu_smoke && renderer.last_native_tee_vertices() == 0 {
                 return Err("GPU smoke presented a frame without native tee sprites".into());
             }
@@ -441,7 +450,18 @@ fn play_offline_impl(
         }
         frames += 1;
         if gpu_smoke && frames >= 30 {
-            println!("GPU DDNet X11 window smoke: 30 hardware-presented frames");
+            #[cfg(feature = "gpu")]
+            if let Some(profile) = gpu_smoke_profile.take_means() {
+                // These numbers come from the actual GPU-enabled window and
+                // map scene; Xvfb/Mesa CI results are diagnostic, NOT a
+                // benchmark for physical Vulkan or Windows hardware.
+                println!(
+                    "GPU DDNet X11 window smoke: {} hardware-presented frames; CPU map {:.3} ms, sprites+HUD {:.3} ms, upload {:.3} ms, present {:.3} ms; {:.3} MiB/frame, map reuse {:.0}%",
+                    profile.frames, profile.map_ms, profile.sprites_ms,
+                    profile.upload_ms, profile.present_ms,
+                    profile.uploaded_mib_per_frame, profile.reuse_percent,
+                );
+            }
             return Ok(());
         }
         if let Some(output) = smoke_output {
