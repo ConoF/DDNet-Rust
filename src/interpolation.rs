@@ -98,7 +98,7 @@ pub fn interpolate_snapshots(
 
 /// Preserve authoritative snapshot positions when the server may have
 /// teleported a tee between frames. Plain interpolation checks distance
-/// >256px, but teleports can cross only a few tiles and still appear as a
+/// greater than 256px, but a short teleport can still appear as a
 /// physically impossible glide through walls. A map entry tile determines
 /// whether the transition should snap, not an invented velocity threshold.
 pub fn interpolate_snapshots_with_map(
