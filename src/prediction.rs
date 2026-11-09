@@ -130,6 +130,9 @@ impl LocalPredictor {
             return None;
         }
         let server_pos = Vec2::new(core.x as f32, core.y as f32);
+        // Until teleport, front/switch and freeze effects are replayed, do not
+        // extrapolate a character close enough to be affected by these tiles.
+        if map.has_unsupported_physics_near(server_pos) { return None; }
         // The map only contains a zone number; the server owns its tuning.
         // Predicting default physics within an unknown zone causes drift.
         if map.tune_zone_at(server_pos) != 0 && received.is_none() {
@@ -222,9 +225,17 @@ impl LocalPredictor {
                 hook: input.hook != 0,
                 aim: Vec2::new(input.target_x as f32, input.target_y as f32),
             }).ok()?;
-            if map.crosses_tune_zone_change(previous, sim.position) {
+            if map.crosses_tune_zone_change(previous, sim.position)
+                || map.crosses_unsupported_physics(previous, sim.position)
+            {
                 return None;
             }
+            // The modern (type 29) speedup is handled after movement, as in
+            // CCharacter::HandleSkippableTiles. Legacy speedups still need
+            // full movement restrictions; fall back rather than guessing.
+            sim.character.velocity = map.apply_speedup(
+                sim.position, sim.character.velocity, &movement_tuning,
+            )?;
             // DDNet gamecore.cpp::Quantize writes and reads integer position,
             // 1/256-unit velocity and hook state on each predicted tick.
             // Delaying this until display output causes cumulative drift.
@@ -574,6 +585,83 @@ mod tests {
         assert!(predictor.predict(100, &already_inside, &map).is_none());
         let outside = snapshot(100, 16, 16);
         assert!(predictor.predict(100, &outside, &map).is_some());
+    }
+
+    fn speedup_map(kind: u8, with_teleport: bool) -> GameMap {
+        use crate::datafile::{Datafile, Item, RawBlock};
+        const W: usize = 9;
+        const H: usize = 5;
+        let game_bytes = [0u8; W * H * 4];
+        let mut speed_bytes = [0u8; W * H * 6];
+        speed_bytes[(W+2)*6..(W+2)*6+6]
+            .copy_from_slice(&[10, 100, kind, 0, 0, 0]);
+        let mut tele_bytes = [0u8; W * H * 2];
+        if with_teleport {
+            tele_bytes[(W+5)*2..(W+5)*2+2].copy_from_slice(&[1, 26]);
+        }
+        let mut layer_game = [0u8; 60];
+        layer_game[4..8].copy_from_slice(&2i32.to_le_bytes());
+        layer_game[12..16].copy_from_slice(&2i32.to_le_bytes());
+        layer_game[16..20].copy_from_slice(&(W as i32).to_le_bytes());
+        layer_game[20..24].copy_from_slice(&(H as i32).to_le_bytes());
+        layer_game[24..28].copy_from_slice(&1i32.to_le_bytes());
+        let mut layer_speed = [0u8; 68];
+        layer_speed[4..8].copy_from_slice(&2i32.to_le_bytes());
+        layer_speed[12..16].copy_from_slice(&2i32.to_le_bytes());
+        layer_speed[16..20].copy_from_slice(&(W as i32).to_le_bytes());
+        layer_speed[20..24].copy_from_slice(&(H as i32).to_le_bytes());
+        layer_speed[24..28].copy_from_slice(&4i32.to_le_bytes());
+        layer_speed[64..68].copy_from_slice(&1i32.to_le_bytes());
+        let mut layer_tele = [0u8; 64];
+        layer_tele[4..8].copy_from_slice(&2i32.to_le_bytes());
+        layer_tele[12..16].copy_from_slice(&2i32.to_le_bytes());
+        layer_tele[16..20].copy_from_slice(&(W as i32).to_le_bytes());
+        layer_tele[20..24].copy_from_slice(&(H as i32).to_le_bytes());
+        layer_tele[24..28].copy_from_slice(&2i32.to_le_bytes());
+        layer_tele[60..64].copy_from_slice(&2i32.to_le_bytes());
+        let file = Datafile {
+            version: 3, item_types: vec![], items: vec![
+                Item { type_id: 5, id: 0, payload: &layer_game },
+                Item { type_id: 5, id: 1, payload: &layer_speed },
+                Item { type_id: 5, id: 2, payload: &layer_tele },
+            ],
+            raw_blocks: vec![
+                RawBlock { encoded: &game_bytes, uncompressed_size: None },
+                RawBlock { encoded: &speed_bytes, uncompressed_size: None },
+                RawBlock { encoded: &tele_bytes, uncompressed_size: None },
+            ],
+        };
+        GameMap::from_datafile(&file, W * H).unwrap()
+    }
+
+    #[test]
+    fn modern_speedup_changes_next_tick_velocity_and_is_reconciled() {
+        let map = speedup_map(crate::map::TILE_SPEED_BOOST, false);
+        let baseline = snapshot(100, 80, 48);
+        let original = baseline.clone();
+        let mut predictor = LocalPredictor::new();
+        predictor.record_sent_input(input(101, 0));
+        let first = predictor.predict(100, &baseline, &map).unwrap();
+        assert_eq!(first.position.x, 80.0);
+        assert_eq!(first.velocity.x, 10.0);
+        predictor.record_sent_input(input(102, 0));
+        let second = predictor.predict(100, &baseline, &map).unwrap();
+        assert!(second.position.x > first.position.x);
+        assert!(second.velocity.x > first.velocity.x);
+        assert_eq!(baseline, original);
+    }
+
+    #[test]
+    fn unsupported_legacy_speedup_and_teleports_revert_to_server() {
+        let baseline = snapshot(100, 80, 48);
+        let mut predictor = LocalPredictor::new();
+        predictor.record_sent_input(input(101, 0));
+        let legacy = speedup_map(crate::map::TILE_SPEED_BOOST_OLD, false);
+        assert!(predictor.predict(100, &baseline, &legacy).is_none());
+        let teleport_map = speedup_map(crate::map::TILE_SPEED_BOOST, true);
+        let near_teleport = snapshot(100, 176, 48);
+        assert!(predictor.predict(100, &near_teleport, &teleport_map).is_none());
+        assert!(predictor.predict(100, &baseline, &teleport_map).is_some());
     }
 
     #[test]

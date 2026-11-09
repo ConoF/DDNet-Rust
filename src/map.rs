@@ -328,6 +328,22 @@ impl GameMap {
         false
     }
 
+    /// Track movement through physics tiles, not only at endpoints. A tee
+    /// can cross a thin teleport or freeze tile in one tick at high speed.
+    pub fn crosses_unsupported_physics(&self, start: Vec2, end: Vec2) -> bool {
+        let dx = end.x - start.x;
+        let dy = end.y - start.y;
+        let distance = dx.hypot(dy);
+        if !distance.is_finite() || distance > 8192.0 { return true; }
+        let steps = (distance / 16.0).ceil().max(1.0) as usize;
+        (0..=steps).any(|i| {
+            let f = i as f32 / steps as f32;
+            self.has_unsupported_physics_near(Vec2::new(
+                start.x + dx * f, start.y + dy * f,
+            ))
+        })
+    }
+
     /// CCollision::IsTune(GetMapIndex(pos)): nonzero type activates a zone.
     /// C++ GetMapIndex uses truncated pixel coordinates, then clamps.
     pub fn tune_zone_at(&self, pos: Vec2) -> u8 {
