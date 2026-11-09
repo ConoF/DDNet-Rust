@@ -1397,10 +1397,12 @@ mod tests {
             assert!(!map.has_unsupported_physics_near_with_switches(
                 origin, Some(&active), 100, 102,
             ));
-            let near = Vec2::new(112.0, 112.0);
+            // STOPA on the beam's *neighbor* blocks entry, not departure
+            // from its own center; the beam is horizontal, not vertical.
+            let near = Vec2::new(92.0, 112.0);
             assert_eq!(map.clamp_restricted_velocity_with_switches(
                 near, Vec2::new(4.0, 1.0), Some(&active), 100, 102,
-            ), Some(Vec2::new(0.0, 0.0)));
+            ), Some(Vec2::new(0.0, 1.0)));
             assert_eq!(map.clamp_restricted_velocity_with_switches(
                 near, Vec2::new(4.0, 1.0), None, 100, 102,
             ), None);
