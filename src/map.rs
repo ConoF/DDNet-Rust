@@ -8,6 +8,7 @@
 
 use crate::datafile::{Datafile, DatafileError};
 use crate::physics::{Tuning, Vec2};
+use crate::netobjects::SwitchStateNet;
 
 const MAPITEMTYPE_LAYER: u16 = 5;
 const LAYERTYPE_TILES: i32 = 2;
@@ -469,6 +470,51 @@ impl GameMap {
         )
     }
 
+    /// Combine the static restriction mask with team-dependent door
+    /// collisions using an authoritative SwitchState snapshot. Unknown or
+    /// expiring switch values prevent extrapolation of the affected door.
+    pub fn move_restrictions_with_switches(
+        &self, pos: Vec2, distance: f32, switches: Option<&SwitchStateNet>,
+        snapshot_tick: i32, target_tick: i32,
+    ) -> Option<u8> {
+        if self.unknown_door_geometry { return None; }
+        let mut mask = self.move_restrictions(pos, distance);
+        let samples = [
+            (1.0, 0.0, CANTMOVE_RIGHT),
+            (0.0, 1.0, CANTMOVE_DOWN),
+            (-1.0, 0.0, CANTMOVE_LEFT),
+            (0.0, -1.0, CANTMOVE_UP),
+        ];
+        for (dx, dy, direction) in samples {
+            let point = Vec2::new(pos.x + dx * distance, pos.y + dy * distance);
+            let Some(door) = self.door_at(point) else { continue; };
+            let status = switches?;
+            if !status.stable_through(door.number, snapshot_tick, target_tick) {
+                return None;
+            }
+            if status.is_active(door.number)? { mask |= direction; }
+        }
+        Some(mask)
+    }
+
+    pub fn clamp_restricted_velocity_with_switches(
+        &self, pos: Vec2, velocity: Vec2,
+        switches: Option<&SwitchStateNet>,
+        snapshot_tick: i32, target_tick: i32,
+    ) -> Option<Vec2> {
+        let mask = self.move_restrictions_with_switches(
+            pos, 18.0, switches, snapshot_tick, target_tick,
+        )?;
+        Some(Vec2::new(
+            if (velocity.x > 0.0 && mask & CANTMOVE_RIGHT != 0)
+                || (velocity.x < 0.0 && mask & CANTMOVE_LEFT != 0)
+            { 0.0 } else { velocity.x },
+            if (velocity.y > 0.0 && mask & CANTMOVE_DOWN != 0)
+                || (velocity.y < 0.0 && mask & CANTMOVE_UP != 0)
+            { 0.0 } else { velocity.y },
+        ))
+    }
+
     /// A CTeleTile with zero number/type has no active teleport behavior.
     pub fn tele_tile_at(&self, position: Vec2) -> Option<TeleTile> {
         let tile = *self.tele_tiles.as_ref()?.get(self.tile_index_at(position)?)?;
@@ -578,6 +624,13 @@ impl GameMap {
     /// modeled. A special tile within 32px of the tee can alter a tick.
     /// Fail closed in local prediction instead of displaying fake physics.
     pub fn has_unsupported_physics_near(&self, pos: Vec2) -> bool {
+        self.has_unsupported_physics_near_with_switches(pos, None, 0, 0)
+    }
+
+    pub fn has_unsupported_physics_near_with_switches(
+        &self, pos: Vec2, switches: Option<&SwitchStateNet>,
+        snapshot_tick: i32, target_tick: i32,
+    ) -> bool {
         if self.unknown_door_geometry { return true; }
         let Some(center) = self.tile_index_at(pos) else { return true; };
         let cx = center % self.width;
@@ -607,8 +660,20 @@ impl GameMap {
                         !matches!(layer[index].tile_type,
                             0 | TILE_TELE_OUT | TILE_TELE_CHECK_OUT)
                     })
-                    || self.switch_tiles.as_ref().is_some_and(|layer| layer[index].tile_type != 0)
-                    || self.door_tiles.as_ref().is_some_and(|layer| layer[index].active_area)
+                    || self.switch_tiles.as_ref().is_some_and(|layer| {
+                        let kind = layer[index].tile_type;
+                        kind != 0 && (switches.is_none()
+                            || !matches!(kind, ENTITY_DOOR
+                                | ENTITY_LASER_SHORT..=ENTITY_LASER_LONG))
+                    })
+                    || self.door_tiles.as_ref().is_some_and(|layer| {
+                        let door = layer[index];
+                        door.active_area && !switches.is_some_and(|status| {
+                            status.stable_through(
+                                door.number, snapshot_tick, target_tick,
+                            )
+                        })
+                    })
                 {
                     return true;
                 }
@@ -630,6 +695,27 @@ impl GameMap {
             self.has_unsupported_physics_near(Vec2::new(
                 start.x + dx * f, start.y + dy * f,
             ))
+        })
+    }
+
+    /// Reject replay if any intermediate sample crosses an unsupported
+    /// tile, switch trigger or unverified/timed door beam.
+    pub fn crosses_unsupported_physics_with_switches(
+        &self, start: Vec2, end: Vec2,
+        switches: Option<&SwitchStateNet>,
+        snapshot_tick: i32, target_tick: i32,
+    ) -> bool {
+        let dx = end.x - start.x;
+        let dy = end.y - start.y;
+        let distance = dx.hypot(dy);
+        if !distance.is_finite() || distance > 8192.0 { return true; }
+        let steps = (distance / 16.0).ceil().max(1.0) as usize;
+        (0..=steps).any(|index| {
+            let fraction = index as f32 / steps as f32;
+            self.has_unsupported_physics_near_with_switches(
+                Vec2::new(start.x + dx * fraction, start.y + dy * fraction),
+                switches, snapshot_tick, target_tick,
+            )
         })
     }
 
@@ -1292,6 +1378,47 @@ mod tests {
             assert_eq!(map.door_at(Vec2::new(144.0, 112.0)), None);
             assert!(map.has_unsupported_physics_near(Vec2::new(80.0, 112.0)));
             assert!(map.has_unsupported_physics_near(Vec2::new(112.0, 112.0)));
+            let confirmed = crate::snapshot_delta::SnapshotState { items: vec![
+                crate::snapshot_delta::SnapshotObject {
+                    type_id: 0, id: 32767,
+                    words: crate::netobjects::SWITCH_STATE_UUID_WORDS.to_vec(),
+                },
+                crate::snapshot_delta::SnapshotObject {
+                    type_id: 32767, id: 2,
+                    words: {
+                        let mut words = vec![0; 17];
+                        words[0] = 7;
+                        words[1] = 1 << 7;
+                        words
+                    },
+                },
+            ] };
+            let active = SwitchStateNet::from_snapshot(&confirmed).unwrap();
+            assert!(!map.has_unsupported_physics_near_with_switches(
+                origin, Some(&active), 100, 102,
+            ));
+            let near = Vec2::new(112.0, 112.0);
+            assert_eq!(map.clamp_restricted_velocity_with_switches(
+                near, Vec2::new(4.0, 1.0), Some(&active), 100, 102,
+            ), Some(Vec2::new(0.0, 0.0)));
+            assert_eq!(map.clamp_restricted_velocity_with_switches(
+                near, Vec2::new(4.0, 1.0), None, 100, 102,
+            ), None);
+            let mut inactive_snapshot = confirmed.clone();
+            inactive_snapshot.items[1].words[1] = 0;
+            let inactive = SwitchStateNet::from_snapshot(&inactive_snapshot).unwrap();
+            assert_eq!(map.clamp_restricted_velocity_with_switches(
+                near, Vec2::new(4.0, 1.0), Some(&inactive), 100, 102,
+            ), Some(Vec2::new(4.0, 1.0)));
+            inactive_snapshot.items[1].words[9] = 7;
+            inactive_snapshot.items[1].words[13] = 102;
+            let timed = SwitchStateNet::from_snapshot(&inactive_snapshot).unwrap();
+            assert!(map.has_unsupported_physics_near_with_switches(
+                origin, Some(&timed), 100, 102,
+            ));
+            assert!(!map.has_unsupported_physics_near_with_switches(
+                origin, Some(&timed), 100, 101,
+            ));
             assert!(!map.has_unsupported_physics_near(Vec2::new(240.0, 176.0)));
             assert!(!map.unknown_door_geometry);
         }
