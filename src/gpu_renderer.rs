@@ -356,9 +356,13 @@ impl GpuRenderer {
     fn draw_batches<'a>(
         pass: &mut wgpu::RenderPass<'a>,
         batches: &[GpuBatch], images: &'a [ImageBind],
+        size: (u32, u32),
     ) {
         for batch in batches {
             if let Some(image) = images.get(batch.texture) {
+                let [x,y,w,h] = batch.clip.unwrap_or([0,0,size.0,size.1]);
+                if w == 0 || h == 0 { continue; }
+                pass.set_scissor_rect(x,y,w,h);
                 pass.set_bind_group(0, &image.group, &[]);
                 pass.draw(batch.start..batch.start + batch.count, 0..1);
             }
@@ -443,6 +447,7 @@ impl GpuRenderer {
                 start: batch.start.checked_add(hud_base)
                     .ok_or("GPU HUD batch offset overflow")?,
                 count: batch.count,
+                clip: None,
             });
         }
         scene.vertices.extend_from_slice(&hud.vertices);
@@ -513,17 +518,19 @@ impl GpuRenderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(0, self.vertices.slice(..));
-            Self::draw_batches(&mut pass, &scene.background, &self.images);
+            let size = (self.config.width, self.config.height);
+            Self::draw_batches(&mut pass, &scene.background, &self.images, size);
             if native {
-                Self::draw_batches(&mut pass, &sprite.batches, &self.images);
+                Self::draw_batches(&mut pass, &sprite.batches, &self.images, size);
             } else {
+                pass.set_scissor_rect(0, 0, size.0, size.1);
                 pass.set_vertex_buffer(0, self.overlay_vertices.slice(..));
                 pass.set_bind_group(0, &self.overlay_tee.group, &[]);
                 pass.draw(0..OVERLAY_VERTEX_COUNT, 0..1);
             }
             pass.set_vertex_buffer(0, self.vertices.slice(..));
-            Self::draw_batches(&mut pass, &scene.foreground, &self.images);
-            Self::draw_batches(&mut pass, &hud_batches, &self.images);
+            Self::draw_batches(&mut pass, &scene.foreground, &self.images, size);
+            Self::draw_batches(&mut pass, &hud_batches, &self.images, size);
         }
         self.queue.submit(Some(encoder.finish()));
         output.present();

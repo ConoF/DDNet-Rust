@@ -74,6 +74,8 @@ pub struct GpuBatch {
     pub texture: usize,
     pub start: u32,
     pub count: u32,
+    /// Hardware scissor for one original DDNet map group (x, y, w, h).
+    pub clip: Option<[u32; 4]>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -130,8 +132,22 @@ struct Builder {
 }
 
 impl Builder {
+    fn layer_clip(&self, transform: crate::map_visual::GroupTransform,
+        camera: Camera) -> Option<[u32; 4]>
+    {
+        let [x0, y0, x1, y1] =
+            transform.screen_clip(camera, self.w, self.h)?;
+        // DDNet rounds the projected world clip to framebuffer pixels.
+        let x0 = x0.round().clamp(0.0, self.w) as u32;
+        let y0 = y0.round().clamp(0.0, self.h) as u32;
+        let x1 = x1.round().clamp(0.0, self.w) as u32;
+        let y1 = y1.round().clamp(0.0, self.h) as u32;
+        Some([x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0)])
+    }
+
     fn add_quad(
         &mut self, pts: [V; 4], texture: usize, foreground: bool,
+        clip: Option<[u32; 4]>,
     ) -> Result<(), VisualError> {
         if pts.iter().any(|v| !v.x.is_finite() || !v.y.is_finite()) { return Ok(()); }
         let min_x = pts.iter().map(|v| v.x).fold(f32::INFINITY, f32::min);
@@ -140,6 +156,13 @@ impl Builder {
         let max_y = pts.iter().map(|v| v.y).fold(f32::NEG_INFINITY, f32::max);
         if min_x >= self.w || max_x <= 0.0 || min_y >= self.h || max_y <= 0.0 {
             return Ok(());
+        }
+        if let Some([x, y, w, h]) = clip {
+            if w == 0 || h == 0 || max_x <= x as f32 || min_x >= (x+w) as f32
+                || max_y <= y as f32 || min_y >= (y+h) as f32
+            {
+                return Ok(());
+            }
         }
         if self.scene.vertices.len() > MAX_FRAME_VERTICES - 6 {
             return Err(VisualError::TooLarge);
@@ -157,12 +180,13 @@ impl Builder {
             &mut self.scene.foreground
         } else { &mut self.scene.background };
         if let Some(last) = batches.last_mut() {
-            if last.texture == texture && last.start + last.count == start {
+            if last.texture == texture && last.clip == clip
+                && last.start + last.count == start {
                 last.count += 6;
                 return Ok(());
             }
         }
-        batches.push(GpuBatch { texture, start, count: 6 });
+        batches.push(GpuBatch { texture, start, count: 6, clip });
         Ok(())
     }
 
@@ -194,6 +218,7 @@ impl Builder {
         let x1 = ((cx + radius_x) / 32.0).ceil().max(0.0) as usize;
         let y0 = ((cy - radius_y) / 32.0).floor().max(0.0) as usize;
         let y1 = ((cy + radius_y) / 32.0).ceil().max(0.0) as usize;
+        let clip = self.layer_clip(layer.transform, camera);
         let from_x = x0.min(layer.width);
         let to_x = x1.saturating_add(1).min(layer.width);
         for y in y0.min(layer.height)..y1.saturating_add(1).min(layer.height) {
@@ -220,7 +245,7 @@ impl Builder {
                     V { x: sx, y: sy + size, uv: uv(0.0,1.0), color },
                     V { x: sx + size, y: sy + size, uv: uv(1.0,1.0), color },
                 ];
-                this.add_quad(pts, layer.image, layer.foreground)
+                this.add_quad(pts, layer.image, layer.foreground, clip)
             };
             if let Some(columns) = cached {
                 let start = columns.partition_point(|&x| x < from_x);
@@ -246,6 +271,7 @@ impl Builder {
         let cy = camera.center.y * layer.transform.parallax_y / 100.0
             - layer.transform.offset_y;
         let tex = layer.image.unwrap_or(map.images.len());
+        let clip = self.layer_clip(layer.transform, camera);
         // Skip static quads in map space before evaluating envelopes,
         // applying vertex transforms, or issuing GPU geometry. Animated
         // position envelopes are excluded: they may move into view.
@@ -300,7 +326,7 @@ impl Builder {
                     }),
                 }
             });
-            self.add_quad(pts, tex, layer.foreground)?;
+            self.add_quad(pts, tex, layer.foreground, clip)?;
         }
         Ok(())
     }
@@ -550,6 +576,26 @@ mod tests {
                 }).unwrap();
             assert_eq!(actual, expected, "camera x={x}");
         }
+    }
+
+    #[test]
+    fn map_groups_receive_scissors_without_clipping_tees_or_hud() {
+        let mut m = map();
+        m.layers[0].transform.clip = Some(crate::map_visual::GroupClip {
+            x: 0.0, y: 0.0, width: 16.0, height: 32.0,
+        });
+        let scene = build_gpu_scene(&m, camera(),
+            EnvelopeTimes::default(), 32, 32).unwrap();
+        assert_eq!(scene.background[0].clip, None);
+        assert_eq!(scene.background[1].clip, Some([0,0,16,32]));
+        // A different scissor splits batches even if texture is identical.
+        m.quad_layers[0].transform.clip = Some(crate::map_visual::GroupClip {
+            x: 16.0, y: 0.0, width: 16.0, height: 32.0,
+        });
+        let scene = build_gpu_scene(&m, camera(),
+            EnvelopeTimes::default(), 32, 32).unwrap();
+        assert_eq!(scene.background[0].clip, Some([16,0,16,32]));
+        assert_eq!(scene.background[1].clip, Some([0,0,16,32]));
     }
 
     #[test]

@@ -88,7 +88,7 @@ impl TeeBuilder {
             }
         }
         self.scene.batches.push(GpuBatch {
-            texture: atlas, start, count: 6,
+            texture: atlas, start, count: 6, clip: None,
         });
     }
 

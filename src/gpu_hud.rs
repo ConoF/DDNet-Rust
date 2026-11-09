@@ -112,7 +112,7 @@ impl GpuHudScene {
             }
         }
         self.batches.push(GpuBatch {
-            texture: slot, start, count: 6,
+            texture: slot, start, count: 6, clip: None,
         });
     }
 }
