@@ -15,6 +15,24 @@ pub const MAX_FRAME_VERTICES: usize = 500_000;
 /// Dynamic quads keep None so their animated positions are evaluated normally.
 pub type QuadBounds = Vec<Vec<Option<[f32; 4]>>>;
 
+/// Sorted occupied tile columns for each row in each tile layer. Built when
+/// the visual map is loaded, so rendering skips empty tiles without scanning
+/// entire visible rows on every camera movement.
+pub type OccupiedTileRows = Vec<Vec<Vec<usize>>>;
+
+pub fn cache_occupied_tiles(map: &VisualMap) -> OccupiedTileRows {
+    map.layers.iter().map(|layer| {
+        if layer.width == 0 || layer.width.checked_mul(layer.height) != Some(layer.tiles.len()) {
+            return Vec::new();
+        }
+        layer.tiles.chunks_exact(layer.width).map(|row| {
+            row.iter().enumerate().filter_map(|(x, tile)| {
+                (tile.index != 0).then_some(x)
+            }).collect()
+        }).collect()
+    }).collect()
+}
+
 pub fn cache_quad_bounds(map: &VisualMap) -> QuadBounds {
     map.quad_layers.iter().map(|layer| {
         layer.quads.iter().map(|quad| {
@@ -144,6 +162,7 @@ impl Builder {
     fn tile_layer(
         &mut self, map: &VisualMap, layer: &crate::map_visual::TexturedLayer,
         camera: Camera, times: EnvelopeTimes,
+        occupied_rows: Option<&[Vec<usize>]>,
     ) -> Result<(), VisualError> {
         let image = map.images.get(layer.image).ok_or(VisualError::MissingImage)?;
         if image.width % 16 != 0 || image.height % 16 != 0 {
@@ -168,11 +187,16 @@ impl Builder {
         let x1 = ((cx + radius_x) / 32.0).ceil().max(0.0) as usize;
         let y0 = ((cy - radius_y) / 32.0).floor().max(0.0) as usize;
         let y1 = ((cy + radius_y) / 32.0).ceil().max(0.0) as usize;
+        let from_x = x0.min(layer.width);
+        let to_x = x1.saturating_add(1).min(layer.width);
         for y in y0.min(layer.height)..y1.saturating_add(1).min(layer.height) {
-            for x in x0.min(layer.width)..x1.saturating_add(1).min(layer.width) {
+            // Cached rows are ordered left-to-right, exactly like the original
+            // dense scan. Fall back to the dense scan for missing cache rows.
+            let cached = occupied_rows.and_then(|rows| rows.get(y));
+            let mut draw_tile = |x: usize, this: &mut Builder| -> Result<(), VisualError> {
                 let tile = layer.tiles[y * layer.width + x];
-                if tile.index == 0 { continue; }
-                let sx = (x as f32 * 32.0 - cx) * camera.scale + self.w / 2.0;
+                if tile.index == 0 { return Ok(()); }
+                let sx = (x as f32 * 32.0 - cx) * camera.scale + this.w / 2.0;
                 let sy = (y as f32 * 32.0 - cy) * camera.scale + self.h / 2.0;
                 let size = 32.0 * camera.scale;
                 let tile_u = f32::from(tile.index % 16);
@@ -189,7 +213,18 @@ impl Builder {
                     V { x: sx, y: sy + size, uv: uv(0.0,1.0), color },
                     V { x: sx + size, y: sy + size, uv: uv(1.0,1.0), color },
                 ];
-                self.add_quad(pts, layer.image, layer.foreground)?;
+                this.add_quad(pts, layer.image, layer.foreground)
+            };
+            if let Some(columns) = cached {
+                let start = columns.partition_point(|&x| x < from_x);
+                let end = columns.partition_point(|&x| x < to_x);
+                for &x in &columns[start..end] {
+                    draw_tile(x, self)?;
+                }
+            } else {
+                for x in from_x..to_x {
+                    draw_tile(x, self)?;
+                }
             }
         }
         Ok(())
@@ -280,7 +315,7 @@ pub fn build_gpu_scene_into(
     times: EnvelopeTimes, width: u32, height: u32,
     scene: &mut GpuScene,
 ) -> Result<(), VisualError> {
-    build_gpu_scene_into_cached(map, camera, times, width, height, scene, None)
+    build_gpu_scene_into_cached(map, camera, times, width, height, scene, None, None)
 }
 
 /// The renderer supplies bounds computed only when a new map is loaded.
@@ -289,6 +324,7 @@ pub fn build_gpu_scene_into_cached(
     map: &VisualMap, camera: Camera,
     times: EnvelopeTimes, width: u32, height: u32,
     scene: &mut GpuScene, bounds: Option<&QuadBounds>,
+    occupied_tiles: Option<&OccupiedTileRows>,
 ) -> Result<(), VisualError> {
     if width == 0 || height == 0
         || !(0.05..=16.0).contains(&camera.scale)
@@ -314,7 +350,9 @@ pub fn build_gpu_scene_into_cached(
                     let layer = &map.layers[tile];
                     tile += 1;
                     if layer.foreground == foreground {
-                        builder.tile_layer(map, layer, camera, times)?;
+                        builder.tile_layer(map, layer, camera, times,
+                            occupied_tiles.and_then(|rows| rows.get(tile - 1))
+                                .map(Vec::as_slice))?;
                     }
                 } else {
                     let layer = &map.quad_layers[quad];
@@ -469,11 +507,38 @@ mod tests {
             let direct = build_gpu_scene(&map, c, EnvelopeTimes::default(), 32, 32).unwrap();
             let mut cached = GpuScene::default();
             build_gpu_scene_into_cached(&map, c, EnvelopeTimes::default(),
-                32, 32, &mut cached, Some(&quad_cache)).unwrap();
+                32, 32, &mut cached, Some(&quad_cache), None).unwrap();
             assert_eq!(cached, direct);
         }
         map.quad_layers[0].quads[0].pos_env = 0;
         assert!(cache_quad_bounds(&map)[0][0].is_none());
+    }
+
+    #[test]
+    fn sparse_tile_cache_matches_dense_renderer_at_multiple_positions() {
+        let mut m = map();
+        m.layers[0].width = 64;
+        m.layers[0].height = 2;
+        m.layers[0].tiles = vec![Tile {
+            index: 0, flags: 0, skip: 0, reserved: 0,
+        }; 128];
+        for (index, tile) in [(0usize, 1u8), (7, 5), (62, 9),
+            (64, 11), (90, 3), (127, 14)] {
+            m.layers[0].tiles[index].index = tile;
+        }
+        m.layers[0].tiles[7].flags = 1 | 8;
+        let cache = cache_occupied_tiles(&m);
+        assert_eq!(cache[0][0], vec![0, 7, 62]);
+        assert_eq!(cache[0][1], vec![0, 26, 63]);
+        for x in [-100.0, 16.0, 250.0, 900.0, 1900.0, 4000.0] {
+            let c = Camera { center: Vec2::new(x, 32.0), scale: 1.0 };
+            let expected = build_gpu_scene(&m, c, EnvelopeTimes::default(), 256, 96)
+                .unwrap();
+            let mut actual = GpuScene::default();
+            build_gpu_scene_into_cached(&m, c, EnvelopeTimes::default(),
+                256, 96, &mut actual, None, Some(&cache)).unwrap();
+            assert_eq!(actual, expected, "camera x={x}");
+        }
     }
 
     #[test]

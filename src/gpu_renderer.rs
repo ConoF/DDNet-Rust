@@ -9,7 +9,10 @@
 use minifb::Window;
 
 use crate::envelope::EnvelopeTimes;
-use crate::gpu_scene::{build_gpu_scene_into_cached, cache_quad_bounds, QuadBounds, GpuBatch, GpuScene, GpuVertex, VERTEX_STRIDE};
+use crate::gpu_scene::{
+    build_gpu_scene_into_cached, cache_quad_bounds, cache_occupied_tiles,
+    QuadBounds, OccupiedTileRows, GpuBatch, GpuScene, GpuVertex, VERTEX_STRIDE,
+};
 use crate::gpu_tees::{build_gpu_tees, GpuTeeScene, SpriteTextureSlots};
 use crate::gpu_hud::{
     font_atlas_rgba, GpuHudScene, FONT_WIDTH, FONT_HEIGHT,
@@ -64,6 +67,7 @@ pub struct GpuRenderer {
     cached_map_camera: Option<Camera>,
     cached_map_vertices: usize,
     quad_bounds: QuadBounds,
+    occupied_tiles: OccupiedTileRows,
 }
 
 impl GpuRenderer {
@@ -217,6 +221,7 @@ impl GpuRenderer {
             scene_cache: GpuScene::default(),
             cached_map_camera: None, cached_map_vertices: 0,
             quad_bounds: Vec::new(),
+            occupied_tiles: Vec::new(),
         })
     }
 
@@ -273,6 +278,7 @@ impl GpuRenderer {
         self.cached_map_camera = None;
         self.cached_map_vertices = 0;
         self.quad_bounds = map.map(cache_quad_bounds).unwrap_or_default();
+        self.occupied_tiles = map.map(cache_occupied_tiles).unwrap_or_default();
         self.images.clear();
         self.map_image_count = map.map_or(0, |m| m.images.len());
         if let Some(map) = map {
@@ -383,7 +389,8 @@ impl GpuRenderer {
             scene.vertices.truncate(self.cached_map_vertices);
         } else if let Some(map) = map {
             build_gpu_scene_into_cached(map, camera, times,
-                self.config.width, self.config.height, &mut scene, Some(&self.quad_bounds))
+                self.config.width, self.config.height, &mut scene,
+                Some(&self.quad_bounds), Some(&self.occupied_tiles))
                 .map_err(|e| format!("GPU scene geometry: {e:?}"))?;
         } else {
             scene.vertices.clear();
