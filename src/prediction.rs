@@ -677,6 +677,74 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_switch_door_controls_replayed_velocity_with_expiration_guard() {
+        use crate::datafile::{Datafile, Item, RawBlock};
+        use crate::netobjects::SWITCH_STATE_UUID_WORDS;
+        use crate::snapshot_delta::SnapshotObject;
+        const W: usize = 9;
+        const H: usize = 4;
+        let mut switch_tiles = [0u8; W * H * 4];
+        // ENTITY_OFFSET (191) + ENTITY_DOOR (49), short laser on right.
+        switch_tiles[(W + 2) * 4..(W + 2) * 4 + 4]
+            .copy_from_slice(&[7, 240, 0, 0]);
+        switch_tiles[(W + 3) * 4..(W + 3) * 4 + 4]
+            .copy_from_slice(&[7, 210, 0, 0]);
+        let mut game = [0u8; 60];
+        game[4..8].copy_from_slice(&2i32.to_le_bytes());
+        game[12..16].copy_from_slice(&2i32.to_le_bytes());
+        game[16..20].copy_from_slice(&(W as i32).to_le_bytes());
+        game[20..24].copy_from_slice(&(H as i32).to_le_bytes());
+        game[24..28].copy_from_slice(&1i32.to_le_bytes());
+        let mut switch = [0u8; 76];
+        switch[4..8].copy_from_slice(&2i32.to_le_bytes());
+        switch[12..16].copy_from_slice(&2i32.to_le_bytes());
+        switch[16..20].copy_from_slice(&(W as i32).to_le_bytes());
+        switch[20..24].copy_from_slice(&(H as i32).to_le_bytes());
+        switch[24..28].copy_from_slice(&16i32.to_le_bytes());
+        switch[72..76].copy_from_slice(&1i32.to_le_bytes());
+        let game_tiles = [0u8; W * H * 4];
+        let datafile = Datafile {
+            version: 3, item_types: vec![],
+            items: vec![
+                Item { type_id: 5, id: 0, payload: &game },
+                Item { type_id: 5, id: 1, payload: &switch },
+            ],
+            raw_blocks: vec![
+                RawBlock { encoded: &game_tiles, uncompressed_size: None },
+                RawBlock { encoded: &switch_tiles, uncompressed_size: None },
+            ],
+        };
+        let map = GameMap::from_datafile(&datafile, W * H).unwrap();
+        let mut predictor = LocalPredictor::new();
+        predictor.record_sent_input(input(101, 1));
+        let base = snapshot(100, 80, 48);
+        assert!(predictor.predict(100, &base, &map).is_none(),
+            "unverified door state must fall back to authoritative position");
+        let mut verified = base.clone();
+        verified.items.push(SnapshotObject {
+            type_id: 0, id: 32767, words: SWITCH_STATE_UUID_WORDS.to_vec(),
+        });
+        let mut status = vec![0; 17];
+        status[0] = 7;
+        status[1] = 1 << 7;
+        verified.items.push(SnapshotObject {
+            type_id: 32767, id: 3, words: status,
+        });
+        let active = predictor.predict(100, &verified, &map).unwrap();
+        assert_eq!(active.velocity.x, 0.0,
+            "a verified closed door must suppress velocity toward the beam");
+        verified.items.last_mut().unwrap().words[1] = 0;
+        let inactive = predictor.predict(100, &verified, &map).unwrap();
+        assert!(inactive.velocity.x > active.velocity.x,
+            "an open door must not block normal movement");
+        verified.items.last_mut().unwrap().words[9] = 7;
+        verified.items.last_mut().unwrap().words[13] = 101;
+        assert!(predictor.predict(100, &verified, &map).is_none(),
+            "the server may toggle a timed door before the predicted tick");
+        assert_eq!(base, snapshot(100, 80, 48));
+    }
+
+    #[test]
     fn missing_history_and_invalid_physics_do_not_extrapolate() {
         let map = empty_map();
         let baseline = snapshot(100, 100, 100);
