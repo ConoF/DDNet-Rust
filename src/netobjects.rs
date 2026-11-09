@@ -61,6 +61,13 @@ pub const CHARACTER_TYPE: u16 = 9;
 pub const PLAYERINFO_TYPE: u16 = 10;
 pub const CLIENTINFO_TYPE: u16 = 11;
 
+/// CalculateUuid("switch-state@netobj.ddnet.tw") from DDNet's
+/// e05ddaaa-c4e6-4cfb-b642-5d48e80c0029 namespace, packed as four
+/// big-endian signed int32s by UuidToInts (uuid_manager.cpp).
+pub const SWITCH_STATE_UUID_WORDS: [i32; 4] =
+    [-334109079, -837733529, -1366378226, 1529330133];
+const OFFSET_UUID_TYPE: u16 = 0x4000;
+
 /// DDNet 0.6 stores tee names as signed characters with an offset of 128,
 /// four bytes per network-order i32. The last byte is reserved for a terminator.
 pub fn decode_tw_int_string(words: &[i32]) -> Option<String> {
@@ -145,9 +152,140 @@ impl PlayerInfoNet {
     }
 }
 
+/// The server sends an extended CNetObj_SwitchState for the observed
+/// DDRace team. m_aStatus contains 256 bits (8 signed int32 words).
+/// The last eight words are optional on older servers: 4 switch numbers
+/// and 4 timed end ticks. Absence of a timer is not proof of permanence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SwitchStateNet {
+    pub team: u16,
+    pub highest_number: u8,
+    statuses: [u32; 8],
+    timed: Option<[(u8, i32); 4]>,
+}
+
+impl SwitchStateNet {
+    /// Recover the *internal* snapshot type from the NETOBJTYPE_EX UUID.
+    /// The server can assign different high type IDs on different snapshots.
+    /// Ambiguous/malformed objects never become trusted switch data.
+    pub fn from_snapshot(snapshot: &SnapshotState) -> Option<Self> {
+        let mut mappings = snapshot.items.iter().filter(|item| {
+            item.type_id == 0
+                && item.id >= OFFSET_UUID_TYPE
+                && item.words.as_slice() == SWITCH_STATE_UUID_WORDS
+        });
+        let mapped_id = mappings.next()?.id;
+        if mappings.next().is_some() { return None; }
+        let mut states = snapshot.items.iter().filter(|item| item.type_id == mapped_id);
+        let item = states.next()?;
+        if states.next().is_some() { return None; }
+        Self::from_object(item)
+    }
+
+    /// Decode the raw extended payload; type-to-UUID verification belongs
+    /// to from_snapshot, so this function is also useful for testing.
+    fn from_object(item: &SnapshotObject) -> Option<Self> {
+        let words = item.words.as_slice();
+        if words.len() != 9 && words.len() != 17 { return None; }
+        let highest_number = u8::try_from(*words.first()?).ok()?;
+        let mut statuses = [0u32; 8];
+        for (index, status) in statuses.iter_mut().enumerate() {
+            *status = words[index + 1] as u32;
+        }
+        let timed = if words.len() == 17 {
+            let mut timers = [(0u8, 0i32); 4];
+            for (i, timer) in timers.iter_mut().enumerate() {
+                let switch = u8::try_from(words[9 + i]).ok()?;
+                let end = words[13 + i];
+                if end < 0 { return None; }
+                *timer = (switch, end);
+            }
+            Some(timers)
+        } else {
+            None
+        };
+        Some(Self { team: item.id, highest_number, statuses, timed })
+    }
+
+    /// None means this switch is outside the server-confirmed mask.
+    pub fn is_active(&self, number: u8) -> Option<bool> {
+        (number <= self.highest_number).then(|| {
+            (self.statuses[usize::from(number / 32)] >> (number % 32)) & 1 != 0
+        })
+    }
+
+    /// If the server supplied a timed toggle that can expire during local
+    /// prediction, its resulting status must be obtained from a new snapshot.
+    /// Legacy 9-word states cannot prove timed stability.
+    pub fn stable_through(&self, number: u8, snapshot_tick: i32, target_tick: i32) -> bool {
+        if self.is_active(number).is_none() || target_tick < snapshot_tick {
+            return false;
+        }
+        let Some(timers) = self.timed else { return false; };
+        !timers.iter().any(|&(which, end_tick)| {
+            which == number && end_tick > snapshot_tick && end_tick <= target_tick
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn switch_state_uses_verified_uuid_mapping_and_team_specific_bitset() {
+        let mut words = vec![0; 17];
+        words[0] = 255;
+        words[1] = (1 << 3) | (1 << 8);
+        words[8] = i32::MIN; // switch 255
+        words[9] = 8; // first timed switch
+        words[13] = 108; // expires after tick 108
+        let state = SnapshotState { items: vec![
+            SnapshotObject {
+                type_id: 0, id: 32767, words: SWITCH_STATE_UUID_WORDS.to_vec(),
+            },
+            SnapshotObject { type_id: 32767, id: 3, words },
+        ] };
+        let switch = SwitchStateNet::from_snapshot(&state).unwrap();
+        assert_eq!(switch.team, 3);
+        assert_eq!(switch.highest_number, 255);
+        assert_eq!(switch.is_active(3), Some(true));
+        assert_eq!(switch.is_active(8), Some(true));
+        assert_eq!(switch.is_active(9), Some(false));
+        assert_eq!(switch.is_active(255), Some(true));
+        assert!(switch.stable_through(8, 100, 107));
+        assert!(!switch.stable_through(8, 100, 108));
+        assert!(switch.stable_through(3, 100, 108));
+        assert_eq!(state.items[1].words[0], 255);
+    }
+
+    #[test]
+    fn legacy_switch_state_and_ambiguous_extensions_fail_closed() {
+        let mut state = SnapshotState { items: vec![
+            SnapshotObject {
+                type_id: 0, id: 32766, words: SWITCH_STATE_UUID_WORDS.to_vec(),
+            },
+            SnapshotObject {
+                type_id: 32766, id: 1, words: vec![7, 8, 0, 0, 0, 0, 0, 0, 0],
+            },
+        ] };
+        let switch = SwitchStateNet::from_snapshot(&state).unwrap();
+        assert_eq!(switch.is_active(3), Some(true));
+        assert_eq!(switch.is_active(8), None);
+        assert!(!switch.stable_through(3, 100, 101));
+        state.items[0].words[0] ^= 1;
+        assert!(SwitchStateNet::from_snapshot(&state).is_none());
+        state.items[0].words = SWITCH_STATE_UUID_WORDS.to_vec();
+        state.items[1].words.truncate(8);
+        assert!(SwitchStateNet::from_snapshot(&state).is_none());
+        state.items[1].words = vec![256; 9];
+        assert!(SwitchStateNet::from_snapshot(&state).is_none());
+        state.items[1].words = vec![7; 10];
+        assert!(SwitchStateNet::from_snapshot(&state).is_none());
+        state.items[1].words = vec![7; 17];
+        state.items.push(state.items[1].clone());
+        assert!(SwitchStateNet::from_snapshot(&state).is_none());
+    }
 
     #[test]
     fn generated_sizes_match_ddnet_2021_06_schema() {
