@@ -63,6 +63,9 @@ pub struct GpuRenderer {
     overlay_vertices: wgpu::Buffer,
     // Reused every frame; prevents large temporary CPU upload allocations.
     vertex_upload: Vec<u8>,
+    // CPU fallback overlays can otherwise allocate a full RGBA image at
+    // every frame (width * height * 4 bytes). Reuse this staging buffer.
+    overlay_upload: Vec<u8>,
     scene_cache: GpuScene,
     cached_map_camera: Option<Camera>,
     cached_map_vertices: usize,
@@ -218,6 +221,7 @@ impl GpuRenderer {
             overlay_tee,
             vertices, capacity: INITIAL_VERTICES, overlay_vertices,
             vertex_upload: Vec::with_capacity(INITIAL_VERTICES * VERTEX_STRIDE),
+            overlay_upload: Vec::new(),
             scene_cache: GpuScene::default(),
             cached_map_camera: None, cached_map_vertices: 0,
             quad_bounds: Vec::new(),
@@ -334,14 +338,17 @@ impl GpuRenderer {
         self.last_hud_vertices
     }
 
-    fn upload_overlay(queue: &wgpu::Queue, image: &wgpu::Texture, frame: &Framebuffer) {
-        let data = rgba_overlay(frame);
+    fn upload_overlay(
+        queue: &wgpu::Queue, image: &wgpu::Texture,
+        frame: &Framebuffer, upload: &mut Vec<u8>,
+    ) {
+        rgba_overlay_into(frame, upload);
         queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: image, mip_level: 0,
                 origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
             },
-            &data,
+            upload,
             wgpu::ImageDataLayout {
                 offset: 0,
                 bytes_per_row: Some(frame.width * 4),
@@ -476,7 +483,10 @@ impl GpuRenderer {
                 (first_uploaded * VERTEX_STRIDE) as u64, &self.vertex_upload);
         }
         if !native {
-            Self::upload_overlay(&self.queue, &self.overlay_tee._texture, tees);
+            Self::upload_overlay(
+                &self.queue, &self.overlay_tee._texture,
+                tees, &mut self.overlay_upload,
+            );
         }
         let output = match self.surface.get_current_texture() {
             Ok(output) => output,
@@ -548,12 +558,20 @@ impl GpuRenderer {
 /// Convert the legacy RGB tee fallback into an alpha overlay.
  /// This is only used if native tee atlas assets are missing.
 pub fn rgba_overlay(frame: &Framebuffer) -> Vec<u8> {
-    let mut rgba = Vec::with_capacity(frame.pixels.len() * 4);
-    for &pixel in &frame.pixels {
+    let mut rgba = Vec::new();
+    rgba_overlay_into(frame, &mut rgba);
+    rgba
+}
+
+/// Reuse the same upload allocation across frames, including frames where
+/// the opaque tee sprite count or the alpha-keyed background changes.
+fn rgba_overlay_into(frame: &Framebuffer, rgba: &mut Vec<u8>) {
+    rgba.resize(frame.pixels.len() * 4, 0);
+    for (&pixel, out) in frame.pixels.iter().zip(rgba.chunks_exact_mut(4)) {
         if pixel == OVERLAY_KEY {
-            rgba.extend_from_slice(&[0, 0, 0, 0]);
+            out.copy_from_slice(&[0, 0, 0, 0]);
         } else {
-            rgba.extend_from_slice(&[
+            out.copy_from_slice(&[
                 ((pixel >> 16) & 255) as u8,
                 ((pixel >> 8) & 255) as u8,
                 (pixel & 255) as u8,
@@ -561,12 +579,34 @@ pub fn rgba_overlay(frame: &Framebuffer) -> Vec<u8> {
             ]);
         }
     }
-    rgba
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_rgba_upload_reuses_capacity_and_clears_transparency() {
+        let mut frame = Framebuffer::new(4, 2).unwrap();
+        frame.pixels = vec![0xff0000; 8];
+        let mut rgba = Vec::new();
+        rgba_overlay_into(&frame, &mut rgba);
+        assert_eq!(rgba.len(), 32);
+        assert_eq!(&rgba[0..8], &[255, 0, 0, 255, 255, 0, 0, 255]);
+        let allocation = rgba.as_ptr();
+        frame.pixels.fill(OVERLAY_KEY);
+        frame.pixels[1] = 0x123456;
+        rgba_overlay_into(&frame, &mut rgba);
+        assert_eq!(rgba.as_ptr(), allocation, "frame conversion must not reallocate");
+        assert_eq!(&rgba[0..12], &[0, 0, 0, 0, 0x12, 0x34, 0x56, 255, 0, 0, 0, 0]);
+        assert!(rgba[12..].iter().all(|&byte| byte == 0));
+        // Shrinking a source frame must discard stale pixels from staging.
+        frame.pixels.truncate(3);
+        rgba_overlay_into(&frame, &mut rgba);
+        assert_eq!(rgba.len(), 12);
+        assert_eq!(rgba.as_ptr(), allocation);
+        assert_eq!(rgba, rgba_overlay(&frame));
+    }
 
     #[test]
     fn rgb_chroma_key_is_transparent_and_real_tee_pixels_are_opaque() {
