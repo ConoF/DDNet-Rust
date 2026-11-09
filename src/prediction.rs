@@ -2,11 +2,13 @@
 //!
 //! The server owns gameplay state. This module replays locally submitted input
 //! starting from the last authoritative 0.6 Character netobject. It deliberately
-//! does not predict hooks, other players, switches, teleports or tune zones.
-//! These cases fall back to the original server snapshot, not guessed physics.
+//! predicts static-wall hooks when the authoritative ground anchor is
+//! verifiable in the game layer. Player hooks, teleports, switch/front layers,
+//! non-default tuning and player contacts still fall back to the server.
 
 use std::collections::VecDeque;
 
+use crate::hook::{Hook, HookState, HookTuning};
 use crate::input::{InputFrame, PlayerInput};
 use crate::map::GameMap;
 use crate::netobjects::{CharacterCoreNet, PlayerInfoNet, CHARACTER_TYPE};
@@ -32,6 +34,8 @@ pub struct PredictedLocal {
     pub position: Vec2,
     pub velocity: Vec2,
     pub replayed_ticks: i32,
+    /// Only present for a server-verified hook attached to the static game layer.
+    pub ground_hook: Option<Hook>,
 }
 
 /// This history is independent of the UDP ACK. Only *successfully sent* inputs
@@ -92,13 +96,45 @@ impl LocalPredictor {
         let steps = last_tick.checked_sub(authoritative_tick)?;
         if !(1..=MAX_REPLAY_TICKS).contains(&steps) { return None; }
 
-        // Hook and player interactions cannot be reproduced by the isolated
-        // simulator; rendering their movement from unverified predictions
-        // would be misleading.
-        if !matches!(core.hook_state, -1 | 0) || !(0..=3).contains(&core.jumped) {
+        // Player grabs and hooks still flying/retracting need the full server
+        // world. Reconstruct only an already-attached solid wall hook.
+        if !matches!(core.hook_state, -1 | 0 | 5) || !(0..=3).contains(&core.jumped) {
             return None;
         }
         let server_pos = Vec2::new(core.x as f32, core.y as f32);
+        let ground_hook = if core.hook_state == HookState::Grabbed as i32 {
+            if core.hooked_player != -1 || core.hook_tick < 0 { return None; }
+            let anchor = Vec2::new(core.hook_x as f32, core.hook_y as f32);
+            let max_distance = HookTuning::default().length + 64.0;
+            if (anchor.x - server_pos.x).hypot(anchor.y - server_pos.y)
+                > max_distance
+            {
+                return None;
+            }
+            // A hook attached to a switch/front tile cannot be verified
+            // against the basic game layer. Avoid false local acceleration.
+            let neighbors = [(0, 0), (-4, 0), (4, 0), (0, -4), (0, 4)];
+            if !neighbors.iter().any(|&(dx, dy)| {
+                map.collision_tile_at_pixel(
+                    core.hook_x.saturating_add(dx),
+                    core.hook_y.saturating_add(dy),
+                ) == 1
+            }) {
+                return None;
+            }
+            Some(Hook {
+                state: HookState::Grabbed,
+                position: anchor,
+                direction: Vec2::new(
+                    core.hook_dx as f32 / 256.0,
+                    core.hook_dy as f32 / 256.0,
+                ),
+                tick: core.hook_tick as f32,
+                hooked_player: None,
+            })
+        } else {
+            None
+        };
         if authoritative.items.iter().any(|other| {
             if other.type_id != CHARACTER_TYPE || other.id == id { return false; }
             CharacterCoreNet::from_object(other).is_some_and(|player| {
@@ -117,6 +153,9 @@ impl LocalPredictor {
         );
         sim.character.jumped = core.jumped as u8;
         sim.character.direction = core.direction.clamp(-1, 1);
+        if let Some(hook) = ground_hook {
+            sim.hook = hook;
+        }
 
         // Entries can be ahead of or behind the snapshot tick. Carry forward
         // the most recent submitted input across any unsent intermediate ticks,
@@ -128,11 +167,16 @@ impl LocalPredictor {
                 held = inputs.next().map(|entry| entry.input);
             }
             let input = held?;
-            if input.hook != 0 { return None; }
+            if !matches!(input.hook, 0 | 1) { return None; }
+            // A newly launched hook might hit a remote player or teleporter.
+            // Only replay an existing server-verified static-wall attachment.
+            if input.hook != 0 && sim.hook.state == HookState::Idle {
+                return None;
+            }
             let step = sim.step(map, SimInput {
                 direction: input.direction,
                 jump: input.jump != 0,
-                hook: false,
+                hook: input.hook != 0,
                 aim: Vec2::new(input.target_x as f32, input.target_y as f32),
             }).ok()?;
             if !step.position.x.is_finite() || !step.position.y.is_finite() {
@@ -150,6 +194,7 @@ impl LocalPredictor {
             position: sim.position,
             velocity: sim.character.velocity,
             replayed_ticks: steps,
+            ground_hook: ground_hook.map(|_| sim.hook),
         })
     }
 }
@@ -170,6 +215,21 @@ pub fn apply_visual_prediction(
     local.words[2] = prediction.position.y.round() as i32;
     local.words[3] = (prediction.velocity.x * 256.0).round() as i32;
     local.words[4] = (prediction.velocity.y * 256.0).round() as i32;
+    if let Some(hook) = prediction.ground_hook {
+        // A released hook follows the displayed tee, never its stale anchor.
+        let position = if hook.state == HookState::Idle {
+            prediction.position
+        } else {
+            hook.position
+        };
+        local.words[8] = -1;
+        local.words[9] = hook.state as i32;
+        local.words[10] = hook.tick.round() as i32;
+        local.words[11] = position.x.round() as i32;
+        local.words[12] = position.y.round() as i32;
+        local.words[13] = (hook.direction.x * 256.0).round() as i32;
+        local.words[14] = (hook.direction.y * 256.0).round() as i32;
+    }
     true
 }
 
@@ -279,6 +339,81 @@ mod tests {
         peer[2] = 110;
         crowded.items.push(SnapshotObject { type_id: CHARACTER_TYPE, id: 4, words: peer });
         assert!(predictor.predict(100, &crowded, &map).is_none());
+    }
+
+    fn wall_hook_map() -> GameMap {
+        let (width, height) = (24usize, 12usize);
+        let mut tiles = vec![0u8; width * height * 4];
+        for y in 0..height { tiles[(y * width + 15) * 4] = 1; }
+        GameMap::from_tile_bytes(width, height, &tiles).unwrap()
+    }
+
+    fn grounded_hook_snapshot() -> SnapshotState {
+        let mut state = snapshot(100, 220, 180);
+        let core = &mut state.items[0].words;
+        core[8] = -1; // no hooked player
+        core[9] = 5;  // static wall
+        core[10] = 10;
+        core[11] = 480; core[12] = 180;
+        core[13] = 256; core[14] = 0;
+        state
+    }
+
+    #[test]
+    fn replay_verified_wall_hook_and_release_without_mutating_server() {
+        let map = wall_hook_map();
+        let authoritative = grounded_hook_snapshot();
+        let original = authoritative.clone();
+        let mut predictor = LocalPredictor::new();
+        for tick in 101..=104 {
+            let mut frame = input(tick, 0);
+            frame.input.hook = 1;
+            predictor.record_sent_input(frame);
+        }
+        let predicted = predictor.predict(100, &authoritative, &map).unwrap();
+        assert_eq!(predicted.replayed_ticks, 4);
+        assert!(predicted.position.x > 220.0);
+        let hook = predicted.ground_hook.unwrap();
+        assert_eq!(hook.state, HookState::Grabbed);
+        assert_eq!(hook.position, Vec2::new(480.0, 180.0));
+        let mut display = authoritative.clone();
+        assert!(apply_visual_prediction(&mut display, predicted));
+        assert_eq!(display.items[0].words[9], 5);
+        assert_eq!(display.items[0].words[11], 480);
+        assert_eq!(authoritative, original);
+
+        predictor.reset();
+        predictor.record_sent_input(input(101, 0));
+        let release = predictor.predict(100, &authoritative, &map).unwrap();
+        assert_eq!(release.ground_hook.unwrap().state, HookState::Idle);
+        let mut released_display = authoritative.clone();
+        assert!(apply_visual_prediction(&mut released_display, release));
+        assert_eq!(released_display.items[0].words[9], 0);
+        assert_eq!(released_display.items[0].words[11],
+            released_display.items[0].words[1]);
+    }
+
+    #[test]
+    fn unsupported_wall_hook_states_fall_back_to_server() {
+        let mut baseline = grounded_hook_snapshot();
+        let map = wall_hook_map();
+        let mut predictor = LocalPredictor::new();
+        let mut frame = input(101, 0);
+        frame.input.hook = 1;
+        predictor.record_sent_input(frame);
+        baseline.items[0].words[8] = 7; // another player
+        assert!(predictor.predict(100, &baseline, &map).is_none());
+        baseline.items[0].words[8] = -1;
+        baseline.items[0].words[9] = 4; // still flying
+        assert!(predictor.predict(100, &baseline, &map).is_none());
+        baseline.items[0].words[9] = 5;
+        baseline.items[0].words[11] = 300; // no solid tile
+        assert!(predictor.predict(100, &baseline, &map).is_none());
+        baseline.items[0].words[11] = 480;
+        baseline.items[0].words[10] = -1; // invalid elapsed hook time
+        assert!(predictor.predict(100, &baseline, &map).is_none());
+        let idle = snapshot(100, 220, 180);
+        assert!(predictor.predict(100, &idle, &map).is_none());
     }
 
     #[test]
