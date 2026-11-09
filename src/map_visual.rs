@@ -601,6 +601,35 @@ mod tests {
         assert_eq!(frame.pixel(24,15), Some(0));
     }
 
+    #[test]
+    fn group_clipping_from_map_file_cuts_off_both_visible_tiles() {
+        let (image, layer, atlas, tiles) = make_fixture();
+        // Group clipping is defined in world coordinates, not parallax.
+        let group = words(&[2, 0, 0, 100, 100, 0, 1, 1, 16, 0, 16, 32]);
+        let file = Datafile {
+            version: 3, item_types: vec![],
+            items: vec![
+                Item { type_id: MAP_IMAGE, id: 0, payload: &image },
+                Item { type_id: MAP_GROUP, id: 0, payload: &group },
+                Item { type_id: MAP_LAYER, id: 0, payload: &layer },
+            ],
+            raw_blocks: vec![
+                RawBlock { encoded: b"synthetic\0", uncompressed_size: None },
+                RawBlock { encoded: &atlas, uncompressed_size: None },
+                RawBlock { encoded: &tiles, uncompressed_size: None },
+            ],
+        };
+        let map = VisualMap::from_datafile(&file, Path::new(".")).unwrap();
+        let mut frame = Framebuffer::new(64, 32).unwrap();
+        map.render(&mut frame, Camera {
+            center: Vec2::new(32.0, 16.0), scale: 1.0,
+        }).unwrap();
+        assert_eq!(frame.pixel(15,16), Some(BACKGROUND));
+        assert_eq!(frame.pixel(16,16), Some(0xff0000));
+        assert_eq!(frame.pixel(31,16), Some(0xff0000));
+        assert_eq!(frame.pixel(32,16), Some(BACKGROUND));
+    }
+
     fn raw_quad(color: [i32; 4]) -> Vec<u8> {
         let mut bytes = vec![0u8; QUAD_BYTES];
         let positions = [(0, 0), (32, 0), (0, 32), (32, 32), (16, 16)];

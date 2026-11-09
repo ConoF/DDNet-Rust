@@ -105,3 +105,18 @@ frame pacing and benchmarks; the complete original DDNet UI/font system;
 game-side physics and input/prediction parity. Group clipping and UUID
 Bezier handles still need implementation. Do not claim the Rust window is
 visually equivalent to 20.2.1 yet.
+
+
+## 2026-11-09 group clipping and renderer update
+
+- GPU map tiles and quads now use texture batches, reusable vertex
+  allocations, scene caches, and sparse visible tile row indices.
+- Version 2+ CMapItemGroup clipping is decoded from map files.
+  Software tile/quad rendering clips to the original world-space group
+  rectangle. GPU rendering uses per-group hardware scissor rectangles.
+- A strict Clippy break caused by the new sparse-tile cache interface was
+  corrected using a typed SceneCaches argument; the associated CI build
+  passed on Linux, GPU and CachyOS. Verify every later commit independently.
+- Remaining parity gaps: native UI layout, exact character physics and
+  tuning, missing original particles and custom skins, and group-clipped
+  screenshots on a representative set of actual DDNet maps.
