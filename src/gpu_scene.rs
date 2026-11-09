@@ -49,9 +49,16 @@ impl GpuScene {
     /// allocation between frames instead of allocating up to 10 MiB of
     /// temporary vertex data on every redraw.
     pub fn write_vertex_bytes(&self, result: &mut Vec<u8>) {
+        self.write_vertex_bytes_from(0, result);
+    }
+
+    /// Serialize only dynamic vertices following a previously uploaded map
+    /// prefix. The prefix must remain unchanged in the GPU vertex buffer.
+    pub fn write_vertex_bytes_from(&self, first: usize, result: &mut Vec<u8>) {
         result.clear();
-        result.reserve(self.byte_len());
-        for v in &self.vertices {
+        let vertices = self.vertices.get(first..).unwrap_or(&[]);
+        result.reserve(vertices.len() * VERTEX_STRIDE);
+        for v in vertices {
             for n in v.clip.iter().chain(v.uv.iter()) {
                 result.extend_from_slice(&n.to_le_bytes());
             }
@@ -358,6 +365,18 @@ mod tests {
         assert_eq!(buffer.capacity(), capacity);
         GpuScene::default().write_vertex_bytes(&mut buffer);
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn partial_vertex_serialization_matches_complete_stream() {
+        let scene = build_gpu_scene(&map(), camera(),
+            EnvelopeTimes::default(), 32, 32).unwrap();
+        let complete = scene.vertex_bytes();
+        let mut suffix = Vec::new();
+        scene.write_vertex_bytes_from(6, &mut suffix);
+        assert_eq!(suffix, complete[6 * VERTEX_STRIDE..]);
+        scene.write_vertex_bytes_from(scene.vertices.len(), &mut suffix);
+        assert!(suffix.is_empty());
     }
 
     #[test]

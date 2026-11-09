@@ -61,6 +61,8 @@ pub struct GpuRenderer {
     // Reused every frame; prevents large temporary CPU upload allocations.
     vertex_upload: Vec<u8>,
     scene_cache: GpuScene,
+    cached_map_camera: Option<Camera>,
+    cached_map_vertices: usize,
 }
 
 impl GpuRenderer {
@@ -212,6 +214,7 @@ impl GpuRenderer {
             vertices, capacity: INITIAL_VERTICES, overlay_vertices,
             vertex_upload: Vec::with_capacity(INITIAL_VERTICES * VERTEX_STRIDE),
             scene_cache: GpuScene::default(),
+            cached_map_camera: None, cached_map_vertices: 0,
         })
     }
 
@@ -264,6 +267,9 @@ impl GpuRenderer {
         &mut self, map: Option<&VisualMap>,
         skin: Option<&Texture>, game: Option<&Texture>,
     ) {
+        // A new map or changed atlas invalidates all existing map vertices.
+        self.cached_map_camera = None;
+        self.cached_map_vertices = 0;
         self.images.clear();
         self.map_image_count = map.map_or(0, |m| m.images.len());
         if let Some(map) = map {
@@ -361,10 +367,18 @@ impl GpuRenderer {
         {
             return Err("GPU frame dimensions changed without surface reconfiguration".into());
         }
-        // Reuse map geometry allocations even when the camera moves and
-        // envelopes require a full rebuild of the visible triangles.
+        // Static map vertices already live in the GPU buffer. If the camera
+        // has not changed and the map has no time-dependent envelopes, only
+        // the tee and HUD tail must be regenerated and transferred.
         let mut scene = std::mem::take(&mut self.scene_cache);
-        if let Some(map) = map {
+        let reuse_map = map.is_some_and(|map| {
+            map.envelopes.envelopes.is_empty()
+                && self.cached_map_camera == Some(camera)
+                && self.cached_map_vertices <= scene.vertices.len()
+        });
+        if reuse_map {
+            scene.vertices.truncate(self.cached_map_vertices);
+        } else if let Some(map) = map {
             build_gpu_scene_into(map, camera, times,
                 self.config.width, self.config.height, &mut scene)
                 .map_err(|e| format!("GPU scene geometry: {e:?}"))?;
@@ -373,6 +387,7 @@ impl GpuRenderer {
             scene.background.clear();
             scene.foreground.clear();
         }
+        let map_vertex_count = scene.vertices.len();
         // For maps with graphics and usable skins, all tee sprites are now
         // actual native vertices. No tee framebuffer or full-screen tee
         // texture is uploaded in this path.
@@ -421,8 +436,15 @@ impl GpuRenderer {
         if scene.vertices.len() > crate::gpu_scene::MAX_FRAME_VERTICES {
             return Err("GPU map, tee and HUD vertex count exceeds frame limit".into());
         }
-        scene.write_vertex_bytes(&mut self.vertex_upload);
-        if scene.vertices.len() > self.capacity {
+        let needs_growth = scene.vertices.len() > self.capacity;
+        // A newly allocated GPU buffer has no cached prefix.
+        let first_uploaded = if reuse_map && !needs_growth {
+            map_vertex_count
+        } else {
+            0
+        };
+        scene.write_vertex_bytes_from(first_uploaded, &mut self.vertex_upload);
+        if needs_growth {
             self.capacity = scene.vertices.len().next_power_of_two();
             self.vertices = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("DDNet growing GPU geometry"),
@@ -432,7 +454,8 @@ impl GpuRenderer {
             });
         }
         if !self.vertex_upload.is_empty() {
-            self.queue.write_buffer(&self.vertices, 0, &self.vertex_upload);
+            self.queue.write_buffer(&self.vertices,
+                (first_uploaded * VERTEX_STRIDE) as u64, &self.vertex_upload);
         }
         if !native {
             Self::upload_overlay(&self.queue, &self.overlay_tee._texture, tees);
@@ -491,6 +514,12 @@ impl GpuRenderer {
         }
         self.queue.submit(Some(encoder.finish()));
         output.present();
+        self.cached_map_camera = if map.is_some_and(|m| m.envelopes.envelopes.is_empty()) {
+            Some(camera)
+        } else {
+            None
+        };
+        self.cached_map_vertices = map_vertex_count;
         self.scene_cache = scene;
         Ok(())
     }
