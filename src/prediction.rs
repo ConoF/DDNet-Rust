@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 use crate::hook::{Hook, HookState, HookTuning};
 use crate::input::{InputFrame, PlayerInput};
 use crate::map::GameMap;
-use crate::netobjects::{CharacterCoreNet, PlayerInfoNet, CHARACTER_TYPE};
+use crate::netobjects::{CharacterCoreNet, PlayerInfoNet, SwitchStateNet, CHARACTER_TYPE};
 use crate::physics::Vec2;
 use crate::simulator::{SimInput, TeeSimulator, MAX_CORE_VELOCITY};
 use crate::tuning_wire::ServerTuning;
@@ -130,9 +130,12 @@ impl LocalPredictor {
             return None;
         }
         let server_pos = Vec2::new(core.x as f32, core.y as f32);
-        // Until teleport, front/switch and freeze effects are replayed, do not
-        // extrapolate a character close enough to be affected by these tiles.
-        if map.has_unsupported_physics_near(server_pos) { return None; }
+        // The server sends authoritative per-team switch statuses inside
+        // UUID extension netobjects. Do not replay unknown or expiring beams.
+        let switches = SwitchStateNet::from_snapshot(authoritative);
+        if map.has_unsupported_physics_near_with_switches(
+            server_pos, switches.as_ref(), authoritative_tick, last_tick,
+        ) { return None; }
         // The map only contains a zone number; the server owns its tuning.
         // Predicting default physics within an unknown zone causes drift.
         if map.tune_zone_at(server_pos) != 0 && received.is_none() {
@@ -226,7 +229,10 @@ impl LocalPredictor {
                 aim: Vec2::new(input.target_x as f32, input.target_y as f32),
             }).ok()?;
             if map.crosses_tune_zone_change(previous, sim.position)
-                || map.crosses_unsupported_physics(previous, sim.position)
+                || map.crosses_unsupported_physics_with_switches(
+                    previous, sim.position, switches.as_ref(),
+                    authoritative_tick, last_tick,
+                )
             {
                 return None;
             }
@@ -238,9 +244,10 @@ impl LocalPredictor {
             )?;
             // The upstream speedup path uses ClampVel with the current
             // move restrictions; never let a speed tile defeat a stopper.
-            sim.character.velocity = map.clamp_restricted_velocity(
-                sim.position, sim.character.velocity,
-            );
+            sim.character.velocity = map.clamp_restricted_velocity_with_switches(
+                sim.position, sim.character.velocity, switches.as_ref(),
+                authoritative_tick, last_tick,
+            )?;
             // DDNet gamecore.cpp::Quantize writes and reads integer position,
             // 1/256-unit velocity and hook state on each predicted tick.
             // Delaying this until display output causes cumulative drift.
