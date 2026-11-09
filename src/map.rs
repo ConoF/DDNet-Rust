@@ -200,6 +200,24 @@ impl GameMap {
         })
     }
 
+    /// A zone transition invalidates already received tuning during prediction.
+    /// Sample the full segment so a narrow zone is not skipped at high speed.
+    pub fn crosses_tune_zone_change(&self, start: Vec2, end: Vec2) -> bool {
+        if self.tune_tiles.is_none() { return false; }
+        let dx = end.x - start.x;
+        let dy = end.y - start.y;
+        let distance = dx.hypot(dy);
+        if !distance.is_finite() || distance > 8192.0 { return true; }
+        let origin_zone = self.tune_zone_at(start);
+        let steps = (distance / 16.0).ceil().max(1.0) as usize;
+        (0..=steps).any(|i| {
+            let fraction = i as f32 / steps as f32;
+            self.tune_zone_at(Vec2::new(
+                start.x + dx * fraction, start.y + dy * fraction,
+            )) != origin_zone
+        })
+    }
+
     /// Mirrors CCollision::GetTile(int x, int y): integer division by 32,
     /// clamped to the game layer bounds; only 1..4 are returned.
     pub fn collision_tile_at_pixel(&self, x: i32, y: i32) -> u8 {

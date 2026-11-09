@@ -14,6 +14,8 @@ use crate::map::GameMap;
 use crate::netobjects::{CharacterCoreNet, PlayerInfoNet, CHARACTER_TYPE};
 use crate::physics::Vec2;
 use crate::simulator::{SimInput, TeeSimulator, MAX_CORE_VELOCITY};
+use crate::tuning_wire::ServerTuning;
+use crate::physics::Tuning;
 use crate::snapshot_delta::SnapshotState;
 
 pub const MAX_INPUT_HISTORY: usize = 256;
@@ -89,6 +91,32 @@ impl LocalPredictor {
         authoritative: &SnapshotState,
         map: &GameMap,
     ) -> Option<PredictedLocal> {
+        self.predict_inner(authoritative_tick, authoritative, map, None)
+    }
+
+    /// Live prediction uses server coefficients associated with the most
+    /// recent CRC-verified local snapshot; never guess a zone's tuning.
+    pub fn predict_with_tuning(
+        &self,
+        authoritative_tick: i32,
+        authoritative: &SnapshotState,
+        map: &GameMap,
+        tuning: &ServerTuning,
+    ) -> Option<PredictedLocal> {
+        self.predict_inner(authoritative_tick, authoritative, map, Some(tuning))
+    }
+
+    fn predict_inner(
+        &self,
+        authoritative_tick: i32,
+        authoritative: &SnapshotState,
+        map: &GameMap,
+        received: Option<&ServerTuning>,
+    ) -> Option<PredictedLocal> {
+        let (movement_tuning, hook_tuning) = match received {
+            Some(tuning) => tuning.simulation_params()?,
+            None => (Tuning::default(), HookTuning::default()),
+        };
         let id = local_character_id(authoritative)?;
         let object = authoritative.find(CHARACTER_TYPE, id)?;
         let core = CharacterCoreNet::from_object(object)?;
@@ -104,11 +132,13 @@ impl LocalPredictor {
         let server_pos = Vec2::new(core.x as f32, core.y as f32);
         // The map only contains a zone number; the server owns its tuning.
         // Predicting default physics within an unknown zone causes drift.
-        if map.tune_zone_at(server_pos) != 0 { return None; }
+        if map.tune_zone_at(server_pos) != 0 && received.is_none() {
+            return None;
+        }
         let ground_hook = if core.hook_state == HookState::Grabbed as i32 {
             if core.hooked_player != -1 || core.hook_tick < 0 { return None; }
             let anchor = Vec2::new(core.hook_x as f32, core.hook_y as f32);
-            let max_distance = HookTuning::default().length + 64.0;
+            let max_distance = hook_tuning.length + 64.0;
             if (anchor.x - server_pos.x).hypot(anchor.y - server_pos.y)
                 > max_distance
             {
@@ -149,6 +179,8 @@ impl LocalPredictor {
         }
 
         let mut sim = TeeSimulator::new(server_pos);
+        sim.movement_tuning = movement_tuning;
+        sim.hook_tuning = hook_tuning;
         sim.tick = u64::try_from(authoritative_tick).ok()?;
         sim.character.velocity = Vec2::new(
             core.velocity_x as f32 / 256.0,
@@ -190,7 +222,9 @@ impl LocalPredictor {
                 hook: input.hook != 0,
                 aim: Vec2::new(input.target_x as f32, input.target_y as f32),
             }).ok()?;
-            if map.crosses_tune_zone(previous, sim.position) { return None; }
+            if map.crosses_tune_zone_change(previous, sim.position) {
+                return None;
+            }
             // DDNet gamecore.cpp::Quantize writes and reads integer position,
             // 1/256-unit velocity and hook state on each predicted tick.
             // Delaying this until display output causes cumulative drift.
@@ -338,6 +372,33 @@ mod tests {
         assert_eq!(display.items[0].words[3],
             (expected.character.velocity.x * 256.0).round() as i32);
         assert_eq!(authoritative, original);
+    }
+
+    #[test]
+    fn server_tuning_changes_replayed_movement_without_touching_snapshot() {
+        let map = empty_map();
+        let baseline = snapshot(100, 100, 100);
+        let original = baseline.clone();
+        let mut predictor = LocalPredictor::new();
+        predictor.record_sent_input(input(101, 1));
+        let vanilla = predictor.predict(100, &baseline, &map).unwrap();
+        let mut values = [100i32; 47];
+        for (i, value) in [
+            (0, 1000), (1, 200), (2, 50), (3, 1320),
+            (4, 1200), (5, 500), (6, 800), (7, 95),
+            (8, 38000), (9, 8000), (10, 300), (11, 1500),
+            (12, 50), (13, 55000), (14, 200000),
+            (15, 140), (32, 100), (37, 125), (45, 0), (46, 0),
+        ] { values[i] = value; }
+        let tuned = ServerTuning { values };
+        let custom = predictor.predict_with_tuning(
+            100, &baseline, &map, &tuned,
+        ).unwrap();
+        assert!(custom.position.x > vanilla.position.x);
+        assert_eq!(baseline, original);
+        values[14] = 0;
+        assert!(predictor.predict_with_tuning(100, &baseline, &map,
+            &ServerTuning { values }).is_none());
     }
 
     #[test]

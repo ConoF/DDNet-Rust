@@ -646,7 +646,12 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         ) {
             if !session.is_snapshot_recovering() {
                 if let Some(authoritative) = session.snapshot_state(tick) {
-                    if let Some(prediction) = predictor.predict(tick, authoritative, map) {
+                    // Online prediction requires tune coefficients already
+                    // paired with a CRC-verified local character snapshot.
+                    let predicted = session.tuning_for_local().and_then(|tuning|
+                        predictor.predict_with_tuning(tick, authoritative, map, tuning)
+                    );
+                    if let Some(prediction) = predicted {
                         apply_visual_prediction(display_state, prediction);
                     }
                 }
