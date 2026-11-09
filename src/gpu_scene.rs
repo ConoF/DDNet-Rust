@@ -193,11 +193,11 @@ impl Builder {
             // Cached rows are ordered left-to-right, exactly like the original
             // dense scan. Fall back to the dense scan for missing cache rows.
             let cached = occupied_rows.and_then(|rows| rows.get(y));
-            let mut draw_tile = |x: usize, this: &mut Builder| -> Result<(), VisualError> {
+            let draw_tile = |x: usize, this: &mut Builder| -> Result<(), VisualError> {
                 let tile = layer.tiles[y * layer.width + x];
                 if tile.index == 0 { return Ok(()); }
                 let sx = (x as f32 * 32.0 - cx) * camera.scale + this.w / 2.0;
-                let sy = (y as f32 * 32.0 - cy) * camera.scale + self.h / 2.0;
+                let sy = (y as f32 * 32.0 - cy) * camera.scale + this.h / 2.0;
                 let size = 32.0 * camera.scale;
                 let tile_u = f32::from(tile.index % 16);
                 let tile_v = f32::from(tile.index / 16);
