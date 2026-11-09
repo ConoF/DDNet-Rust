@@ -2,8 +2,9 @@
 //!
 //! Source of truth: game/mapitems.h, game/layers.cpp and game/collision.cpp in
 //! upstream DDNet 20.2.1. This is not the full DDNet collision system:
-//! front tiles, doors, tune zones, teleporters, movement restrictions and
-//! map entities need separate implementations.
+//! front tiles, doors, zone-specific tuning values, teleporters, movement
+//! restrictions and map entities need separate implementations. Tune layer IDs
+//! are decoded to prevent incorrect prediction with default tuning.
 
 use crate::datafile::{Datafile, DatafileError};
 use crate::physics::Vec2;
@@ -11,6 +12,7 @@ use crate::physics::Vec2;
 const MAPITEMTYPE_LAYER: u16 = 5;
 const LAYERTYPE_TILES: i32 = 2;
 const TILESLAYERFLAG_GAME: i32 = 1;
+const TILESLAYERFLAG_TUNE: i32 = 1 << 5;
 const TILE_SOLID: u8 = 1;
 const TILE_NOHOOK: u8 = 3;
 const TILE_NOLASER: u8 = 4;
@@ -21,6 +23,8 @@ pub enum MapError {
     InvalidTileLayer,
     InvalidDimensions,
     InvalidTileData,
+    InvalidTuneLayer,
+    InvalidTuneData,
     InvalidMotion,
     MotionTooLarge,
     Datafile(DatafileError),
@@ -40,11 +44,20 @@ pub struct Tile {
     pub reserved: u8,
 }
 
+/// CTuneTile, exactly two bytes: m_Number followed by m_Type.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TuneTile {
+    pub number: u8,
+    pub tile_type: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameMap {
     pub width: usize,
     pub height: usize,
     pub tiles: Vec<Tile>,
+    /// Server-defined tune parameters are not encoded in this layer.
+    tune_tiles: Option<Vec<TuneTile>>,
 }
 
 fn layer_int(payload: &[u8], offset: usize) -> Option<i32> {
@@ -91,7 +104,38 @@ impl GameMap {
         .map_err(|_| MapError::InvalidTileLayer)?;
         let tile_bytes = tile_count.checked_mul(4).ok_or(MapError::InvalidDimensions)?;
         let data = file.raw_data(data_index, tile_bytes)?;
-        Self::from_tile_bytes(width, height, &data)
+        let mut map = Self::from_tile_bytes(width, height, &data)?;
+        // CMapItemLayerTilemap_v2Legacy::m_Tune is at 76, while the
+        // v3/DDRace tilemap stores it at 88 after the layer name.
+        if let Some(tune) = file.items.iter().find(|item| {
+            item.type_id == MAPITEMTYPE_LAYER
+                && layer_int(item.payload, 4) == Some(LAYERTYPE_TILES)
+                && layer_int(item.payload, 24).is_some_and(|flags| {
+                    flags & TILESLAYERFLAG_GAME == 0
+                        && flags & TILESLAYERFLAG_TUNE != 0
+                })
+        }) {
+            let payload = tune.payload;
+            let version = layer_int(payload, 12).ok_or(MapError::InvalidTuneLayer)?;
+            let offset = if version >= 3 { 88 } else { 76 };
+            if version < 2 || payload.len() < offset + 4
+                || layer_int(payload, 16) != Some(width as i32)
+                || layer_int(payload, 20) != Some(height as i32)
+            {
+                return Err(MapError::InvalidTuneLayer);
+            }
+            let tune_index = usize::try_from(
+                layer_int(payload, offset).ok_or(MapError::InvalidTuneLayer)?,
+            ).map_err(|_| MapError::InvalidTuneLayer)?;
+            let tune_bytes = tile_count.checked_mul(2)
+                .ok_or(MapError::InvalidDimensions)?;
+            let raw = file.raw_data(tune_index, tune_bytes)?;
+            if raw.len() != tune_bytes { return Err(MapError::InvalidTuneData); }
+            map.tune_tiles = Some(raw.chunks_exact(2)
+                .map(|pair| TuneTile { number: pair[0], tile_type: pair[1] })
+                .collect());
+        }
+        Ok(map)
     }
 
     /// Parse CTile records (index, flags, skip, reserved) with explicit
@@ -117,7 +161,7 @@ impl GameMap {
                 reserved: tile[3],
             })
             .collect();
-        Ok(Self { width, height, tiles })
+        Ok(Self { width, height, tiles, tune_tiles: None })
     }
 
     pub fn tile(&self, x: usize, y: usize) -> Option<Tile> {
@@ -125,6 +169,35 @@ impl GameMap {
             return None;
         }
         self.tiles.get(y * self.width + x).copied()
+    }
+
+    /// CCollision::IsTune(GetMapIndex(pos)): nonzero type activates a zone.
+    /// C++ GetMapIndex uses truncated pixel coordinates, then clamps.
+    pub fn tune_zone_at(&self, pos: Vec2) -> u8 {
+        let Some(tiles) = self.tune_tiles.as_ref() else { return 0; };
+        if !pos.x.is_finite() || !pos.y.is_finite() { return 0; }
+        let x = (pos.x as i32 / 32).clamp(0, self.width as i32 - 1) as usize;
+        let y = (pos.y as i32 / 32).clamp(0, self.height as i32 - 1) as usize;
+        match tiles.get(y * self.width + x) {
+            Some(tile) if tile.tile_type != 0 => tile.number,
+            _ => 0,
+        }
+    }
+
+    /// Sample at most every half tile while moving between snapshot ticks:
+    /// checking only endpoints can miss a narrow tune zone at high velocity.
+    /// Refuse nonfinite/excessive motion rather than assuming vanilla tuning.
+    pub fn crosses_tune_zone(&self, start: Vec2, end: Vec2) -> bool {
+        if self.tune_tiles.is_none() { return false; }
+        let dx = end.x - start.x;
+        let dy = end.y - start.y;
+        let distance = dx.hypot(dy);
+        if !distance.is_finite() || distance > 8192.0 { return true; }
+        let steps = (distance / 16.0).ceil().max(1.0) as usize;
+        (0..=steps).any(|i| {
+            let t = i as f32 / steps as f32;
+            self.tune_zone_at(Vec2::new(start.x + dx * t, start.y + dy * t)) != 0
+        })
     }
 
     /// Mirrors CCollision::GetTile(int x, int y): integer division by 32,
@@ -414,6 +487,75 @@ mod tests {
             GameMap::from_tile_bytes(usize::MAX, 2, &[]),
             Err(MapError::InvalidDimensions)
         );
+    }
+
+    #[test]
+    fn legacy_and_modern_tune_layers_decode_zone_numbers() {
+        use crate::datafile::{Item, RawBlock};
+        for version in [2i32, 3i32] {
+            let (width, height) = (4usize, 3usize);
+            let game_bytes = vec![0u8; width * height * 4];
+            let mut tune_bytes = vec![0u8; width * height * 2];
+            tune_bytes[(width + 1) * 2..(width + 1) * 2 + 2]
+                .copy_from_slice(&[7, 68]);
+            tune_bytes[(width + 2) * 2..(width + 2) * 2 + 2]
+                .copy_from_slice(&[9, 0]);
+            let mut game = vec![0u8; 60];
+            game[4..8].copy_from_slice(&LAYERTYPE_TILES.to_le_bytes());
+            game[16..20].copy_from_slice(&(width as i32).to_le_bytes());
+            game[20..24].copy_from_slice(&(height as i32).to_le_bytes());
+            game[24..28].copy_from_slice(&TILESLAYERFLAG_GAME.to_le_bytes());
+            let offset = if version == 2 { 76 } else { 88 };
+            let mut tune = vec![0u8; offset + 4];
+            tune[4..8].copy_from_slice(&LAYERTYPE_TILES.to_le_bytes());
+            tune[12..16].copy_from_slice(&version.to_le_bytes());
+            tune[16..20].copy_from_slice(&(width as i32).to_le_bytes());
+            tune[20..24].copy_from_slice(&(height as i32).to_le_bytes());
+            tune[24..28].copy_from_slice(&TILESLAYERFLAG_TUNE.to_le_bytes());
+            tune[offset..offset+4].copy_from_slice(&1i32.to_le_bytes());
+            let file = Datafile {
+                version: 3, item_types: vec![],
+                items: vec![
+                    Item { type_id: MAPITEMTYPE_LAYER, id: 0, payload: &game },
+                    Item { type_id: MAPITEMTYPE_LAYER, id: 1, payload: &tune },
+                ],
+                raw_blocks: vec![
+                    RawBlock { encoded: &game_bytes, uncompressed_size: None },
+                    RawBlock { encoded: &tune_bytes, uncompressed_size: None },
+                ],
+            };
+            let parsed = GameMap::from_datafile(&file, width * height).unwrap();
+            assert_eq!(parsed.tune_zone_at(Vec2::new(48.0, 48.0)), 7);
+            assert_eq!(parsed.tune_zone_at(Vec2::new(80.0, 48.0)), 0);
+            assert_eq!(parsed.tune_zone_at(Vec2::new(-300.0, 48.0)), 0);
+            assert_eq!(parsed.tune_zone_at(Vec2::new(999.0, 48.0)), 0);
+            assert!(parsed.crosses_tune_zone(
+                Vec2::new(16.0, 48.0), Vec2::new(108.0, 48.0),
+            ));
+            assert!(!parsed.crosses_tune_zone(
+                Vec2::new(16.0, 16.0), Vec2::new(108.0, 16.0),
+            ));
+            let vanilla = GameMap::from_tile_bytes(
+                width, height, &game_bytes,
+            ).unwrap();
+            assert_eq!(vanilla.tune_zone_at(Vec2::new(48.0, 48.0)), 0);
+            assert!(!vanilla.crosses_tune_zone(
+                Vec2::new(16.0, 48.0), Vec2::new(108.0, 48.0),
+            ));
+            let mut mismatched_tune = tune.clone();
+            mismatched_tune[20..24].copy_from_slice(&4i32.to_le_bytes());
+            let malformed = Datafile {
+                version: 3, item_types: vec![],
+                items: vec![
+                    Item { type_id: MAPITEMTYPE_LAYER, id: 0, payload: &game },
+                    Item { type_id: MAPITEMTYPE_LAYER, id: 1,
+                        payload: &mismatched_tune },
+                ],
+                raw_blocks: file.raw_blocks.clone(),
+            };
+            assert_eq!(GameMap::from_datafile(&malformed, width * height),
+                Err(MapError::InvalidTuneLayer));
+        }
     }
 
     #[test]

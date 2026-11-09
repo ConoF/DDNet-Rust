@@ -102,6 +102,9 @@ impl LocalPredictor {
             return None;
         }
         let server_pos = Vec2::new(core.x as f32, core.y as f32);
+        // The map only contains a zone number; the server owns its tuning.
+        // Predicting default physics within an unknown zone causes drift.
+        if map.tune_zone_at(server_pos) != 0 { return None; }
         let ground_hook = if core.hook_state == HookState::Grabbed as i32 {
             if core.hooked_player != -1 || core.hook_tick < 0 { return None; }
             let anchor = Vec2::new(core.hook_x as f32, core.hook_y as f32);
@@ -180,12 +183,14 @@ impl LocalPredictor {
             if input.hook != 0 && sim.hook.state == HookState::Idle {
                 return None;
             }
+            let previous = sim.position;
             sim.step(map, SimInput {
                 direction: input.direction,
                 jump: input.jump != 0,
                 hook: input.hook != 0,
                 aim: Vec2::new(input.target_x as f32, input.target_y as f32),
             }).ok()?;
+            if map.crosses_tune_zone(previous, sim.position) { return None; }
             // DDNet gamecore.cpp::Quantize writes and reads integer position,
             // 1/256-unit velocity and hook state on each predicted tick.
             // Delaying this until display output causes cumulative drift.
@@ -465,6 +470,49 @@ mod tests {
         predictor.record_sent_input(input(42, 0));
         assert_eq!(predictor.recorded_count(), 1);
         assert!(predictor.predict(100, &snapshot(100, 100, 100), &map).is_none());
+    }
+
+    #[test]
+    fn prediction_avoids_unknown_tune_zone_even_when_crossed_between_ticks() {
+        use crate::datafile::{Datafile, Item, RawBlock};
+        let (width, height) = (8usize, 4usize);
+        let tiles = vec![0u8; width * height * 4];
+        let mut zones = vec![0u8; width * height * 2];
+        zones[(width + 2) * 2..(width + 2) * 2 + 2]
+            .copy_from_slice(&[7, 68]);
+        let mut game = vec![0u8; 60];
+        game[4..8].copy_from_slice(&2i32.to_le_bytes());
+        game[16..20].copy_from_slice(&(width as i32).to_le_bytes());
+        game[20..24].copy_from_slice(&(height as i32).to_le_bytes());
+        game[24..28].copy_from_slice(&1i32.to_le_bytes());
+        let mut tune = vec![0u8; 80];
+        tune[4..8].copy_from_slice(&2i32.to_le_bytes());
+        tune[12..16].copy_from_slice(&2i32.to_le_bytes());
+        tune[16..20].copy_from_slice(&(width as i32).to_le_bytes());
+        tune[20..24].copy_from_slice(&(height as i32).to_le_bytes());
+        tune[24..28].copy_from_slice(&32i32.to_le_bytes());
+        tune[76..80].copy_from_slice(&1i32.to_le_bytes());
+        let datafile = Datafile {
+            version: 3, item_types: vec![],
+            items: vec![
+                Item { type_id: 5, id: 0, payload: &game },
+                Item { type_id: 5, id: 1, payload: &tune },
+            ],
+            raw_blocks: vec![
+                RawBlock { encoded: &tiles, uncompressed_size: None },
+                RawBlock { encoded: &zones, uncompressed_size: None },
+            ],
+        };
+        let map = GameMap::from_datafile(&datafile, width * height).unwrap();
+        let mut predictor = LocalPredictor::new();
+        for tick in 101..=109 { predictor.record_sent_input(input(tick, 1)); }
+        let approaching = snapshot(100, 61, 48);
+        assert_eq!(map.tune_zone_at(Vec2::new(61.0, 48.0)), 0);
+        assert!(predictor.predict(100, &approaching, &map).is_none());
+        let already_inside = snapshot(100, 80, 48);
+        assert!(predictor.predict(100, &already_inside, &map).is_none());
+        let outside = snapshot(100, 16, 16);
+        assert!(predictor.predict(100, &outside, &map).is_some());
     }
 
     #[test]
