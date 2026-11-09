@@ -309,9 +309,9 @@ impl GameMap {
         match tile.index {
             TILE_STOP => match flags {
                 0 | 1 => CANTMOVE_DOWN,
-                8 | 11 => CANTMOVE_LEFT,
+                8 | 9 => CANTMOVE_LEFT,
                 3 | 2 => CANTMOVE_UP,
-                9 | 10 => CANTMOVE_RIGHT,
+                11 | 10 => CANTMOVE_RIGHT,
                 _ => 0,
             },
             TILE_STOPS => match flags {
@@ -1036,9 +1036,9 @@ mod tests {
         let mut tile = Tile { index: TILE_STOP, ..Tile::default() };
         for (flags, expected) in [
             (0, CANTMOVE_DOWN), (1, CANTMOVE_DOWN),
-            (8, CANTMOVE_LEFT), (11, CANTMOVE_LEFT),
+            (8, CANTMOVE_LEFT), (9, CANTMOVE_LEFT),
             (3, CANTMOVE_UP), (2, CANTMOVE_UP),
-            (9, CANTMOVE_RIGHT), (10, CANTMOVE_RIGHT),
+            (11, CANTMOVE_RIGHT), (10, CANTMOVE_RIGHT),
         ] {
             tile.flags = flags;
             assert_eq!(GameMap::stopper_restrictions(tile), expected,
