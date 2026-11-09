@@ -240,19 +240,38 @@ pub fn build_gpu_tees(
     viewport: (u32, u32), skin: Option<&Texture>, game: Option<&Texture>,
     slots: SpriteTextureSlots,
 ) -> Result<GpuTeeScene, RenderError> {
+    let mut result = GpuTeeScene::default();
+    build_gpu_tees_into(&mut result, state, camera, tick, viewport,
+        (skin, game), slots)?;
+    Ok(result)
+}
+
+/// Rebuild the native tee/hook batches without reallocating their CPU
+/// vertex storage. The caller keeps this scene across presentation frames.
+/// The same two-pass ordering as build_gpu_tees is guaranteed.
+pub fn build_gpu_tees_into(
+    output: &mut GpuTeeScene,
+    state: &SnapshotState, camera: Camera, tick: u64,
+    viewport: (u32, u32), textures: (Option<&Texture>, Option<&Texture>),
+    slots: SpriteTextureSlots,
+) -> Result<(), RenderError> {
     if !(0.05..=16.0).contains(&camera.scale)
         || !camera.center.x.is_finite() || !camera.center.y.is_finite()
         || viewport.0 == 0 || viewport.1 == 0
     {
         return Err(RenderError::InvalidCamera);
     }
+    output.vertices.clear();
+    output.batches.clear();
+    output.characters = 0;
+    let (skin, game) = textures;
     if skin.is_none_or(|s| !valid_sheet(s, GRID_SKIN)) {
-        // Caller may use the legacy silhouette path when no skin exists.
-        return Ok(GpuTeeScene::default());
+        // Preserve reusable capacity, but never present stale tee sprites.
+        return Ok(());
     }
     let game = game.is_some_and(|s| valid_sheet(s, GRID_GAME));
     let mut b = TeeBuilder {
-        scene: GpuTeeScene::default(),
+        scene: std::mem::take(output),
         width: viewport.0 as f32, height: viewport.1 as f32, slots,
     };
     for item in &state.items {
@@ -269,7 +288,8 @@ pub fn build_gpu_tees(
             b.scene.characters += 1;
         }
     }
-    Ok(b.scene)
+    *output = b.scene;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -294,6 +314,45 @@ mod tests {
     fn camera()->Camera {
         Camera {center:Vec2::new(50.0,50.0),scale:1.0}
     }
+    #[test]
+    fn native_tee_scene_reuses_memory_and_matches_fresh_build_each_frame() {
+        let skin = tex(80, 40);
+        let game = tex(320, 160);
+        let character = snap(1, true);
+        let mut result = GpuTeeScene::default();
+        build_gpu_tees_into(&mut result, &character, camera(), 100,
+            (400, 200), (Some(&skin), Some(&game)), slots()).unwrap();
+        assert!(!result.vertices.is_empty());
+        assert!(!result.batches.is_empty());
+        let vertex_ptr = result.vertices.as_ptr();
+        let batch_ptr = result.batches.as_ptr();
+        for (tick, weapon) in [(101u64, 1), (102, 2), (110, 5)] {
+            let character = snap(weapon, true);
+            build_gpu_tees_into(&mut result, &character, camera(), tick,
+                (400, 200), (Some(&skin), Some(&game)), slots()).unwrap();
+            let expected = build_gpu_tees(&character, camera(), tick,
+                (400, 200), Some(&skin), Some(&game), slots()).unwrap();
+            assert_eq!(result, expected);
+            assert_eq!(result.vertices.as_ptr(), vertex_ptr);
+            assert_eq!(result.batches.as_ptr(), batch_ptr);
+        }
+        build_gpu_tees_into(&mut result, &character, camera(), 120,
+            (400, 200), (None, Some(&game)), slots()).unwrap();
+        assert_eq!(result.characters, 0);
+        assert!(result.vertices.is_empty() && result.batches.is_empty());
+        assert_eq!(result.vertices.as_ptr(), vertex_ptr);
+        assert_eq!(result.batches.as_ptr(), batch_ptr);
+        // Bad camera values cannot destroy the last valid geometry.
+        let expected = build_gpu_tees(&character, camera(), 130,
+            (400, 200), Some(&skin), Some(&game), slots()).unwrap();
+        build_gpu_tees_into(&mut result, &character, camera(), 130,
+            (400, 200), (Some(&skin), Some(&game)), slots()).unwrap();
+        assert!(build_gpu_tees_into(&mut result, &character,
+            Camera { scale: f32::NAN, ..camera() }, 131,
+            (400, 200), (Some(&skin), Some(&game)), slots()).is_err());
+        assert_eq!(result, expected);
+    }
+
     #[test]
     fn body_feet_eye_and_weapon_are_gpu_geometry_not_cpu_pixels() {
         let skin=tex(80,40);let game=tex(320,160);

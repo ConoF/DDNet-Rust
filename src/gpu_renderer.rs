@@ -13,7 +13,7 @@ use crate::gpu_scene::{
     build_gpu_scene_into_cached, cache_quad_bounds, cache_occupied_tiles,
     QuadBounds, OccupiedTileRows, SceneCaches, GpuBatch, GpuScene, GpuVertex, VERTEX_STRIDE,
 };
-use crate::gpu_tees::{build_gpu_tees, GpuTeeScene, SpriteTextureSlots};
+use crate::gpu_tees::{build_gpu_tees_into, GpuTeeScene, SpriteTextureSlots};
 use crate::gpu_hud::{
     font_atlas_rgba, GpuHudScene, FONT_WIDTH, FONT_HEIGHT,
     HUD_FONT_SLOT, HUD_SOLID_SLOT,
@@ -67,6 +67,7 @@ pub struct GpuRenderer {
     // every frame (width * height * 4 bytes). Reuse this staging buffer.
     overlay_upload: Vec<u8>,
     scene_cache: GpuScene,
+    tee_cache: GpuTeeScene,
     cached_map_camera: Option<Camera>,
     cached_map_vertices: usize,
     quad_bounds: QuadBounds,
@@ -223,6 +224,7 @@ impl GpuRenderer {
             vertex_upload: Vec::with_capacity(INITIAL_VERTICES * VERTEX_STRIDE),
             overlay_upload: Vec::new(),
             scene_cache: GpuScene::default(),
+            tee_cache: GpuTeeScene::default(),
             cached_map_camera: None, cached_map_vertices: 0,
             quad_bounds: Vec::new(),
             occupied_tiles: Vec::new(),
@@ -416,20 +418,23 @@ impl GpuRenderer {
         // actual native vertices. No tee framebuffer or full-screen tee
         // texture is uploaded in this path.
         let native = self.skin_ready && map.is_some();
-        let mut sprite = if native {
-            tee.state.map(|state| build_gpu_tees(
-                state, camera, tee.tick,
-                (self.config.width, self.config.height),
-                tee.skin, tee.game, SpriteTextureSlots {
-                    white: self.map_image_count,
-                    skin: self.map_image_count + 1,
-                    game: self.map_image_count + 2,
-                },
-            )).transpose().map_err(|e| format!("GPU tee geometry: {e:?}"))?
-                .unwrap_or_default()
-        } else {
-            GpuTeeScene::default()
-        };
+        self.tee_cache.vertices.clear();
+        self.tee_cache.batches.clear();
+        self.tee_cache.characters = 0;
+        if native {
+            if let Some(state) = tee.state {
+                build_gpu_tees_into(
+                    &mut self.tee_cache, state, camera, tee.tick,
+                    (self.config.width, self.config.height),
+                    (tee.skin, tee.game), SpriteTextureSlots {
+                        white: self.map_image_count,
+                        skin: self.map_image_count + 1,
+                        game: self.map_image_count + 2,
+                    },
+                ).map_err(|e| format!("GPU tee geometry: {e:?}"))?;
+            }
+        }
+        let sprite = &mut self.tee_cache;
         self.last_sprite_vertices = sprite.vertices.len();
         let tee_base = u32::try_from(scene.vertices.len())
             .map_err(|_| String::from("GPU tee vertex offset overflow"))?;
@@ -437,7 +442,7 @@ impl GpuRenderer {
             batch.start = batch.start.checked_add(tee_base)
                 .ok_or("GPU tee batch offset overflow")?;
         }
-        scene.vertices.extend(sprite.vertices);
+        scene.vertices.extend_from_slice(&sprite.vertices);
 
         self.last_hud_vertices = hud.vertices.len();
         let hud_base = u32::try_from(scene.vertices.len())
