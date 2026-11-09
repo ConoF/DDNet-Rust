@@ -543,7 +543,7 @@ mod tests {
         use crate::protocol::write_int;
         let mut session = GameSession06::new(String::new(), 4096, 64);
         session.loaded_map = Some(
-            GameMap::from_tile_bytes(4, 4, &vec![0; 4 * 4 * 4]).unwrap()
+            GameMap::from_tile_bytes(4, 4, &[0; 4 * 4 * 4]).unwrap()
         );
         let mut payload = Vec::new();
         for _ in 0..47 { write_int(100, &mut payload); }
