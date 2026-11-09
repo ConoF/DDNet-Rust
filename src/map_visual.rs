@@ -421,23 +421,29 @@ impl VisualMap {
             let y0 = ((cy - visible_y) / 32.0).floor().max(0.0) as usize;
             let x1 = ((cx + visible_x) / 32.0).ceil().max(0.0) as usize;
             let y1 = ((cy + visible_y) / 32.0).ceil().max(0.0) as usize;
+            // A DDNet group clip is constant across this layer. Computing
+            // its projection for every nonempty tile wastes work on dense
+            // maps, especially in the software rendering fallback.
+            let clip = layer.transform.screen_clip(
+                camera, frame.width as f32, frame.height as f32,
+            );
             for y in y0.min(layer.height)..y1.saturating_add(1).min(layer.height) {
+                let start_y = ((y as f32 * 32.0 - cy) * camera.scale
+                    + frame.height as f32 * 0.5).round() as i64;
+                let end_y = (((y + 1) as f32 * 32.0 - cy) * camera.scale
+                    + frame.height as f32 * 0.5).round() as i64;
+                if end_y <= start_y { continue; }
                 for x in x0.min(layer.width)..x1.saturating_add(1).min(layer.width) {
                     let tile = layer.tiles[y * layer.width + x];
                     if tile.index == 0 { continue; }
                     let start_x = ((x as f32 * 32.0 - cx) * camera.scale
                         + frame.width as f32 * 0.5).round() as i64;
-                    let start_y = ((y as f32 * 32.0 - cy) * camera.scale
-                        + frame.height as f32 * 0.5).round() as i64;
                     let end_x = (((x + 1) as f32 * 32.0 - cx) * camera.scale
                         + frame.width as f32 * 0.5).round() as i64;
-                    let end_y = (((y + 1) as f32 * 32.0 - cy) * camera.scale
-                        + frame.height as f32 * 0.5).round() as i64;
-                    if end_x <= start_x || end_y <= start_y { continue; }
+                    if end_x <= start_x { continue; }
                     blit_tile(frame, texture, tile, tint,
                         (start_x, start_y, end_x, end_y), (cell_w, cell_h),
-                        layer.transform.screen_clip(camera, frame.width as f32,
-                            frame.height as f32));
+                        clip);
                     drawn += 1;
                 }
             }
@@ -563,6 +569,54 @@ mod tests {
         let blended = frame.pixel(48, 16).unwrap();
         assert_ne!(blended, BACKGROUND);
         assert!((blended >> 8 & 255) > (blended >> 16 & 255));
+    }
+
+    #[test]
+    fn cached_layer_clip_and_row_projection_match_individual_tile_blits() {
+        let (image, layer, atlas, tiles) = make_fixture();
+        let group = words(&[2, 0, 0, 100, 100, 0, 1, 1, 8, 4, 48, 24]);
+        let file = Datafile {
+            version: 3, item_types: vec![],
+            items: vec![
+                Item { type_id: MAP_IMAGE, id: 0, payload: &image },
+                Item { type_id: MAP_GROUP, id: 0, payload: &group },
+                Item { type_id: MAP_LAYER, id: 0, payload: &layer },
+            ],
+            raw_blocks: vec![
+                RawBlock { encoded: b"synthetic\0", uncompressed_size: None },
+                RawBlock { encoded: &atlas, uncompressed_size: None },
+                RawBlock { encoded: &tiles, uncompressed_size: None },
+            ],
+        };
+        let map = VisualMap::from_datafile(&file, Path::new(".")).unwrap();
+        let textured = &map.layers[0];
+        let texture = &map.images[textured.image];
+        let cell = (texture.width as usize / 16, texture.height as usize / 16);
+        for (center_x, scale) in [(32.0, 1.0), (24.0, 1.5), (56.0, 0.75)] {
+            let camera = Camera {center:Vec2::new(center_x,16.0),scale};
+            let mut result = Framebuffer::new(96, 64).unwrap();
+            let mut reference = Framebuffer::new(96, 64).unwrap();
+            map.render(&mut result, camera).unwrap();
+            reference.clear(BACKGROUND);
+            let cx = camera.center.x * textured.transform.parallax_x / 100.0
+                - textured.transform.offset_x;
+            let cy = camera.center.y * textured.transform.parallax_y / 100.0
+                - textured.transform.offset_y;
+            for (index, tile) in textured.tiles.iter().enumerate() {
+                if tile.index == 0 { continue; }
+                let x = index % textured.width;
+                let y = index / textured.width;
+                let start_x = ((x as f32 * 32.0 - cx) * scale + 48.0).round() as i64;
+                let end_x = (((x + 1) as f32 * 32.0 - cx) * scale + 48.0).round() as i64;
+                let start_y = ((y as f32 * 32.0 - cy) * scale + 32.0).round() as i64;
+                let end_y = (((y + 1) as f32 * 32.0 - cy) * scale + 32.0).round() as i64;
+                blit_tile(&mut reference, texture, *tile, textured.tint,
+                    (start_x, start_y, end_x, end_y), cell,
+                    textured.transform.screen_clip(camera, 96.0, 64.0));
+            }
+            assert_eq!(result.pixels, reference.pixels,
+                "per-layer clipping must match original per-tile projection");
+        }
     }
 
     #[test]
