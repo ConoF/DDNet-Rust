@@ -28,6 +28,20 @@ pub const TILE_TELE_CHECK_EVIL_IN: u8 = 63;
 const TILE_SOLID: u8 = 1;
 const TILE_NOHOOK: u8 = 3;
 const TILE_NOLASER: u8 = 4;
+pub const TILE_STOP: u8 = 60;
+pub const TILE_STOPS: u8 = 61;
+pub const TILE_STOPA: u8 = 62;
+
+/// Exact directional bits of collision.h's CANTMOVE_* enum.
+pub const CANTMOVE_LEFT: u8 = 1;
+pub const CANTMOVE_RIGHT: u8 = 2;
+pub const CANTMOVE_UP: u8 = 4;
+pub const CANTMOVE_DOWN: u8 = 8;
+const ALL_MOVE_RESTRICTIONS: u8 =
+    CANTMOVE_LEFT | CANTMOVE_RIGHT | CANTMOVE_UP | CANTMOVE_DOWN;
+const TILEFLAG_XFLIP: u8 = 1;
+const TILEFLAG_YFLIP: u8 = 2;
+const TILEFLAG_ROTATE: u8 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapError {
@@ -288,6 +302,81 @@ impl GameMap {
         Some(y * self.width + x)
     }
 
+    /// Port of collision.cpp::GetMoveRestrictionsRaw. Only rotation and
+    /// flip bits participate; opacity and reserved bits are ignored.
+    fn stopper_restrictions(tile: Tile) -> u8 {
+        let flags = tile.flags & (TILEFLAG_XFLIP | TILEFLAG_YFLIP | TILEFLAG_ROTATE);
+        match tile.index {
+            TILE_STOP => match flags {
+                0 | 1 => CANTMOVE_DOWN,
+                8 | 11 => CANTMOVE_LEFT,
+                3 | 2 => CANTMOVE_UP,
+                9 | 10 => CANTMOVE_RIGHT,
+                _ => 0,
+            },
+            TILE_STOPS => match flags {
+                0 | 3 | 2 | 1 => CANTMOVE_UP | CANTMOVE_DOWN,
+                8 | 11 | 10 | 9 => CANTMOVE_LEFT | CANTMOVE_RIGHT,
+                _ => 0,
+            },
+            TILE_STOPA => ALL_MOVE_RESTRICTIONS,
+            _ => 0,
+        }
+    }
+
+    /// Port of collision.cpp::GetMoveRestrictions for the static game and
+    /// front layers. The five samples are center, right, down, left, up.
+    /// Direction zero only reads one-way STOP tiles; neighboring samples
+    /// apply the mask of their respective incoming movement direction.
+    /// Dynamic switch doors require per-team state and are not included.
+    pub fn move_restrictions(&self, pos: Vec2, distance: f32) -> u8 {
+        if !pos.x.is_finite() || !pos.y.is_finite()
+            || !distance.is_finite() || !(0.0..=32.0).contains(&distance)
+        {
+            return ALL_MOVE_RESTRICTIONS;
+        }
+        let samples = [
+            (0.0, 0.0, 0),
+            (1.0, 0.0, CANTMOVE_RIGHT),
+            (0.0, 1.0, CANTMOVE_DOWN),
+            (-1.0, 0.0, CANTMOVE_LEFT),
+            (0.0, -1.0, CANTMOVE_UP),
+        ];
+        let mut result = 0;
+        for (dx, dy, direction) in samples {
+            let point = Vec2::new(pos.x + dx * distance, pos.y + dy * distance);
+            let Some(index) = self.tile_index_at(point) else {
+                return ALL_MOVE_RESTRICTIONS;
+            };
+            let front = self.front_tiles.as_ref().and_then(|v| v.get(index)).copied();
+            for tile in [Some(self.tiles[index]), front].into_iter().flatten() {
+                let restriction = Self::stopper_restrictions(tile);
+                if direction == 0 {
+                    if tile.index == TILE_STOP {
+                        result |= restriction;
+                    }
+                } else {
+                    result |= restriction & direction;
+                }
+            }
+        }
+        result
+    }
+
+    /// Same sign-aware ClampVel operation as collision.cpp. It may zero
+    /// one axis without changing the other, unlike a magnitude clamp.
+    pub fn clamp_restricted_velocity(&self, pos: Vec2, vel: Vec2) -> Vec2 {
+        let mask = self.move_restrictions(pos, 18.0);
+        Vec2::new(
+            if (vel.x > 0.0 && mask & CANTMOVE_RIGHT != 0)
+                || (vel.x < 0.0 && mask & CANTMOVE_LEFT != 0)
+            { 0.0 } else { vel.x },
+            if (vel.y > 0.0 && mask & CANTMOVE_DOWN != 0)
+                || (vel.y < 0.0 && mask & CANTMOVE_UP != 0)
+            { 0.0 } else { vel.y },
+        )
+    }
+
     /// A CTeleTile with zero number/type has no active teleport behavior.
     pub fn tele_tile_at(&self, position: Vec2) -> Option<TeleTile> {
         let tile = *self.tele_tiles.as_ref()?.get(self.tile_index_at(position)?)?;
@@ -410,10 +499,15 @@ impl GameMap {
                 let game_index = self.tiles[index].index;
                 // Freeze, death, stoppers and gameplay powerups alter movement
                 // or control. Pure solid/nohook/nolaser tile states are safe.
-                if !matches!(game_index, 0 | TILE_SOLID | TILE_NOHOOK | TILE_NOLASER) {
+                if !matches!(game_index,
+                    0 | TILE_SOLID | TILE_NOHOOK | TILE_NOLASER
+                        | TILE_STOP | TILE_STOPS | TILE_STOPA
+                ) {
                     return true;
                 }
-                if self.front_tiles.as_ref().is_some_and(|layer| layer[index].index != 0)
+                if self.front_tiles.as_ref().is_some_and(|layer| {
+                    !matches!(layer[index].index, 0 | TILE_STOP | TILE_STOPS | TILE_STOPA)
+                })
                     // Exit markers do not teleport a tee and must not
                     // unnecessarily suppress movement prediction nearby.
                     || self.tele_tiles.as_ref().is_some_and(|layer| {
@@ -935,6 +1029,76 @@ mod tests {
                 Vec2::new(245.0, 48.0), Vec2::new(290.0, 48.0),
             ), "a teleport exit is not a tee teleport input");
         }
+    }
+
+    #[test]
+    fn stopper_orientation_matches_upstream_rotation_and_flip_masks() {
+        let mut tile = Tile { index: TILE_STOP, ..Tile::default() };
+        for (flags, expected) in [
+            (0, CANTMOVE_DOWN), (1, CANTMOVE_DOWN),
+            (8, CANTMOVE_LEFT), (11, CANTMOVE_LEFT),
+            (3, CANTMOVE_UP), (2, CANTMOVE_UP),
+            (9, CANTMOVE_RIGHT), (10, CANTMOVE_RIGHT),
+        ] {
+            tile.flags = flags;
+            assert_eq!(GameMap::stopper_restrictions(tile), expected,
+                "STOP flags={flags}");
+            tile.flags = flags | 4;
+            assert_eq!(GameMap::stopper_restrictions(tile), expected,
+                "opaque flag must not change a stopper");
+        }
+        tile.index = TILE_STOPS;
+        for (flags, expected) in [
+            (0, CANTMOVE_UP | CANTMOVE_DOWN),
+            (3, CANTMOVE_UP | CANTMOVE_DOWN),
+            (8, CANTMOVE_LEFT | CANTMOVE_RIGHT),
+            (11, CANTMOVE_LEFT | CANTMOVE_RIGHT),
+        ] {
+            tile.flags = flags;
+            assert_eq!(GameMap::stopper_restrictions(tile), expected);
+        }
+        tile.index = TILE_STOPA;
+        assert_eq!(GameMap::stopper_restrictions(tile), ALL_MOVE_RESTRICTIONS);
+        tile.index = TILE_SOLID;
+        assert_eq!(GameMap::stopper_restrictions(tile), 0);
+    }
+
+    #[test]
+    fn static_stopper_samples_match_upstream_directional_clamping() {
+        let mut tiles = [0u8; 5 * 5 * 4];
+        let set = |data: &mut [u8], x: usize, y: usize, id: u8, flags: u8| {
+            let offset = (y * 5 + x) * 4;
+            data[offset] = id;
+            data[offset + 1] = flags;
+        };
+        set(&mut tiles, 3, 2, TILE_STOP, 11); // STOP right
+        set(&mut tiles, 1, 2, TILE_STOP, 8);  // STOP left
+        set(&mut tiles, 2, 3, TILE_STOPS, 0); // up/down
+        set(&mut tiles, 2, 1, TILE_STOPA, 0); // all dirs
+        let map = GameMap::from_tile_bytes(5, 5, &tiles).unwrap();
+        let pos = Vec2::new(80.0, 80.0);
+        assert_eq!(map.move_restrictions(pos, 18.0), ALL_MOVE_RESTRICTIONS);
+        assert_eq!(map.clamp_restricted_velocity(pos, Vec2::new(2.0, -4.0)),
+            Vec2::default());
+        assert_eq!(map.clamp_restricted_velocity(pos, Vec2::new(-2.0, 4.0)),
+            Vec2::default());
+
+        // A STOP on the center tile is the only blocker applicable from
+        // inside a tile. STOPS/STOPA on center must not block departure.
+        let mut center = [0u8; 3 * 3 * 4];
+        let middle = (3 + 1) * 4;
+        center[middle] = TILE_STOP;
+        let mut map = GameMap::from_tile_bytes(3, 3, &center).unwrap();
+        assert_eq!(map.move_restrictions(Vec2::new(48.0, 48.0), 18.0),
+            CANTMOVE_DOWN);
+        assert_eq!(map.clamp_restricted_velocity(Vec2::new(48.0, 48.0),
+            Vec2::new(4.0, -5.0)), Vec2::new(4.0, -5.0));
+        map.tiles[4].index = TILE_STOPS;
+        assert_eq!(map.move_restrictions(Vec2::new(48.0, 48.0), 18.0), 0);
+        map.tiles[4].index = TILE_STOPA;
+        assert_eq!(map.move_restrictions(Vec2::new(48.0, 48.0), 18.0), 0);
+        assert_eq!(map.move_restrictions(Vec2::new(f32::NAN, 0.0), 18.0),
+            ALL_MOVE_RESTRICTIONS);
     }
 
     #[test]
