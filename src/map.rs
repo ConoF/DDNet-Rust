@@ -414,7 +414,12 @@ impl GameMap {
                     return true;
                 }
                 if self.front_tiles.as_ref().is_some_and(|layer| layer[index].index != 0)
-                    || self.tele_tiles.as_ref().is_some_and(|layer| layer[index].tile_type != 0)
+                    // Exit markers do not teleport a tee and must not
+                    // unnecessarily suppress movement prediction nearby.
+                    || self.tele_tiles.as_ref().is_some_and(|layer| {
+                        !matches!(layer[index].tile_type,
+                            0 | TILE_TELE_OUT | TILE_TELE_CHECK_OUT)
+                    })
                     || self.switch_tiles.as_ref().is_some_and(|layer| layer[index].tile_type != 0)
                 {
                     return true;
@@ -906,6 +911,9 @@ mod tests {
                 ],
             };
             let map = GameMap::from_datafile(&file, W * H).unwrap();
+            assert!(!map.has_unsupported_physics_near(
+                Vec2::new(272.0, 48.0),
+            ), "teleport exit markers are not gameplay inputs");
             assert_eq!(map.tele_exit_count(4), 1);
             assert_eq!(map.unique_tele_exit(4), Some(Vec2::new(272.0, 48.0)));
             assert_eq!(map.tele_exit_count(7), 2);
