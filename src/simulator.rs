@@ -173,6 +173,10 @@ impl TeeSimulator {
             self.character.jumped_total = 0;
         }
         self.character.velocity.x *= 1.0 / ramp;
+        // CCharacter::HandleTiles clamps each velocity component based on
+        // CCollision::GetMoveRestrictions after the movement phase.
+        self.character.velocity =
+            map.clamp_restricted_velocity(self.position, self.character.velocity);
         self.tick += 1;
         Ok(grounded_on_contact || map.is_on_ground(self.position, physical))
     }
@@ -313,6 +317,37 @@ mod tests {
         let before = tee;
         assert_eq!(tee.quantize_for_prediction(), Err(SimError::InvalidInput));
         assert_eq!(tee, before);
+    }
+
+    #[test]
+    fn stopper_tile_clamps_direction_after_tick_move() {
+        let mut tiles = [0u8; 5 * 5 * 4];
+        // STOP facing right, situated next to tee's current tile.
+        tiles[(2 * 5 + 3) * 4] = crate::map::TILE_STOP;
+        tiles[(2 * 5 + 3) * 4 + 1] = 11;
+        let map = GameMap::from_tile_bytes(5, 5, &tiles).unwrap();
+        let mut tee = TeeSimulator::new(Vec2::new(80.0, 80.0));
+        let step = tee.step(&map, SimInput {
+            direction: 1, ..SimInput::default()
+        }).unwrap();
+        assert!(step.position.x >= 80.0);
+        assert_eq!(step.velocity.x, 0.0);
+        assert_eq!(tee.character.velocity.x, 0.0);
+
+        let mut away = TeeSimulator::new(Vec2::new(80.0, 80.0));
+        away.step(&map, SimInput {
+            direction: -1, ..SimInput::default()
+        }).unwrap();
+        assert!(away.character.velocity.x < 0.0,
+            "one-way STOP must allow movement away from the blocker");
+
+        let empty = GameMap::from_tile_bytes(5, 5, &[0; 5 * 5 * 4]).unwrap();
+        let mut normal = TeeSimulator::new(Vec2::new(80.0, 80.0));
+        normal.step(&empty, SimInput {
+            direction: 1, ..SimInput::default()
+        }).unwrap();
+        assert!(normal.character.velocity.x > 0.0,
+            "regular maps keep their original movement simulation");
     }
 
     #[test]

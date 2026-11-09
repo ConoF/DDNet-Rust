@@ -236,6 +236,11 @@ impl LocalPredictor {
             sim.character.velocity = map.apply_speedup(
                 sim.position, sim.character.velocity, &movement_tuning,
             )?;
+            // The upstream speedup path uses ClampVel with the current
+            // move restrictions; never let a speed tile defeat a stopper.
+            sim.character.velocity = map.clamp_restricted_velocity(
+                sim.position, sim.character.velocity,
+            );
             // DDNet gamecore.cpp::Quantize writes and reads integer position,
             // 1/256-unit velocity and hook state on each predicted tick.
             // Delaying this until display output causes cumulative drift.
