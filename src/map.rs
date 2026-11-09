@@ -315,8 +315,8 @@ impl GameMap {
                 _ => 0,
             },
             TILE_STOPS => match flags {
-                0 | 3 | 2 | 1 => CANTMOVE_UP | CANTMOVE_DOWN,
-                8 | 11 | 10 | 9 => CANTMOVE_LEFT | CANTMOVE_RIGHT,
+                0..=3 => CANTMOVE_UP | CANTMOVE_DOWN,
+                8..=11 => CANTMOVE_LEFT | CANTMOVE_RIGHT,
                 _ => 0,
             },
             TILE_STOPA => ALL_MOVE_RESTRICTIONS,
