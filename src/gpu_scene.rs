@@ -174,7 +174,29 @@ impl Builder {
         let cy = camera.center.y * layer.transform.parallax_y / 100.0
             - layer.transform.offset_y;
         let tex = layer.image.unwrap_or(map.images.len());
+        // Skip static quads in map space before evaluating envelopes,
+        // applying vertex transforms, or issuing GPU geometry. Animated
+        // position envelopes are excluded: they may move into view.
+        let half_w = self.w / (2.0 * camera.scale);
+        let half_h = self.h / (2.0 * camera.scale);
         for quad in &layer.quads {
+            if quad.pos_env < 0 {
+                let min_x = quad.vertices.iter().map(|v| v.position[0])
+                    .fold(f32::INFINITY, f32::min);
+                let max_x = quad.vertices.iter().map(|v| v.position[0])
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let min_y = quad.vertices.iter().map(|v| v.position[1])
+                    .fold(f32::INFINITY, f32::min);
+                let max_y = quad.vertices.iter().map(|v| v.position[1])
+                    .fold(f32::NEG_INFINITY, f32::max);
+                if min_x.is_finite() && max_x.is_finite()
+                    && min_y.is_finite() && max_y.is_finite()
+                    && (max_x <= cx-half_w || min_x >= cx+half_w
+                        || max_y <= cy-half_h || min_y >= cy+half_h)
+                {
+                    continue;
+                }
+            }
             let position = map.envelopes.evaluate(
                 quad.pos_env, quad.pos_env_offset, times, [0.0; 4],
             );
@@ -402,6 +424,31 @@ mod tests {
         assert_eq!(scene.vertices[0].uv[0], 2.0 / 16.0);
         assert_eq!(scene.vertices[1].uv[0], 1.0 / 16.0);
         assert!(build_gpu_scene(&m, camera(), EnvelopeTimes::default(), 0, 32).is_err());
+    }
+
+    #[test]
+    fn offscreen_static_quads_are_excluded_but_animated_positions_are_kept() {
+        let mut scene_map = map();
+        // This quad is far outside the camera and must not emit geometry.
+        for v in &mut scene_map.quad_layers[0].quads[0].vertices {
+            v.position[0] += 10_000.0;
+        }
+        let static_scene = build_gpu_scene(&scene_map, camera(),
+            EnvelopeTimes::default(), 32, 32).unwrap();
+        assert_eq!(static_scene.vertices.len(), 6); // only the tile
+        // A position envelope can move it back into view. The conservative
+        // first-pass check cannot cull such quads.
+        scene_map.quad_layers[0].quads[0].pos_env = 0;
+        scene_map.envelopes.envelopes.push(Envelope {
+            channels: 3, synchronized: true,
+            points: vec![EnvelopePoint {
+                time_ms: 0, curve: 1, values: [-10_240_000, 0, 0, 0],
+                bezier: None,
+            }],
+        });
+        let animated_scene = build_gpu_scene(&scene_map, camera(),
+            EnvelopeTimes::default(), 32, 32).unwrap();
+        assert_eq!(animated_scene.vertices.len(), 12);
     }
 
     #[test]
