@@ -22,6 +22,10 @@ use crate::transport::{Client06, Event, TransportError};
 use crate::snapshot::{SnapshotAssembler, SnapshotError, SnapshotPacket};
 use crate::snapshot_delta::{DeltaDecoder, SnapshotState};
 use crate::input::{InputFrame, InputError};
+use crate::netobjects::{CharacterCoreNet, CHARACTER_TYPE};
+use crate::physics::Vec2;
+use crate::prediction::local_character_id;
+use crate::tuning_wire::ServerTuning;
 use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +121,10 @@ pub struct GameSession06 {
     /// Bound the queue to 128 recent ticks to prevent unbounded growth.
     pending_input_ticks: VecDeque<i32>,
     pub last_input_timing: Option<InputTiming>,
+    /// Tune messages have no zone ID until the next verified local snapshot.
+    pending_tuning: Option<ServerTuning>,
+    zone_tuning: BTreeMap<u8, ServerTuning>,
+    local_tune_zone: Option<u8>,
 }
 
 impl GameSession06 {
@@ -139,6 +147,9 @@ impl GameSession06 {
             snapshot_recovering: false,
             pending_input_ticks: VecDeque::new(),
             last_input_timing: None,
+            pending_tuning: None,
+            zone_tuning: BTreeMap::new(),
+            local_tune_zone: None,
         }
     }
 
@@ -232,6 +243,9 @@ impl GameSession06 {
                     actions.push(GameAction::ServerBroadcast(text)),
                 Some(ServerGameplayMessage::Motd(text)) =>
                     actions.push(GameAction::ServerMotd(text)),
+                Some(ServerGameplayMessage::Tuning(tuning)) => {
+                    self.pending_tuning = Some(tuning);
+                }
                 None => {}
             }
             return Ok(());
@@ -253,6 +267,9 @@ impl GameSession06 {
                 self.snapshot_recovering = false;
                 self.pending_input_ticks.clear();
                 self.last_input_timing = None;
+                self.pending_tuning = None;
+                self.zone_tuning.clear();
+                self.local_tune_zone = None;
                 self.stage = Stage::Downloading;
                 actions.push(GameAction::MapAnnounced {
                     name: change.name, size: change.size,
@@ -399,6 +416,7 @@ impl GameSession06 {
             return;
         }
 
+        self.observe_local_tune_zone(&state);
         self.snapshot_ack_tick = snapshot.game_tick;
         self.snapshot_recovering = false;
         actions.push(GameAction::SnapshotDecoded {
@@ -415,6 +433,32 @@ impl GameSession06 {
 
     /// ACK used by NETMSG_INPUT. -1 requests a complete snapshot after
     /// invalid or missing delta baselines.
+    /// Only associate unlabelled tune packets with the next authoritative
+    /// local character snapshot; no zone is guessed from an old frame.
+    fn observe_local_tune_zone(&mut self, state: &SnapshotState) {
+        let Some(map) = self.loaded_map.as_ref() else { return; };
+        let Some(id) = local_character_id(state) else { return; };
+        let Some(core) = state.find(CHARACTER_TYPE, id)
+            .and_then(CharacterCoreNet::from_object) else { return; };
+        let zone = map.tune_zone_at(Vec2::new(core.x as f32, core.y as f32));
+        if self.local_tune_zone != Some(zone) {
+            // A tune zone may have changed server-side since the last visit.
+            // Until a new packet arrives, avoid applying stale coefficients.
+            self.zone_tuning.remove(&zone);
+            self.local_tune_zone = Some(zone);
+        }
+        if let Some(tuning) = self.pending_tuning.take() {
+            self.zone_tuning.insert(zone, tuning);
+        }
+    }
+
+    /// Tunings proven to belong to the local tee's most recent verified zone.
+    /// None means local prediction must fall back to server snapshots.
+    pub fn tuning_for_local(&self) -> Option<&ServerTuning> {
+        if self.pending_tuning.is_some() { return None; }
+        self.local_tune_zone.and_then(|zone| self.zone_tuning.get(&zone))
+    }
+
     pub fn snapshot_ack_tick(&self) -> i32 { self.snapshot_ack_tick }
     pub fn is_snapshot_recovering(&self) -> bool { self.snapshot_recovering }
 
@@ -492,6 +536,43 @@ mod tests {
     use std::thread;
 
     const TOKEN: u32 = 0x0102_0304;
+
+    #[test]
+    fn tune_packets_wait_for_verified_local_zone_and_reset_on_reconnect() {
+        use crate::snapshot_delta::SnapshotObject;
+        use crate::protocol::write_int;
+        let mut session = GameSession06::new(String::new(), 4096, 64);
+        session.loaded_map = Some(
+            GameMap::from_tile_bytes(4, 4, &vec![0; 4 * 4 * 4]).unwrap()
+        );
+        let mut payload = Vec::new();
+        for _ in 0..47 { write_int(100, &mut payload); }
+        let packet = encode_message(
+            MessageId::Regular { system: false, number: 6 }, &payload,
+        ).unwrap();
+        session.receive_message(&packet, &mut Vec::new()).unwrap();
+        assert!(session.pending_tuning.is_some());
+        assert!(session.tuning_for_local().is_none());
+        let mut character = vec![0; 22];
+        character[1] = 48;
+        character[2] = 48;
+        character[8] = -1;
+        let snapshot = SnapshotState { items: vec![
+            SnapshotObject { type_id: CHARACTER_TYPE, id: 3, words: character },
+            SnapshotObject { type_id: 10, id: 3, words: vec![1, 3, 0, 0, 0] },
+        ] };
+        session.observe_local_tune_zone(&snapshot);
+        assert!(session.pending_tuning.is_none());
+        assert_eq!(session.local_tune_zone, Some(0));
+        assert_eq!(session.tuning_for_local().unwrap().values, [100; 47]);
+        session.receive_message(&packet, &mut Vec::new()).unwrap();
+        assert!(session.tuning_for_local().is_none());
+        session.observe_local_tune_zone(&snapshot);
+        assert!(session.tuning_for_local().is_some());
+        // Reconnect creates a new epoch and cannot reuse tuning from old map.
+        let fresh = GameSession06::new(String::new(), 4096, 64);
+        assert!(fresh.tuning_for_local().is_none());
+    }
 
     fn server_control(code: u8, extra: &[u8]) -> Vec<u8> {
         let mut data = vec![code];
