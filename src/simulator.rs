@@ -14,6 +14,19 @@ use crate::physics::{velocity_ramp, Character, Input, JumpEvent, Tuning, Vec2};
 /// resultant velocity after the movement and hook acceleration phases.
 pub const MAX_CORE_VELOCITY: f32 = 6000.0;
 
+/// Match the C++ round_to_int used by CCharacterCore::Write. Rust float-to-int
+/// casts saturate, so reject out-of-range input before casting to avoid turning
+/// a corrupted predicted state into plausible but incorrect wire values.
+fn round_wire_int(value: f32) -> Result<i32, SimError> {
+    let rounded = value.round();
+    if !rounded.is_finite()
+        || !(-2_147_483_648.0..2_147_483_648.0).contains(&rounded)
+    {
+        return Err(SimError::InvalidInput);
+    }
+    Ok(rounded as i32)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SimInput {
     pub direction: i32,
@@ -164,6 +177,30 @@ impl TeeSimulator {
         Ok(grounded_on_contact || map.is_on_ground(self.position, physical))
     }
 
+    /// Reproduce CCharacterCore::Quantize's Write/Read roundtrip for the
+    /// supported netobject fields. The official client calls Quantize during
+    /// prediction; offline/world simulation deliberately remains unrounded.
+    /// Validate all fields before committing any change.
+    pub fn quantize_for_prediction(&mut self) -> Result<(), SimError> {
+        let x = round_wire_int(self.position.x)?;
+        let y = round_wire_int(self.position.y)?;
+        let vx = round_wire_int(self.character.velocity.x * 256.0)?;
+        let vy = round_wire_int(self.character.velocity.y * 256.0)?;
+        let hook_x = round_wire_int(self.hook.position.x)?;
+        let hook_y = round_wire_int(self.hook.position.y)?;
+        let hook_dx = round_wire_int(self.hook.direction.x * 256.0)?;
+        let hook_dy = round_wire_int(self.hook.direction.y * 256.0)?;
+        let hook_tick = round_wire_int(self.hook.tick)?;
+
+        self.position = Vec2::new(x as f32, y as f32);
+        self.character.velocity = Vec2::new(vx as f32 / 256.0, vy as f32 / 256.0);
+        self.hook.position = Vec2::new(hook_x as f32, hook_y as f32);
+        self.hook.direction =
+            Vec2::new(hook_dx as f32 / 256.0, hook_dy as f32 / 256.0);
+        self.hook.tick = hook_tick as f32;
+        Ok(())
+    }
+
     /// Single-player convenience API, preserving transactional validation
     /// even when either the Tick or Move phase encounters invalid input.
     pub fn step(
@@ -238,6 +275,44 @@ mod tests {
         let before = extreme;
         assert_eq!(extreme.step(&map, SimInput::default()), Err(SimError::InvalidInput));
         assert_eq!(extreme, before);
+    }
+
+    #[test]
+    fn prediction_quantize_matches_upstream_character_core_wire_roundtrip() {
+        let mut tee = TeeSimulator::new(Vec2::new(12.5, -8.5));
+        tee.character.velocity = Vec2::new(1.5 / 256.0, -1.5 / 256.0);
+        tee.hook.position = Vec2::new(128.49, -44.51);
+        tee.hook.direction = Vec2::new(127.6 / 256.0, -33.5 / 256.0);
+        tee.hook.tick = 11.5;
+        tee.quantize_for_prediction().unwrap();
+        assert_eq!(tee.position, Vec2::new(13.0, -9.0));
+        assert_eq!(tee.character.velocity, Vec2::new(2.0 / 256.0, -2.0 / 256.0));
+        assert_eq!(tee.hook.position, Vec2::new(128.0, -45.0));
+        assert_eq!(tee.hook.direction, Vec2::new(128.0 / 256.0, -34.0 / 256.0));
+        assert_eq!(tee.hook.tick, 12.0);
+        let once = tee;
+        tee.quantize_for_prediction().unwrap();
+        assert_eq!(tee, once, "network core quantization must be idempotent");
+    }
+
+    #[test]
+    fn prediction_quantize_rejects_invalid_wire_values_transactionally() {
+        let mut tee = TeeSimulator::new(Vec2::new(4.25, 8.75));
+        tee.character.velocity = Vec2::new(2.0, -1.0);
+        tee.hook.position.x = f32::MAX;
+        let before = tee;
+        assert_eq!(tee.quantize_for_prediction(), Err(SimError::InvalidInput));
+        assert_eq!(tee, before);
+        tee.hook.position.x = 0.0;
+        tee.position.x = f32::INFINITY;
+        let before = tee;
+        assert_eq!(tee.quantize_for_prediction(), Err(SimError::InvalidInput));
+        assert_eq!(tee, before);
+        tee.position.x = 4.25;
+        tee.hook.tick = f32::NEG_INFINITY;
+        let before = tee;
+        assert_eq!(tee.quantize_for_prediction(), Err(SimError::InvalidInput));
+        assert_eq!(tee, before);
     }
 
     #[test]

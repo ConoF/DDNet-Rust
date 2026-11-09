@@ -180,15 +180,16 @@ impl LocalPredictor {
             if input.hook != 0 && sim.hook.state == HookState::Idle {
                 return None;
             }
-            let step = sim.step(map, SimInput {
+            sim.step(map, SimInput {
                 direction: input.direction,
                 jump: input.jump != 0,
                 hook: input.hook != 0,
                 aim: Vec2::new(input.target_x as f32, input.target_y as f32),
             }).ok()?;
-            if !step.position.x.is_finite() || !step.position.y.is_finite() {
-                return None;
-            }
+            // DDNet gamecore.cpp::Quantize writes and reads integer position,
+            // 1/256-unit velocity and hook state on each predicted tick.
+            // Delaying this until display output causes cumulative drift.
+            sim.quantize_for_prediction().ok()?;
         }
         if (sim.position.x - server_pos.x).abs() > MAX_PREDICTION_OFFSET
             || (sim.position.y - server_pos.y).abs() > MAX_PREDICTION_OFFSET
@@ -303,6 +304,35 @@ mod tests {
             update.position.x.round() as i32);
         assert_eq!(next.items[0].words[1], sim.position.x.round() as i32);
         assert!(predictor.predict(105, &next, &map).is_none());
+    }
+
+    #[test]
+    fn prediction_quantizes_every_tick_without_mutating_authoritative_snapshot() {
+        let map = empty_map();
+        let mut predictor = LocalPredictor::new();
+        for tick in 101..=108 {
+            predictor.record_sent_input(input(tick, 1));
+        }
+        let authoritative = snapshot(100, 100, 100);
+        let original = authoritative.clone();
+        let predicted = predictor.predict(100, &authoritative, &map).unwrap();
+        let mut expected = TeeSimulator::new(Vec2::new(100.0, 100.0));
+        expected.tick = 100;
+        for _ in 101..=108 {
+            expected.step(&map, SimInput {
+                direction: 1, ..SimInput::default()
+            }).unwrap();
+            expected.quantize_for_prediction().unwrap();
+        }
+        assert_eq!(predicted.position, expected.position);
+        assert_eq!(predicted.velocity, expected.character.velocity);
+        assert_eq!(predicted.replayed_ticks, 8);
+        let mut display = authoritative.clone();
+        assert!(apply_visual_prediction(&mut display, predicted));
+        assert_eq!(display.items[0].words[1], expected.position.x as i32);
+        assert_eq!(display.items[0].words[3],
+            (expected.character.velocity.x * 256.0).round() as i32);
+        assert_eq!(authoritative, original);
     }
 
     #[test]
