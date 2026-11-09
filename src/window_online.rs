@@ -560,9 +560,20 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             current_snapshot.and_then(|tick| session.snapshot_state(tick)),
             (WIDTH, HEIGHT),
         );
+        let scoreboard_open = !menu.is_open()
+            && !hud.is_typing() && sampled_bindings.held(9);
+        if scoreboard_open {
+            hud.scroll_scoreboard(0.0,
+                current_snapshot.and_then(|tick| session.snapshot_state(tick)),
+                (WIDTH, HEIGHT));
+        }
         if let Some((_, wheel)) = window.get_scroll_wheel() {
             if menu.is_open() {
                 menu.scroll_wheel(wheel);
+            } else if scoreboard_open {
+                hud.scroll_scoreboard(wheel,
+                    current_snapshot.and_then(|tick| session.snapshot_state(tick)),
+                    (WIDTH, HEIGHT));
             } else if !hud.is_typing() && wheel.abs() >= 1.0 {
                 weapons.scroll(wheel.round() as i32);
             }

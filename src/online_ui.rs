@@ -24,6 +24,21 @@ const BACKGROUND: u32 = 0x14222f;
 const MAX_LINES: usize = 9;
 const VISIBLE_FOR: Duration = Duration::from_secs(16);
 
+fn scoreboard_capacity(viewport: (usize, usize)) -> usize {
+    let (width, height) = viewport;
+    if width < 320 || height < 200 { return 0; }
+    let panel_width = width.min(820).saturating_sub(60);
+    let panel_height = (height - 112).min(370);
+    let columns = if panel_width >= 600 { 2 } else { 1 };
+    let per_column = ((panel_height - 55) / 16).min(20);
+    columns * per_column
+}
+
+fn scoreboard_window(total: usize, scroll: usize, capacity: usize) -> (usize, usize) {
+    let first = scroll.min(total.saturating_sub(capacity));
+    (first, first.saturating_add(capacity).min(total))
+}
+
 pub struct TextInputCollector(pub Rc<RefCell<Vec<char>>>);
 
 impl InputCallback for TextInputCollector {
@@ -56,6 +71,7 @@ pub struct OnlineHud {
     draft: Option<Draft>,
     lines: VecDeque<Line>,
     announcement: Option<Line>,
+    scoreboard_scroll: usize,
 }
 
 /// HUD drawing protocol shared by the old RGB framebuffer and the GPU
@@ -160,6 +176,25 @@ impl OnlineHud {
 
     pub fn cancel_chat(&mut self) { self.draft = None; }
 
+    /// The scoreboard supports all 64 vanilla players without changing weapons.
+    /// Clamp the viewport when players disconnect or the snapshot is replaced.
+    pub fn scroll_scoreboard(
+        &mut self, wheel: f32, snapshot: Option<&SnapshotState>,
+        viewport: (usize, usize),
+    ) {
+        let total = snapshot.map_or(0, |state| state.items.iter()
+            .filter_map(PlayerInfoNet::from_object).count());
+        let limit = total.saturating_sub(scoreboard_capacity(viewport));
+        self.scoreboard_scroll = self.scoreboard_scroll.min(limit);
+        if !wheel.is_finite() { return; }
+        let steps = wheel.abs().ceil().min(3.0) as usize;
+        if wheel > 0.0 {
+            self.scoreboard_scroll = self.scoreboard_scroll.saturating_sub(steps);
+        } else if wheel < 0.0 {
+            self.scoreboard_scroll = self.scoreboard_scroll.saturating_add(steps).min(limit);
+        }
+    }
+
     pub fn backspace(&mut self) {
         if let Some(draft) = self.draft.as_mut() {
             draft.text.pop();
@@ -254,7 +289,11 @@ impl OnlineHud {
         );
         let columns = if panel_width >= 600 { 2 } else { 1 };
         let per_column = ((panel_height - 55) / 16).min(20);
-        for (idx, player) in players.iter().take(columns * per_column).enumerate() {
+        let capacity = scoreboard_capacity((width, height));
+        let (first, last) = scoreboard_window(
+            players.len(), self.scoreboard_scroll, capacity,
+        );
+        for (idx, player) in players.iter().skip(first).take(last-first).enumerate() {
             let column = idx / per_column;
             let line = idx % per_column;
             let col_width = panel_width / columns;
@@ -269,10 +308,10 @@ impl OnlineHud {
                 if player.local { ACCENT } else { TEXT },
                 col_width.saturating_sub(28) / 8);
         }
-        if players.len() > columns * per_column {
+        if players.len() > capacity {
             text(frame, panel_x + 14, panel_y + panel_height - 16,
-                &format!("{} MORE PLAYERS NOT SHOWN",
-                    players.len() - columns * per_column),
+                &format!("PLAYERS {}-{} / {}  |  WHEEL TO SCROLL",
+                    first + 1, last, players.len()),
                 NOTICE, (panel_width - 24) / 8);
         }
     }
@@ -419,6 +458,40 @@ mod tests {
         hud.render(&mut frame, "Online", None, Some(100), Some(&state));
         assert_eq!(state, before);
         assert!(frame.pixels.iter().any(|&pixel| pixel != 0));
+    }
+
+    #[test]
+    fn scoreboard_scroll_reaches_last_64_players_and_clamps_after_disconnect() {
+        use crate::netobjects::PLAYERINFO_TYPE;
+        use crate::snapshot_delta::SnapshotObject;
+        let mut state = SnapshotState {
+            items: (0..64u16).map(|id| SnapshotObject {
+                type_id: PLAYERINFO_TYPE, id,
+                words: vec![i32::from(id == 0), i32::from(id), 0,
+                    64-i32::from(id), 40],
+            }).collect(),
+        };
+        let mut hud = OnlineHud::new();
+        let viewport = (960,540);
+        assert_eq!(scoreboard_capacity(viewport),38);
+        assert_eq!(scoreboard_window(64,0,38),(0,38));
+        hud.scroll_scoreboard(-0.25,Some(&state),viewport);
+        assert_eq!(hud.scoreboard_scroll,1);
+        for _ in 0..20 { hud.scroll_scoreboard(-4.0,Some(&state),viewport); }
+        assert_eq!(hud.scoreboard_scroll,26);
+        assert_eq!(scoreboard_window(64,hud.scoreboard_scroll,38),(26,64));
+        hud.scroll_scoreboard(f32::NAN,Some(&state),viewport);
+        hud.scroll_scoreboard(f32::INFINITY,Some(&state),viewport);
+        assert_eq!(hud.scoreboard_scroll,26);
+        hud.scroll_scoreboard(2.0,Some(&state),viewport);
+        assert_eq!(hud.scoreboard_scroll,24);
+        state.items.truncate(5);
+        hud.scroll_scoreboard(0.0,Some(&state),viewport);
+        assert_eq!(hud.scoreboard_scroll,0);
+        hud.scroll_scoreboard(-10.0,None,viewport);
+        assert_eq!(hud.scoreboard_scroll,0);
+        assert_eq!(scoreboard_capacity((319,199)),0);
+        assert_eq!(scoreboard_window(5,50,38),(0,5));
     }
 
     #[test]
