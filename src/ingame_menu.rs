@@ -22,6 +22,12 @@ const WARNING: u32 = 0xf4c06b;
 const ROW_HEIGHT: usize = 36;
 const BIND_ROW_HEIGHT: usize = 26;
 const VISIBLE_BIND_ROWS: usize = 10;
+const PLAYER_ROW_HEIGHT: usize = 19;
+const PLAYER_LIST_RESERVED_HEIGHT: usize = 235;
+
+fn visible_player_rows(panel_height: usize) -> usize {
+    (panel_height.saturating_sub(PLAYER_LIST_RESERVED_HEIGHT) / PLAYER_ROW_HEIGHT).max(1)
+}
 
 /// Soft 5px rounded DDNet-style menu panels. Each scanline strip is
 /// disjoint, preventing alpha-overlap darkening on transparent UI.
@@ -99,6 +105,9 @@ pub struct MenuState {
     pub page: Page,
     pub settings_tab: SettingsTab,
     selected: usize,
+    player_scroll: usize,
+    player_count: usize,
+    player_visible: usize,
     nickname_edit: Option<String>,
     binding_edit: Option<usize>,
     feedback: Option<String>,
@@ -173,6 +182,7 @@ impl MenuState {
     fn page_select(&mut self, page: Page) {
         self.page = page;
         self.selected = 0;
+        self.player_scroll = 0;
         self.nickname_edit = None;
         self.binding_edit = None;
         self.feedback = None;
@@ -200,21 +210,43 @@ impl MenuState {
         }
     }
 
-    /// Scroll the Controls list without changing gameplay weapons or capturing a binding.
-    /// Small trackpad deltas still advance one row; large bursts are bounded.
+    /// Keep pagination inside the available player list as snapshots change.
+    pub fn sync_player_count(
+        &mut self, snapshot: Option<&SnapshotState>, viewport: (usize, usize),
+    ) {
+        self.player_count = snapshot.map_or(0, |state| state.items.iter()
+            .filter_map(PlayerInfoNet::from_object).count());
+        self.player_visible = visible_player_rows(Layout::for_size(viewport.0, viewport.1).h);
+        self.player_scroll = self.player_scroll.min(
+            self.player_count.saturating_sub(self.player_visible),
+        );
+    }
+
+    fn move_player_scroll(&mut self, down: bool, steps: usize) {
+        let limit = self.player_count.saturating_sub(self.player_visible);
+        self.player_scroll = if down {
+            self.player_scroll.saturating_add(steps).min(limit)
+        } else {
+            self.player_scroll.saturating_sub(steps)
+        };
+    }
+
+    /// ESC wheel events must not switch weapons or change gameplay camera zoom.
     pub fn scroll_wheel(&mut self, wheel: f32) {
-        if !self.open || self.page != Page::Settings
-            || self.settings_tab != SettingsTab::Controls
-            || self.binding_edit.is_some() || !wheel.is_finite()
-        {
-            return;
-        }
+        if !self.open || !wheel.is_finite() { return; }
         let steps = wheel.abs().ceil().min(3.0) as usize;
-        if wheel > 0.0 {
-            self.selected = self.selected.saturating_sub(steps);
-        } else if wheel < 0.0 {
-            self.selected = self.selected.saturating_add(steps)
-                .min(BIND_ACTIONS.len().saturating_sub(1));
+        match self.page {
+            Page::Settings if self.settings_tab == SettingsTab::Controls
+                && self.binding_edit.is_none() => {
+                if wheel > 0.0 {
+                    self.selected = self.selected.saturating_sub(steps);
+                } else if wheel < 0.0 {
+                    self.selected = self.selected.saturating_add(steps)
+                        .min(BIND_ACTIONS.len().saturating_sub(1));
+                }
+            }
+            Page::Players => self.move_player_scroll(wheel < 0.0, steps),
+            _ => {}
         }
     }
 
@@ -352,6 +384,14 @@ impl MenuState {
                 self.page_select(Page::ALL[index]);
                 None
             }
+            Key::PageUp if self.page == Page::Players => {
+                self.move_player_scroll(false, self.player_visible);
+                None
+            }
+            Key::PageDown if self.page == Page::Players => {
+                self.move_player_scroll(true, self.player_visible);
+                None
+            }
             Key::PageUp if self.page == Page::Settings => {
                 self.cycle_settings(-1);
                 None
@@ -361,11 +401,19 @@ impl MenuState {
                 None
             }
             Key::Up => {
-                self.selected = self.selected.saturating_sub(1);
+                if self.page == Page::Players {
+                    self.move_player_scroll(false, 1);
+                } else {
+                    self.selected = self.selected.saturating_sub(1);
+                }
                 None
             }
             Key::Down => {
-                self.selected = (self.selected + 1).min(self.rows().saturating_sub(1));
+                if self.page == Page::Players {
+                    self.move_player_scroll(true, 1);
+                } else {
+                    self.selected = (self.selected + 1).min(self.rows().saturating_sub(1));
+                }
                 None
             }
             Key::Left => {
@@ -493,10 +541,10 @@ impl MenuState {
         canvas.fill_rect(l.x+22, l.y+l.h.saturating_sub(48),
             l.w.saturating_sub(44), 1, SELECTED);
         canvas.write_text(l.x+27, l.y+l.h.saturating_sub(33),
-            if self.page == Page::Settings {
-                "ARROWS + ENTER   |   PGUP/PGDN SECTION   |   ESC RESUME"
-            } else {
-                "MOUSE / ARROWS + ENTER   |   TAB NEXT PAGE"
+            match self.page {
+                Page::Settings => "ARROWS + ENTER   |   PGUP/PGDN SECTION   |   ESC RESUME",
+                Page::Players => "WHEEL / UP / DOWN / PGUP / PGDN TO SCROLL PLAYERS",
+                _ => "MOUSE / ARROWS + ENTER   |   TAB NEXT PAGE",
             },
             PALE, l.w.saturating_sub(54)/8);
         if let Some(message) = &self.feedback {
@@ -552,24 +600,29 @@ impl MenuState {
         let y = l.content_y();
         canvas.write_text(x, y, "SCORE    PLAYER              PING", ACCENT,
             l.w.saturating_sub(90)/8);
-        let max = l.h.saturating_sub(205)/19;
-        for (i, player) in players.iter().take(max).enumerate() {
+        let max = visible_player_rows(l.h);
+        let first = self.player_scroll.min(players.len().saturating_sub(max));
+        for (i, player) in players.iter().skip(first).take(max).enumerate() {
             let name = u16::try_from(player.client_id).ok()
                 .and_then(|id|player_name(snapshot,id))
                 .unwrap_or_else(|| format!("#{}",player.client_id));
             let label = format!("{:>5}    {:<18} {:>4}",
                 player.score, name, player.latency);
-            let yy = y+22+i*19;
+            let yy = y+22+i*PLAYER_ROW_HEIGHT;
             if player.local {
                 canvas.fill_rect(x.saturating_sub(5), yy.saturating_sub(3),
                     l.w.saturating_sub(85), 17, SELECTED);
             }
             canvas.write_text(x, yy, &label, WHITE, l.w.saturating_sub(90)/8);
         }
-        if players.len()>max {
-            canvas.write_text(x, y+l.h.saturating_sub(190),
-                &format!("{} MORE PLAYERS",players.len()-max),
-                WARNING,l.w.saturating_sub(90)/8);
+        if players.is_empty() {
+            canvas.write_text(x, y+30, "NO PLAYERS IN SNAPSHOT", WARNING,
+                l.w.saturating_sub(90)/8);
+        } else {
+            let last = (first+max).min(players.len());
+            canvas.write_text(x, y+26+max*PLAYER_ROW_HEIGHT,
+                &format!("PLAYERS {}-{} / {}", first+1, last, players.len()),
+                PALE,l.w.saturating_sub(90)/8);
         }
     }
 
@@ -831,6 +884,53 @@ mod tests {
         menu.page_select(Page::Game);
         menu.scroll_wheel(-2.0);
         assert_eq!(menu.selected, 0);
+    }
+
+    #[test]
+    fn players_page_paginates_full_server_and_clamps_on_disconnect() {
+        use crate::netobjects::PLAYERINFO_TYPE;
+        use crate::snapshot_delta::SnapshotObject;
+        let mut state = SnapshotState {
+            items: (0..64u16).map(|id| SnapshotObject {
+                type_id: PLAYERINFO_TYPE,
+                id,
+                words: vec![i32::from(id == 0), i32::from(id), 0,
+                    64-i32::from(id), 42],
+            }).collect(),
+        };
+        let mut menu = MenuState::new();
+        let mut settings = ClientSettings::default();
+        menu.toggle();
+        menu.page_select(Page::Players);
+        menu.sync_player_count(Some(&state), (960, 540));
+        assert_eq!(menu.player_count, 64);
+        assert_eq!(menu.player_visible, 13);
+        menu.scroll_wheel(-2.0);
+        assert_eq!(menu.player_scroll, 2);
+        menu.key(Key::PageDown, &mut settings);
+        assert_eq!(menu.player_scroll, 15);
+        for _ in 0..25 { menu.key(Key::PageDown, &mut settings); }
+        assert_eq!(menu.player_scroll, 51);
+        menu.key(Key::Down, &mut settings);
+        assert_eq!(menu.player_scroll, 51);
+        menu.scroll_wheel(f32::NAN);
+        menu.scroll_wheel(f32::INFINITY);
+        assert_eq!(menu.player_scroll, 51);
+        menu.key(Key::PageUp, &mut settings);
+        assert_eq!(menu.player_scroll, 38);
+        menu.key(Key::Up, &mut settings);
+        assert_eq!(menu.player_scroll, 37);
+        state.items.truncate(3);
+        menu.sync_player_count(Some(&state), (960, 540));
+        assert_eq!(menu.player_scroll, 0);
+        menu.sync_player_count(None, (960, 540));
+        assert_eq!(menu.player_count, 0);
+        menu.scroll_wheel(-2.0);
+        assert_eq!(menu.player_scroll, 0);
+        menu.page_select(Page::Settings);
+        menu.scroll_wheel(-2.0);
+        assert_eq!(menu.player_scroll, 0);
+        assert_eq!(menu.settings_tab, SettingsTab::General);
     }
 
     #[cfg(feature = "gpu")]

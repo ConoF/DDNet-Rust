@@ -556,6 +556,10 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             last_keepalive = Instant::now();
         }
 
+        menu.sync_player_count(
+            current_snapshot.and_then(|tick| session.snapshot_state(tick)),
+            (WIDTH, HEIGHT),
+        );
         if let Some((_, wheel)) = window.get_scroll_wheel() {
             if menu.is_open() {
                 menu.scroll_wheel(wheel);

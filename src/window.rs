@@ -269,6 +269,7 @@ fn play_offline_impl(
             simulator = TeeSimulator::new(spawn);
             accumulator = Duration::ZERO;
         }
+        menu.sync_player_count(Some(&snapshot), (SCREEN_W, SCREEN_H));
         if let Some((_, wheel)) = window.get_scroll_wheel() {
             if menu.is_open() {
                 menu.scroll_wheel(wheel);
