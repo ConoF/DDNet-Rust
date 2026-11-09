@@ -10,6 +10,10 @@ use crate::hook::{Hook, HookError, HookEvent, HookInput, HookTuning};
 use crate::map::{GameMap, MapError};
 use crate::physics::{velocity_ramp, Character, Input, JumpEvent, Tuning, Vec2};
 
+/// CCharacterCore::Tick in the pinned DDNet 20.2.1 gamecore.cpp caps
+/// resultant velocity after the movement and hook acceleration phases.
+pub const MAX_CORE_VELOCITY: f32 = 6000.0;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SimInput {
     pub direction: i32,
@@ -104,6 +108,16 @@ impl TeeSimulator {
             self.hook_tuning,
             peers,
         )?;
+        // Upstream applies this clamp at the end of Tick, before Move and
+        // deferred world interactions. It is a magnitude clamp, not an
+        // independent X/Y clamp (which would change the direction).
+        let speed = self.character.velocity.x.hypot(self.character.velocity.y);
+        if !speed.is_finite() { return Err(SimError::InvalidInput); }
+        if speed > MAX_CORE_VELOCITY {
+            let factor = MAX_CORE_VELOCITY / speed;
+            self.character.velocity.x *= factor;
+            self.character.velocity.y *= factor;
+        }
         Ok((jump, hook))
     }
 
@@ -197,6 +211,33 @@ mod tests {
             tiles[(y * 20 + 7) * 4] = 1;
         }
         GameMap::from_tile_bytes(20, 8, &tiles).unwrap()
+    }
+
+    #[test]
+    fn upstream_core_velocity_limit_preserves_direction_and_rejects_overflow() {
+        let map = GameMap::from_tile_bytes(32, 20, &vec![0; 32 * 20 * 4]).unwrap();
+        let mut tee = TeeSimulator::new(Vec2::new(100.0, 100.0));
+        tee.character.velocity = Vec2::new(6000.0, 8000.0);
+        tee.tick_core(&map, SimInput::default(), &[]).unwrap();
+        let speed = tee.character.velocity.x.hypot(tee.character.velocity.y);
+        assert!((speed - MAX_CORE_VELOCITY).abs() < 0.001);
+        assert!(tee.character.velocity.x > 0.0);
+        assert!(tee.character.velocity.y > 0.0);
+
+        // Gamecore limits *negative* speed by the same norm.
+        let mut left = TeeSimulator::new(Vec2::new(100.0, 100.0));
+        left.character.velocity = Vec2::new(-8000.0, -6000.0);
+        left.tick_core(&map, SimInput::default(), &[]).unwrap();
+        assert!((left.character.velocity.x.hypot(left.character.velocity.y)
+            - MAX_CORE_VELOCITY).abs() < 0.001);
+        assert!(left.character.velocity.x < 0.0 && left.character.velocity.y < 0.0);
+
+        // An overflowed vector is rejected without committing step() changes.
+        let mut extreme = TeeSimulator::new(Vec2::new(100.0, 100.0));
+        extreme.character.velocity = Vec2::new(f32::MAX, f32::MAX);
+        let before = extreme;
+        assert_eq!(extreme.step(&map, SimInput::default()), Err(SimError::InvalidInput));
+        assert_eq!(extreme, before);
     }
 
     #[test]

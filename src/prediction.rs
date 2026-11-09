@@ -13,7 +13,7 @@ use crate::input::{InputFrame, PlayerInput};
 use crate::map::GameMap;
 use crate::netobjects::{CharacterCoreNet, PlayerInfoNet, CHARACTER_TYPE};
 use crate::physics::Vec2;
-use crate::simulator::{SimInput, TeeSimulator};
+use crate::simulator::{SimInput, TeeSimulator, MAX_CORE_VELOCITY};
 use crate::snapshot_delta::SnapshotState;
 
 pub const MAX_INPUT_HISTORY: usize = 256;
@@ -151,6 +151,13 @@ impl LocalPredictor {
             core.velocity_x as f32 / 256.0,
             core.velocity_y as f32 / 256.0,
         );
+        // A real server applies the 6000-unit Tick clamp. An implausible
+        // authoritative core is not a valid seed for local extrapolation.
+        if sim.character.velocity.x.hypot(sim.character.velocity.y)
+            > MAX_CORE_VELOCITY
+        {
+            return None;
+        }
         sim.character.jumped = core.jumped as u8;
         sim.character.direction = core.direction.clamp(-1, 1);
         if let Some(hook) = ground_hook {
@@ -442,6 +449,9 @@ mod tests {
         predictor.record_sent_input(input(101, 1));
         let mut extreme = baseline.clone();
         extreme.items[0].words[3] = i32::MAX;
+        assert!(predictor.predict(100, &extreme, &map).is_none());
+        extreme.items[0].words[3] = 0;
+        extreme.items[0].words[4] = i32::MIN;
         assert!(predictor.predict(100, &extreme, &map).is_none());
         // Rendering without the tee in a frame must not insert an object.
         let mut missing = SnapshotState::default();
