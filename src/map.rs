@@ -7,7 +7,7 @@
 //! are decoded before collision prediction to avoid false extrapolation.
 
 use crate::datafile::{Datafile, DatafileError};
-use crate::physics::Vec2;
+use crate::physics::{Tuning, Vec2};
 
 const MAPITEMTYPE_LAYER: u16 = 5;
 const LAYERTYPE_TILES: i32 = 2;
@@ -263,6 +263,38 @@ impl GameMap {
     pub fn speedup_at(&self, pos: Vec2) -> Option<SpeedupTile> {
         let tile = *self.speedup_tiles.as_ref()?.get(self.tile_index_at(pos)?)?;
         (tile.force > 0).then_some(tile)
+    }
+
+    /// Apply TILE_SPEED_BOOST (29), which uses a capped directional
+    /// acceleration. This is CCharacter::HandleSkippableTiles, *after* Move,
+    /// not CCharacterCore::Tick. Return None for unsupported older types
+    /// rather than inventing a velocity. Actual movement restrictions are
+    /// checked separately by the caller before this function.
+    pub fn apply_speedup(
+        &self, position: Vec2, velocity: Vec2, tuning: &Tuning,
+    ) -> Option<Vec2> {
+        let Some(tile) = self.speedup_at(position) else { return Some(velocity); };
+        if tile.tile_type != TILE_SPEED_BOOST { return None; }
+        let radians = f32::from(tile.angle).to_radians();
+        let direction = Vec2::new(radians.cos(), radians.sin());
+        let max_speed = if tile.max_speed == 0 {
+            let ramp = tuning.velramp_range /
+                (50.0 * tuning.velramp_curvature.max(1.01).ln());
+            let estimate = ramp.max(tuning.velramp_start / 50.0) * 5.0;
+            if !estimate.is_finite() || !(1.0..=i32::MAX as f32).contains(&estimate) {
+                return None;
+            }
+            (estimate as i32) as f32
+        } else {
+            f32::from(tile.max_speed)
+        };
+        let projected = direction.x * velocity.x + direction.y * velocity.y;
+        let acceleration = (max_speed / 5.0 - projected).min(f32::from(tile.force));
+        let output = Vec2::new(
+            velocity.x + direction.x * acceleration,
+            velocity.y + direction.y * acceleration,
+        );
+        (output.x.is_finite() && output.y.is_finite()).then_some(output)
     }
 
     /// Server teleport destinations and DDRace restrictions are not yet
@@ -630,6 +662,92 @@ mod tests {
             GameMap::from_tile_bytes(usize::MAX, 2, &[]),
             Err(MapError::InvalidDimensions)
         );
+    }
+
+    #[test]
+    fn special_ddrace_layers_decode_in_legacy_and_modern_tilemaps() {
+        use crate::datafile::{Item, RawBlock};
+        const W: usize = 12;
+        const H: usize = 6;
+        for version in [2i32, 3i32] {
+            let mut source = vec![vec![0u8; W * H * 4],
+                vec![0u8; W * H * 6],
+                vec![0u8; W * H * 2],
+                vec![0u8; W * H * 4],
+                vec![0u8; W * H * 4]];
+            let speedup = (W * 2 + 2) * 6;
+            source[1][speedup..speedup + 6]
+                .copy_from_slice(&[10, 100, TILE_SPEED_BOOST, 0, 0, 0]);
+            let tele = (W * 2 + 6) * 2;
+            source[2][tele..tele + 2].copy_from_slice(&[3, 26]);
+            let front = (W * 2 + 8) * 4;
+            source[3][front..front + 4].copy_from_slice(&[9, 0, 0, 0]);
+            let switch = (W * 2 + 10) * 4;
+            source[4][switch..switch + 4].copy_from_slice(&[1, 22, 0, 0]);
+
+            let mut layers = Vec::new();
+            for (data_index, flag, offset) in [
+                (0usize, TILESLAYERFLAG_GAME, 56usize),
+                (1, TILESLAYERFLAG_SPEEDUP, 64),
+                (2, TILESLAYERFLAG_TELE, 60),
+                (3, TILESLAYERFLAG_FRONT, 68),
+                (4, TILESLAYERFLAG_SWITCH, 72),
+            ] {
+                let off = if data_index == 0 || version == 2 {
+                    offset
+                } else {
+                    offset + 12
+                };
+                let mut payload = vec![0u8; (off + 4).max(60)];
+                payload[4..8].copy_from_slice(&LAYERTYPE_TILES.to_le_bytes());
+                payload[12..16].copy_from_slice(&version.to_le_bytes());
+                payload[16..20].copy_from_slice(&(W as i32).to_le_bytes());
+                payload[20..24].copy_from_slice(&(H as i32).to_le_bytes());
+                payload[24..28].copy_from_slice(&flag.to_le_bytes());
+                payload[off..off + 4].copy_from_slice(&(data_index as i32).to_le_bytes());
+                layers.push(payload);
+            }
+            let datafile = Datafile {
+                version: 3, item_types: vec![],
+                items: layers.iter().enumerate().map(|(id, payload)| Item {
+                    type_id: MAPITEMTYPE_LAYER, id: id as u16, payload,
+                }).collect(),
+                raw_blocks: source.iter().map(|bytes| RawBlock {
+                    encoded: bytes, uncompressed_size: None,
+                }).collect(),
+            };
+            let map = GameMap::from_datafile(&datafile, W * H).unwrap();
+            assert_eq!(map.speedup_at(Vec2::new(80.0, 80.0)).unwrap(),
+                SpeedupTile { force: 10, max_speed: 100,
+                    tile_type: TILE_SPEED_BOOST, reserved: 0, angle: 0 });
+            assert_eq!(map.speedup_at(Vec2::new(16.0, 80.0)), None);
+            assert!(!map.has_unsupported_physics_near(Vec2::new(80.0, 80.0)));
+            for x in [208.0, 272.0, 336.0] {
+                assert!(map.has_unsupported_physics_near(Vec2::new(x, 80.0)));
+            }
+            assert_eq!(map.apply_speedup(Vec2::new(80.0, 80.0),
+                Vec2::default(), &Tuning::default()), Some(Vec2::new(10.0, 0.0)));
+            assert_eq!(map.apply_speedup(Vec2::new(80.0, 80.0),
+                Vec2::new(18.0, 0.0), &Tuning::default()),
+                Some(Vec2::new(20.0, 0.0)));
+            assert_eq!(map.apply_speedup(Vec2::new(80.0, 80.0),
+                Vec2::new(22.0, 0.0), &Tuning::default()),
+                Some(Vec2::new(20.0, 0.0)));
+            assert_eq!(map.apply_speedup(Vec2::new(16.0, 80.0),
+                Vec2::new(4.0, 0.0), &Tuning::default()),
+                Some(Vec2::new(4.0, 0.0)));
+
+            let mut broken = source.clone();
+            broken[1].truncate(3);
+            let bad_file = Datafile {
+                version: 3, item_types: vec![],
+                items: datafile.items.clone(),
+                raw_blocks: broken.iter().map(|bytes| RawBlock {
+                    encoded: bytes, uncompressed_size: None,
+                }).collect(),
+            };
+            assert!(GameMap::from_datafile(&bad_file, W * H).is_err());
+        }
     }
 
     #[test]
