@@ -47,15 +47,39 @@ impl From<RenderError> for VisualError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GroupClip {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GroupTransform {
     pub offset_x: f32,
     pub offset_y: f32,
     pub parallax_x: f32,
     pub parallax_y: f32,
+    /// Group clipping uses the game-world camera, not parallax coordinates.
+    pub clip: Option<GroupClip>,
+}
+impl GroupTransform {
+    pub fn screen_clip(self, camera: Camera, width: f32, height: f32)
+        -> Option<[f32; 4]>
+    {
+        let rect = self.clip?;
+        let x = (rect.x - camera.center.x) * camera.scale + width * 0.5;
+        let y = (rect.y - camera.center.y) * camera.scale + height * 0.5;
+        Some([x, y, x + rect.width * camera.scale,
+            y + rect.height * camera.scale])
+    }
 }
 impl Default for GroupTransform {
     fn default() -> Self {
-        Self { offset_x: 0.0, offset_y: 0.0, parallax_x: 100.0, parallax_y: 100.0 }
+        Self {
+            offset_x: 0.0, offset_y: 0.0,
+            parallax_x: 100.0, parallax_y: 100.0, clip: None,
+        }
     }
 }
 
@@ -162,11 +186,23 @@ fn collect_groups(file: &Datafile<'_>, count: usize) -> Result<Vec<GroupTransfor
         let amount = index(field(item.payload, 24)?)?;
         let end = first.checked_add(amount).ok_or(VisualError::TooLarge)?;
         if end > count { return Err(VisualError::InvalidMap); }
+        let clip = if field(item.payload, 0)? >= 2 {
+            if item.payload.len() < 48 { return Err(VisualError::InvalidMap); }
+            (field(item.payload, 28)? != 0).then(|| -> Result<GroupClip, VisualError> {
+                Ok(GroupClip {
+                    x: field(item.payload, 32)? as f32,
+                    y: field(item.payload, 36)? as f32,
+                    width: field(item.payload, 40)? as f32,
+                    height: field(item.payload, 44)? as f32,
+                })
+            }).transpose()?
+        } else { None };
         let transform = GroupTransform {
             offset_x: field(item.payload, 4)? as f32,
             offset_y: field(item.payload, 8)? as f32,
             parallax_x: field(item.payload, 12)? as f32,
             parallax_y: field(item.payload, 16)? as f32,
+            clip,
         };
         result[first..end].fill(transform);
     }
@@ -399,7 +435,9 @@ impl VisualMap {
                         + frame.height as f32 * 0.5).round() as i64;
                     if end_x <= start_x || end_y <= start_y { continue; }
                     blit_tile(frame, texture, tile, tint,
-                        (start_x, start_y, end_x, end_y), (cell_w, cell_h));
+                        (start_x, start_y, end_x, end_y), (cell_w, cell_h),
+                        layer.transform.screen_clip(camera, frame.width as f32,
+                            frame.height as f32));
                     drawn += 1;
                 }
             }
@@ -414,16 +452,24 @@ fn blit_tile(
     tint: [u8; 4],
     bounds: (i64, i64, i64, i64),
     cell: (usize, usize),
+    clip: Option<[f32; 4]>,
 ) {
     let (left, top, right, bottom) = bounds;
     let src_x = usize::from(tile.index % 16) * cell.0;
     let src_y = usize::from(tile.index / 16) * cell.1;
     let dst_width = (right - left) as f32;
     let dst_height = (bottom - top) as f32;
-    let clipped_left = left.clamp(0, i64::from(frame.width));
-    let clipped_top = top.clamp(0, i64::from(frame.height));
-    let clipped_right = right.clamp(0, i64::from(frame.width));
-    let clipped_bottom = bottom.clamp(0, i64::from(frame.height));
+    let mut clipped_left = left.clamp(0, i64::from(frame.width));
+    let mut clipped_top = top.clamp(0, i64::from(frame.height));
+    let mut clipped_right = right.clamp(0, i64::from(frame.width));
+    let mut clipped_bottom = bottom.clamp(0, i64::from(frame.height));
+    if let Some([x0,y0,x1,y1]) = clip {
+        if x1 <= x0 || y1 <= y0 { return; }
+        clipped_left = clipped_left.max(x0.ceil() as i64);
+        clipped_top = clipped_top.max(y0.ceil() as i64);
+        clipped_right = clipped_right.min(x1.ceil() as i64);
+        clipped_bottom = clipped_bottom.min(y1.ceil() as i64);
+    }
     for sy in clipped_top..clipped_bottom {
         for sx in clipped_left..clipped_right {
             let mut u = ((sx - left) as f32 + 0.5) / dst_width;
@@ -516,6 +562,42 @@ mod tests {
         let blended = frame.pixel(48, 16).unwrap();
         assert_ne!(blended, BACKGROUND);
         assert!((blended >> 8 & 255) > (blended >> 16 & 255));
+    }
+
+    #[test]
+    fn group_version_two_clipping_is_loaded_and_transformed() {
+        let (_image, layer, _atlas, _tiles) = make_fixture();
+        let group = words(&[2, 0, 0, 100, 100, 0, 1, 1, 8, 4, 16, 12]);
+        let file = Datafile {
+            version: 3, item_types: vec![],
+            items: vec![
+                Item { type_id: MAP_GROUP, id: 0, payload: &group },
+                Item { type_id: MAP_LAYER, id: 0, payload: &layer },
+            ],
+            raw_blocks: vec![],
+        };
+        // Group metadata is parsed before fetching tile or texture assets.
+        let groups = collect_groups(&file, 1).unwrap();
+        assert_eq!(groups[0].clip, Some(GroupClip {
+            x: 8.0, y: 4.0, width: 16.0, height: 12.0,
+        }));
+        let camera = Camera { center: Vec2::new(16.0, 16.0), scale: 1.0 };
+        assert_eq!(groups[0].screen_clip(camera, 32.0, 32.0),
+            Some([8.0, 4.0, 24.0, 16.0]));
+    }
+
+    #[test]
+    fn clipped_tile_blit_respects_original_world_region() {
+        let tex = Texture::from_rgba(16,16,vec![255; 16*16*4]).unwrap();
+        let mut frame = Framebuffer::new(32,32).unwrap();
+        frame.clear(0);
+        let tile = Tile { index: 1, flags: 0, skip: 0, reserved: 0 };
+        blit_tile(&mut frame, &tex, tile, [255;4],
+            (0,0,32,32), (1,1), Some([8.0, 4.0, 24.0, 16.0]));
+        assert_eq!(frame.pixel(7,7), Some(0));
+        assert_eq!(frame.pixel(8,7), Some(0xffffff));
+        assert_eq!(frame.pixel(23,15), Some(0xffffff));
+        assert_eq!(frame.pixel(24,15), Some(0));
     }
 
     fn raw_quad(color: [i32; 4]) -> Vec<u8> {
