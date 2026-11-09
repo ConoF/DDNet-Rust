@@ -9,7 +9,7 @@
 use minifb::Window;
 
 use crate::envelope::EnvelopeTimes;
-use crate::gpu_scene::{build_gpu_scene_into, GpuBatch, GpuScene, GpuVertex, VERTEX_STRIDE};
+use crate::gpu_scene::{build_gpu_scene_into_cached, cache_quad_bounds, QuadBounds, GpuBatch, GpuScene, GpuVertex, VERTEX_STRIDE};
 use crate::gpu_tees::{build_gpu_tees, GpuTeeScene, SpriteTextureSlots};
 use crate::gpu_hud::{
     font_atlas_rgba, GpuHudScene, FONT_WIDTH, FONT_HEIGHT,
@@ -63,6 +63,7 @@ pub struct GpuRenderer {
     scene_cache: GpuScene,
     cached_map_camera: Option<Camera>,
     cached_map_vertices: usize,
+    quad_bounds: QuadBounds,
 }
 
 impl GpuRenderer {
@@ -215,6 +216,7 @@ impl GpuRenderer {
             vertex_upload: Vec::with_capacity(INITIAL_VERTICES * VERTEX_STRIDE),
             scene_cache: GpuScene::default(),
             cached_map_camera: None, cached_map_vertices: 0,
+            quad_bounds: Vec::new(),
         })
     }
 
@@ -270,6 +272,7 @@ impl GpuRenderer {
         // A new map or changed atlas invalidates all existing map vertices.
         self.cached_map_camera = None;
         self.cached_map_vertices = 0;
+        self.quad_bounds = map.map(cache_quad_bounds).unwrap_or_default();
         self.images.clear();
         self.map_image_count = map.map_or(0, |m| m.images.len());
         if let Some(map) = map {
@@ -379,8 +382,8 @@ impl GpuRenderer {
         if reuse_map {
             scene.vertices.truncate(self.cached_map_vertices);
         } else if let Some(map) = map {
-            build_gpu_scene_into(map, camera, times,
-                self.config.width, self.config.height, &mut scene)
+            build_gpu_scene_into_cached(map, camera, times,
+                self.config.width, self.config.height, &mut scene, Some(&self.quad_bounds))
                 .map_err(|e| format!("GPU scene geometry: {e:?}"))?;
         } else {
             scene.vertices.clear();

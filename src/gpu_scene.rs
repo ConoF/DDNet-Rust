@@ -11,6 +11,29 @@ use crate::quad_render::QuadLayer;
 pub const VERTEX_STRIDE: usize = 20;
 pub const MAX_FRAME_VERTICES: usize = 500_000;
 
+/// Cached world-space bounds for static quads, indexed by quad layer and quad.
+/// Dynamic quads keep None so their animated positions are evaluated normally.
+pub type QuadBounds = Vec<Vec<Option<[f32; 4]>>>;
+
+pub fn cache_quad_bounds(map: &VisualMap) -> QuadBounds {
+    map.quad_layers.iter().map(|layer| {
+        layer.quads.iter().map(|quad| {
+            if quad.pos_env >= 0 { return None; }
+            let xs = quad.vertices.map(|v| v.position[0]);
+            let ys = quad.vertices.map(|v| v.position[1]);
+            if xs.iter().chain(ys.iter()).any(|n| !n.is_finite()) {
+                return None;
+            }
+            Some([
+                xs.into_iter().fold(f32::INFINITY, f32::min),
+                xs.into_iter().fold(f32::NEG_INFINITY, f32::max),
+                ys.into_iter().fold(f32::INFINITY, f32::min),
+                ys.into_iter().fold(f32::NEG_INFINITY, f32::max),
+            ])
+        }).collect()
+    }).collect()
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GpuVertex {
@@ -174,7 +197,7 @@ impl Builder {
 
     fn quads(
         &mut self, map: &VisualMap, layer: &QuadLayer,
-        camera: Camera, times: EnvelopeTimes,
+        camera: Camera, times: EnvelopeTimes, cached_bounds: Option<&[Option<[f32; 4]>]>,
     ) -> Result<(), VisualError> {
         let cx = camera.center.x * layer.transform.parallax_x / 100.0
             - layer.transform.offset_x;
@@ -186,22 +209,28 @@ impl Builder {
         // position envelopes are excluded: they may move into view.
         let half_w = self.w / (2.0 * camera.scale);
         let half_h = self.h / (2.0 * camera.scale);
-        for quad in &layer.quads {
+        for (index, quad) in layer.quads.iter().enumerate() {
             if quad.pos_env < 0 {
-                let min_x = quad.vertices.iter().map(|v| v.position[0])
-                    .fold(f32::INFINITY, f32::min);
-                let max_x = quad.vertices.iter().map(|v| v.position[0])
-                    .fold(f32::NEG_INFINITY, f32::max);
-                let min_y = quad.vertices.iter().map(|v| v.position[1])
-                    .fold(f32::INFINITY, f32::min);
-                let max_y = quad.vertices.iter().map(|v| v.position[1])
-                    .fold(f32::NEG_INFINITY, f32::max);
-                if min_x.is_finite() && max_x.is_finite()
-                    && min_y.is_finite() && max_y.is_finite()
-                    && (max_x <= cx-half_w || min_x >= cx+half_w
-                        || max_y <= cy-half_h || min_y >= cy+half_h)
-                {
-                    continue;
+                let bounds = cached_bounds.and_then(|b| b.get(index).copied().flatten())
+                    .or_else(|| {
+                        let xs = quad.vertices.map(|v| v.position[0]);
+                        let ys = quad.vertices.map(|v| v.position[1]);
+                        if xs.iter().chain(ys.iter()).any(|n| !n.is_finite()) {
+                            return None;
+                        }
+                        Some([
+                            xs.into_iter().fold(f32::INFINITY, f32::min),
+                            xs.into_iter().fold(f32::NEG_INFINITY, f32::max),
+                            ys.into_iter().fold(f32::INFINITY, f32::min),
+                            ys.into_iter().fold(f32::NEG_INFINITY, f32::max),
+                        ])
+                    });
+                if let Some([min_x, max_x, min_y, max_y]) = bounds {
+                    if max_x <= cx-half_w || min_x >= cx+half_w
+                        || max_y <= cy-half_h || min_y >= cy+half_h
+                    {
+                        continue;
+                    }
                 }
             }
             let position = map.envelopes.evaluate(
@@ -251,6 +280,16 @@ pub fn build_gpu_scene_into(
     times: EnvelopeTimes, width: u32, height: u32,
     scene: &mut GpuScene,
 ) -> Result<(), VisualError> {
+    build_gpu_scene_into_cached(map, camera, times, width, height, scene, None)
+}
+
+/// The renderer supplies bounds computed only when a new map is loaded.
+/// Animation, layer order and the returned scene remain identical.
+pub fn build_gpu_scene_into_cached(
+    map: &VisualMap, camera: Camera,
+    times: EnvelopeTimes, width: u32, height: u32,
+    scene: &mut GpuScene, bounds: Option<&QuadBounds>,
+) -> Result<(), VisualError> {
     if width == 0 || height == 0
         || !(0.05..=16.0).contains(&camera.scale)
         || !camera.center.x.is_finite() || !camera.center.y.is_finite()
@@ -281,7 +320,8 @@ pub fn build_gpu_scene_into(
                     let layer = &map.quad_layers[quad];
                     quad += 1;
                     if layer.foreground == foreground {
-                        builder.quads(map, layer, camera, times)?;
+                        builder.quads(map, layer, camera, times,
+                            bounds.and_then(|b| b.get(quad - 1)).map(Vec::as_slice))?;
                     }
                 }
             }
@@ -416,6 +456,24 @@ mod tests {
             32, 32, &mut reusable).unwrap();
         assert_eq!(reusable, build_gpu_scene(&m, camera(),
             EnvelopeTimes::default(), 32, 32).unwrap());
+    }
+
+    #[test]
+    fn precomputed_quad_bounds_match_uncached_across_camera_movements() {
+        let mut map = map();
+        let quad_cache = cache_quad_bounds(&map);
+        assert_eq!(quad_cache.len(), 1);
+        assert!(quad_cache[0][0].is_some());
+        for x in [16.0, 0.0, 10000.0] {
+            let c = Camera { center: Vec2::new(x, 16.0), scale: 1.0 };
+            let direct = build_gpu_scene(&map, c, EnvelopeTimes::default(), 32, 32).unwrap();
+            let mut cached = GpuScene::default();
+            build_gpu_scene_into_cached(&map, c, EnvelopeTimes::default(),
+                32, 32, &mut cached, Some(&quad_cache)).unwrap();
+            assert_eq!(cached, direct);
+        }
+        map.quad_layers[0].quads[0].pos_env = 0;
+        assert!(cache_quad_bounds(&map)[0][0].is_none());
     }
 
     #[test]
