@@ -134,7 +134,7 @@ fn play_offline_impl(
     {
         None
     } else {
-        match GpuRenderer::new(&window, SCREEN_W as u32, SCREEN_H as u32) {
+        match GpuRenderer::new(&window, SCREEN_W as u32, SCREEN_H as u32, settings.vsync) {
             Ok(mut renderer) => {
                 renderer.sync_assets(assets.visual_map.as_ref(),
                     assets.default_skin.as_ref(), assets.game_sprites.as_ref());
@@ -238,6 +238,13 @@ fn play_offline_impl(
                     menu.feedback("Team selection requires an online server"),
                 MenuAction::SettingsChanged => {
                     window.set_target_fps(usize::from(settings.fps_limit));
+                    #[cfg(feature = "gpu")]
+                    if let Some(renderer) = gpu.as_mut() {
+                        let mode = renderer.set_vsync(settings.vsync);
+                        if !settings.vsync && mode == wgpu::PresentMode::Fifo {
+                            menu.feedback("GPU only supports FIFO (VSync) presentation");
+                        }
+                    }
                     camera.scale = f32::from(settings.zoom_percent) / 100.0;
                     if let Some(device) = audio.as_mut() {
                         if let Err(error) = device.set_volume(settings.effective_volume()) {

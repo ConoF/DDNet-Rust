@@ -81,7 +81,7 @@ impl SettingsTab {
     fn row_count(self) -> usize {
         match self {
             Self::General => 2, Self::Player => 1,
-            Self::Graphics => 2, Self::Sound => 2,
+            Self::Graphics => 3, Self::Sound => 2,
             Self::Controls => BIND_ACTIONS.len(),
             Self::Appearance | Self::Tee => 0,
         }
@@ -317,6 +317,10 @@ impl MenuState {
                         let value = (i32::from(settings.zoom_percent) + delta).clamp(50, 400);
                         if value as u16 == settings.zoom_percent { return None; }
                         settings.zoom_percent = value as u16;
+                        Some(MenuAction::SettingsChanged)
+                    }
+                    (SettingsTab::Graphics, 2) => {
+                        settings.vsync = !settings.vsync;
                         Some(MenuAction::SettingsChanged)
                     }
                     (SettingsTab::Sound, 0) => {
@@ -650,6 +654,7 @@ impl MenuState {
             SettingsTab::Graphics => vec![
                 format!("FPS LIMIT: {}     < / >",settings.fps_limit),
                 format!("CAMERA ZOOM: {}%  < / >",settings.zoom_percent),
+                format!("VERTICAL SYNC: {}  < / >",on_off(settings.vsync)),
             ],
             SettingsTab::Sound => vec![
                 format!("ENABLE SOUND: {}",on_off(settings.sound_enabled)),
@@ -690,7 +695,7 @@ impl MenuState {
         let caption: &str = match self.settings_tab {
             SettingsTab::General => "ENTER OR CLICK TO TOGGLE",
             SettingsTab::Player => "ENTER EDITS; ENTER SAVES; ESC CANCELS",
-            SettingsTab::Graphics => "LEFT/RIGHT CHANGES FPS AND ZOOM",
+            SettingsTab::Graphics => "LEFT/RIGHT: FPS, ZOOM, VSYNC",
             SettingsTab::Sound => "LEFT/RIGHT: MASTER VOLUME; ENTER: TOGGLE",
             SettingsTab::Tee => "DEFAULT TEE ATLAS; CUSTOM SKINS NOT YET PORTED",
             SettingsTab::Appearance => "NATIVE DDNET THEME / ASSETS IN PROGRESS",
@@ -744,6 +749,12 @@ mod tests {
         m.key(Key::Down,&mut s);
         for _ in 0..90 {m.key(Key::Right,&mut s);}
         assert_eq!(s.zoom_percent,400);
+        m.key(Key::Down,&mut s);
+        assert!(!s.vsync);
+        assert_eq!(m.key(Key::Enter,&mut s),Some(MenuAction::SettingsChanged));
+        assert!(s.vsync);
+        assert_eq!(m.key(Key::Left,&mut s),Some(MenuAction::SettingsChanged));
+        assert!(!s.vsync);
     }
 
     #[test]

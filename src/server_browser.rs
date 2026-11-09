@@ -260,6 +260,9 @@ pub struct ClientSettings {
     pub sound_volume: u8,
     /// Native window FPS limiter, not a simulation-tick setting.
     pub fps_limit: u16,
+    /// DDNet 20.2.1 gfx_vsync defaults to 0. Actual supported presentation
+    /// modes depend on the active wgpu surface/adapter.
+    pub vsync: bool,
     /// Camera scale * 100 (normal gameplay is 150).
     pub zoom_percent: u16,
     pub bindings: KeyBindings,
@@ -281,6 +284,7 @@ impl Default for ClientSettings {
             sound_enabled: true,
             sound_volume: 100,
             fps_limit: 60,
+            vsync: false,
             zoom_percent: 150,
             bindings: KeyBindings::default(),
         }
@@ -433,6 +437,9 @@ impl ClientSettings {
                 settings.fps_limit = v as u16;
             }
         }
+        if let Some(v) = obj.get("vsync").and_then(Value::as_bool) {
+            settings.vsync = v;
+        }
         if let Some(v) = obj.get("zoom_percent").and_then(Value::as_u64) {
             if (50..=400).contains(&v) && v.is_multiple_of(10) {
                 settings.zoom_percent = v as u16;
@@ -501,6 +508,7 @@ impl ClientSettings {
             "sound_enabled": self.sound_enabled,
             "sound_volume": self.sound_volume,
             "fps_limit": self.fps_limit,
+            "vsync": self.vsync,
             "zoom_percent": self.zoom_percent,
             "bindings": self.bindings.slots,
         });
@@ -711,6 +719,7 @@ mod tests {
             show_nameplates: false,
             sound_enabled: false,
             fps_limit: 144,
+            vsync: true,
             zoom_percent: 220,
             ..ClientSettings::default()
         };
@@ -724,6 +733,7 @@ mod tests {
         ).unwrap();
         let loaded = ClientSettings::load(&path).unwrap();
         assert_eq!(loaded.fps_limit, 60);
+        assert!(!loaded.vsync, "older settings without gfx_vsync default to OFF");
         assert_eq!(loaded.zoom_percent, 150);
         assert_eq!(loaded.nickname, "old");
         assert!(!loaded.sound_enabled);

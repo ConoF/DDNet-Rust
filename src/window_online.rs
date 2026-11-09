@@ -182,7 +182,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
     let mut gpu = if std::env::var("DDNET_RENDERER").as_deref() == Ok("software") {
         None
     } else {
-        match GpuRenderer::new(&window, WIDTH as u32, HEIGHT as u32) {
+        match GpuRenderer::new(&window, WIDTH as u32, HEIGHT as u32, connection.vsync) {
             Ok(mut renderer) => {
                 renderer.sync_assets(None, None, None);
                 Some(renderer)
@@ -362,6 +362,13 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                 }
                 MenuAction::SettingsChanged => {
                     window.set_target_fps(usize::from(connection.fps_limit));
+                    #[cfg(feature = "gpu")]
+                    if let Some(renderer) = gpu.as_mut() {
+                        let mode = renderer.set_vsync(connection.vsync);
+                        if !connection.vsync && mode == wgpu::PresentMode::Fifo {
+                            menu.feedback("GPU only supports FIFO (VSync) presentation");
+                        }
+                    }
                     camera.scale = f32::from(connection.zoom_percent) / 100.0;
                     if let Some(device) = audio.as_mut() {
                         if let Err(error) = device.set_volume(connection.effective_volume()) {

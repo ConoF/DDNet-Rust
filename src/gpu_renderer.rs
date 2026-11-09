@@ -45,6 +45,18 @@ const INITIAL_VERTICES: usize = 4096;
 const WHITE: [u8; 4] = [255, 255, 255, 255];
 const OVERLAY_VERTEX_COUNT: u32 = 6;
 
+/// Use DDNet's gfx_vsync preference without requesting an unsupported
+/// swapchain mode. Immediate is true no-vsync where supported; Mailbox is
+/// a low-latency fallback, followed by the guaranteed FIFO mode.
+fn select_present_mode(vsync: bool, supported: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+    if !vsync {
+        for candidate in [wgpu::PresentMode::Immediate, wgpu::PresentMode::Mailbox] {
+            if supported.contains(&candidate) { return candidate; }
+        }
+    }
+    wgpu::PresentMode::Fifo
+}
+
 struct ImageBind {
     _texture: wgpu::Texture,
     group: wgpu::BindGroup,
@@ -85,6 +97,7 @@ pub struct GpuRenderer {
     tee_cache: GpuTeeScene,
     hud_batches: Vec<GpuBatch>,
     last_frame_profile: Option<GpuFrameProfile>,
+    supported_present_modes: Vec<wgpu::PresentMode>,
     cached_map_camera: Option<Camera>,
     cached_map_vertices: usize,
     quad_bounds: QuadBounds,
@@ -95,7 +108,8 @@ impl GpuRenderer {
     /// Safety invariant: the minifb Window owns the native window/display
     /// handles and must outlive GpuRenderer. The GPU is constructed *after*
     /// Window and dropped *before* Window by the online game loop.
-    pub fn new(window: &Window, width: u32, height: u32) -> Result<Self, String> {
+    pub fn new(window: &Window, width: u32, height: u32, vsync: bool)
+        -> Result<Self, String> {
         let instance = wgpu::Instance::default();
         let raw = unsafe {
             wgpu::SurfaceTargetUnsafe::from_window(window)
@@ -121,7 +135,10 @@ impl GpuRenderer {
         )).map_err(|e| format!("GPU device: {e}"))?;
         let mut config = surface.get_default_config(&adapter, width, height)
             .ok_or_else(|| String::from("Surface does not support DDNet framebuffer format"))?;
-        config.present_mode = wgpu::PresentMode::Fifo;
+        let caps = surface.get_capabilities(&adapter);
+        config.present_mode = select_present_mode(vsync, &caps.present_modes);
+        eprintln!("DDNet-Rust present mode: {:?} (vsync requested: {vsync})",
+            config.present_mode);
         surface.configure(&device, &config);
 
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -244,6 +261,7 @@ impl GpuRenderer {
             tee_cache: GpuTeeScene::default(),
             hud_batches: Vec::new(),
             last_frame_profile: None,
+            supported_present_modes: caps.present_modes,
             cached_map_camera: None, cached_map_vertices: 0,
             quad_bounds: Vec::new(),
             occupied_tiles: Vec::new(),
@@ -363,6 +381,18 @@ impl GpuRenderer {
     /// previous frame. A timed-out surface acquisition leaves this at None.
     pub fn last_frame_profile(&self) -> Option<GpuFrameProfile> {
         self.last_frame_profile
+    }
+
+    /// Apply in-game vertical sync changes without rebuilding textures,
+    /// shaders or map geometry. Returns the selected swapchain mode.
+    pub fn set_vsync(&mut self, enabled: bool) -> wgpu::PresentMode {
+        let mode = select_present_mode(enabled, &self.supported_present_modes);
+        if self.config.present_mode != mode {
+            self.config.present_mode = mode;
+            self.surface.configure(&self.device, &self.config);
+            eprintln!("DDNet-Rust present mode changed to {mode:?}");
+        }
+        mode
     }
 
     fn upload_overlay(
@@ -628,6 +658,16 @@ fn rgba_overlay_into(frame: &Framebuffer, rgba: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vsync_present_mode_uses_supported_adapter_capabilities() {
+        use wgpu::PresentMode::{Fifo, Immediate, Mailbox};
+        assert_eq!(select_present_mode(true, &[Fifo, Immediate, Mailbox]), Fifo);
+        assert_eq!(select_present_mode(false, &[Fifo, Immediate, Mailbox]), Immediate);
+        assert_eq!(select_present_mode(false, &[Fifo, Mailbox]), Mailbox);
+        assert_eq!(select_present_mode(false, &[Fifo]), Fifo);
+        assert_eq!(select_present_mode(true, &[Fifo]), Fifo);
+    }
 
     #[test]
     fn fallback_rgba_upload_reuses_capacity_and_clears_transparency() {
