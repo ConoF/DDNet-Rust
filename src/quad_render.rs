@@ -136,15 +136,22 @@ fn sample_color(
 /// avoid a visible dark seam with semitransparent quads.
 fn triangle(
     frame: &mut Framebuffer, verts: [ScreenVertex; 3],
-    tex: Option<&Texture>, second: bool,
+    tex: Option<&Texture>, second: bool, clip: Option<[f32; 4]>,
 ) {
     let [a, b, c] = verts;
     let determinant = edge(a, b, c.x, c.y);
     if !determinant.is_finite() || determinant.abs() < 0.0001 { return; }
-    let min_x = a.x.min(b.x).min(c.x).floor().max(0.0) as usize;
-    let max_x = a.x.max(b.x).max(c.x).ceil().min(frame.width as f32) as usize;
-    let min_y = a.y.min(b.y).min(c.y).floor().max(0.0) as usize;
-    let max_y = a.y.max(b.y).max(c.y).ceil().min(frame.height as f32) as usize;
+    let mut min_x = a.x.min(b.x).min(c.x).floor().max(0.0) as usize;
+    let mut max_x = a.x.max(b.x).max(c.x).ceil().min(frame.width as f32) as usize;
+    let mut min_y = a.y.min(b.y).min(c.y).floor().max(0.0) as usize;
+    let mut max_y = a.y.max(b.y).max(c.y).ceil().min(frame.height as f32) as usize;
+    if let Some([left, top, right, bottom]) = clip {
+        if right <= left || bottom <= top { return; }
+        min_x = min_x.max(left.round().max(0.0) as usize);
+        min_y = min_y.max(top.round().max(0.0) as usize);
+        max_x = max_x.min(right.round().max(0.0) as usize);
+        max_y = max_y.min(bottom.round().max(0.0) as usize);
+    }
     if min_x >= max_x || min_y >= max_y { return; }
 
     // Flat-colored, untextured geometry is common in DDNet backgrounds.
@@ -219,6 +226,8 @@ pub fn draw_quads_at(
     let cy = camera.center.y * layer.transform.parallax_y / 100.0
         - layer.transform.offset_y;
     let mut count = 0;
+    let clip = layer.transform.screen_clip(camera, frame.width as f32,
+        frame.height as f32);
     for quad in &layer.quads {
         let pos = envelopes.evaluate(quad.pos_env, quad.pos_env_offset,
             times, [0.0; 4]);
@@ -260,8 +269,8 @@ pub fn draw_quads_at(
         {
             continue;
         }
-        triangle(frame, [v[0], v[1], v[2]], tex, false);
-        triangle(frame, [v[1], v[3], v[2]], tex, true);
+        triangle(frame, [v[0], v[1], v[2]], tex, false, clip);
+        triangle(frame, [v[1], v[3], v[2]], tex, true, clip);
         count += 1;
     }
     Ok(count)
@@ -294,6 +303,23 @@ mod tests {
             transform: GroupTransform::default(),
             image, quads: vec![quad],
         }
+    }
+
+    #[test]
+    fn original_group_scissor_limits_cpu_quad_rasterization() {
+        let mut solid = layer(None, solid_quad([255, 0, 0, 255]));
+        solid.transform.clip = Some(crate::map_visual::GroupClip {
+            x: 4.0, y: 3.0, width: 7.0, height: 9.0,
+        });
+        let camera = Camera { center: Vec2::new(8.0, 8.0), scale: 1.0 };
+        let mut frame = Framebuffer::new(16,16).unwrap();
+        frame.clear(0);
+        draw_quads(&solid, &[], &mut frame, camera).unwrap();
+        assert_eq!(frame.pixel(3,5), Some(0));
+        assert_eq!(frame.pixel(4,5), Some(0xff0000));
+        assert_eq!(frame.pixel(10,11), Some(0xff0000));
+        assert_eq!(frame.pixel(11,11), Some(0));
+        assert_eq!(frame.pixel(5,12), Some(0));
     }
 
     #[test]
