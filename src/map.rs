@@ -2,9 +2,9 @@
 //!
 //! Source of truth: game/mapitems.h, game/layers.cpp and game/collision.cpp in
 //! upstream DDNet 20.2.1. This is not the full DDNet collision system:
-//! front tiles, doors, zone-specific tuning values, teleporters, movement
-//! restrictions and map entities need separate implementations. Tune layer IDs
-//! are decoded to prevent incorrect prediction with default tuning.
+//! Door activation, teleport destinations, front/switch effects and complete
+//! movement restrictions still need implementation. Special DDRace layers
+//! are decoded before collision prediction to avoid false extrapolation.
 
 use crate::datafile::{Datafile, DatafileError};
 use crate::physics::Vec2;
@@ -12,7 +12,13 @@ use crate::physics::Vec2;
 const MAPITEMTYPE_LAYER: u16 = 5;
 const LAYERTYPE_TILES: i32 = 2;
 const TILESLAYERFLAG_GAME: i32 = 1;
+const TILESLAYERFLAG_TELE: i32 = 1 << 1;
+const TILESLAYERFLAG_SPEEDUP: i32 = 1 << 2;
+const TILESLAYERFLAG_FRONT: i32 = 1 << 3;
+const TILESLAYERFLAG_SWITCH: i32 = 1 << 4;
 const TILESLAYERFLAG_TUNE: i32 = 1 << 5;
+pub const TILE_SPEED_BOOST_OLD: u8 = 28;
+pub const TILE_SPEED_BOOST: u8 = 29;
 const TILE_SOLID: u8 = 1;
 const TILE_NOHOOK: u8 = 3;
 const TILE_NOLASER: u8 = 4;
@@ -25,6 +31,8 @@ pub enum MapError {
     InvalidTileData,
     InvalidTuneLayer,
     InvalidTuneData,
+    InvalidSpecialLayer,
+    InvalidSpecialData,
     InvalidMotion,
     MotionTooLarge,
     Datafile(DatafileError),
@@ -51,6 +59,32 @@ pub struct TuneTile {
     pub tile_type: u8,
 }
 
+/// CTeleTile in game/mapitems.h: two unsigned bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TeleTile {
+    pub number: u8,
+    pub tile_type: u8,
+}
+
+/// CSpeedupTile: three u8 fields, reserved byte and little-endian i16 angle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpeedupTile {
+    pub force: u8,
+    pub max_speed: u8,
+    pub tile_type: u8,
+    pub reserved: u8,
+    pub angle: i16,
+}
+
+/// CSwitchTile uses four unsigned bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SwitchTile {
+    pub number: u8,
+    pub tile_type: u8,
+    pub flags: u8,
+    pub delay: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameMap {
     pub width: usize,
@@ -58,11 +92,47 @@ pub struct GameMap {
     pub tiles: Vec<Tile>,
     /// Server-defined tune parameters are not encoded in this layer.
     tune_tiles: Option<Vec<TuneTile>>,
+    speedup_tiles: Option<Vec<SpeedupTile>>,
+    tele_tiles: Option<Vec<TeleTile>>,
+    front_tiles: Option<Vec<Tile>>,
+    switch_tiles: Option<Vec<SwitchTile>>,
 }
 
 fn layer_int(payload: &[u8], offset: usize) -> Option<i32> {
     let bytes: [u8; 4] = payload.get(offset..offset + 4)?.try_into().ok()?;
     Some(i32::from_le_bytes(bytes))
+}
+
+/// Load only a genuinely declared DDRace collision layer. Legacy v2
+/// m_Tele/m_Speedup/m_Front/m_Switch/m_Tune offsets start at 60/64/68/72/76;
+/// for v3+ the 12-byte name moves them to 72/76/80/84/88.
+fn load_special_layer(
+    file: &Datafile<'_>, width: usize, height: usize, count: usize,
+    flag: i32, old_offset: usize, record_size: usize,
+) -> Result<Option<Vec<u8>>, MapError> {
+    let Some(item) = file.items.iter().find(|item| {
+        item.type_id == MAPITEMTYPE_LAYER
+            && layer_int(item.payload, 4) == Some(LAYERTYPE_TILES)
+            && layer_int(item.payload, 24).is_some_and(|flags| {
+                flags & TILESLAYERFLAG_GAME == 0 && flags & flag != 0
+            })
+    }) else { return Ok(None); };
+
+    let version = layer_int(item.payload, 12).ok_or(MapError::InvalidSpecialLayer)?;
+    let offset = if version >= 3 { old_offset + 12 } else { old_offset };
+    if version < 2 || item.payload.len() < offset + 4
+        || layer_int(item.payload, 16) != Some(width as i32)
+        || layer_int(item.payload, 20) != Some(height as i32)
+    {
+        return Err(MapError::InvalidSpecialLayer);
+    }
+    let index = usize::try_from(
+        layer_int(item.payload, offset).ok_or(MapError::InvalidSpecialLayer)?,
+    ).map_err(|_| MapError::InvalidSpecialLayer)?;
+    let bytes = count.checked_mul(record_size).ok_or(MapError::InvalidDimensions)?;
+    let raw = file.raw_data(index, bytes)?;
+    if raw.len() != bytes { return Err(MapError::InvalidSpecialData); }
+    Ok(Some(raw))
 }
 
 impl GameMap {
@@ -105,35 +175,43 @@ impl GameMap {
         let tile_bytes = tile_count.checked_mul(4).ok_or(MapError::InvalidDimensions)?;
         let data = file.raw_data(data_index, tile_bytes)?;
         let mut map = Self::from_tile_bytes(width, height, &data)?;
-        // CMapItemLayerTilemap_v2Legacy::m_Tune is at 76, while the
-        // v3/DDRace tilemap stores it at 88 after the layer name.
-        if let Some(tune) = file.items.iter().find(|item| {
-            item.type_id == MAPITEMTYPE_LAYER
-                && layer_int(item.payload, 4) == Some(LAYERTYPE_TILES)
-                && layer_int(item.payload, 24).is_some_and(|flags| {
-                    flags & TILESLAYERFLAG_GAME == 0
-                        && flags & TILESLAYERFLAG_TUNE != 0
-                })
-        }) {
-            let payload = tune.payload;
-            let version = layer_int(payload, 12).ok_or(MapError::InvalidTuneLayer)?;
-            let offset = if version >= 3 { 88 } else { 76 };
-            if version < 2 || payload.len() < offset + 4
-                || layer_int(payload, 16) != Some(width as i32)
-                || layer_int(payload, 20) != Some(height as i32)
-            {
-                return Err(MapError::InvalidTuneLayer);
-            }
-            let tune_index = usize::try_from(
-                layer_int(payload, offset).ok_or(MapError::InvalidTuneLayer)?,
-            ).map_err(|_| MapError::InvalidTuneLayer)?;
-            let tune_bytes = tile_count.checked_mul(2)
-                .ok_or(MapError::InvalidDimensions)?;
-            let raw = file.raw_data(tune_index, tune_bytes)?;
-            if raw.len() != tune_bytes { return Err(MapError::InvalidTuneData); }
+        if let Some(raw) = load_special_layer(
+            file, width, height, tile_count, TILESLAYERFLAG_TUNE, 76, 2,
+        ).map_err(|error| match error {
+            MapError::InvalidSpecialLayer => MapError::InvalidTuneLayer,
+            MapError::InvalidSpecialData => MapError::InvalidTuneData,
+            other => other,
+        })? {
             map.tune_tiles = Some(raw.chunks_exact(2)
-                .map(|pair| TuneTile { number: pair[0], tile_type: pair[1] })
-                .collect());
+                .map(|v| TuneTile { number: v[0], tile_type: v[1] }).collect());
+        }
+        if let Some(raw) = load_special_layer(
+            file, width, height, tile_count, TILESLAYERFLAG_SPEEDUP, 64, 6,
+        )? {
+            map.speedup_tiles = Some(raw.chunks_exact(6).map(|v| SpeedupTile {
+                force: v[0], max_speed: v[1], tile_type: v[2],
+                reserved: v[3], angle: i16::from_le_bytes([v[4], v[5]]),
+            }).collect());
+        }
+        if let Some(raw) = load_special_layer(
+            file, width, height, tile_count, TILESLAYERFLAG_TELE, 60, 2,
+        )? {
+            map.tele_tiles = Some(raw.chunks_exact(2)
+                .map(|v| TeleTile { number: v[0], tile_type: v[1] }).collect());
+        }
+        if let Some(raw) = load_special_layer(
+            file, width, height, tile_count, TILESLAYERFLAG_FRONT, 68, 4,
+        )? {
+            map.front_tiles = Some(raw.chunks_exact(4).map(|v| Tile {
+                index: v[0], flags: v[1], skip: v[2], reserved: v[3],
+            }).collect());
+        }
+        if let Some(raw) = load_special_layer(
+            file, width, height, tile_count, TILESLAYERFLAG_SWITCH, 72, 4,
+        )? {
+            map.switch_tiles = Some(raw.chunks_exact(4).map(|v| SwitchTile {
+                number: v[0], tile_type: v[1], flags: v[2], delay: v[3],
+            }).collect());
         }
         Ok(map)
     }
@@ -161,7 +239,10 @@ impl GameMap {
                 reserved: tile[3],
             })
             .collect();
-        Ok(Self { width, height, tiles, tune_tiles: None })
+        Ok(Self {
+            width, height, tiles, tune_tiles: None, speedup_tiles: None,
+            tele_tiles: None, front_tiles: None, switch_tiles: None,
+        })
     }
 
     pub fn tile(&self, x: usize, y: usize) -> Option<Tile> {
@@ -169,6 +250,50 @@ impl GameMap {
             return None;
         }
         self.tiles.get(y * self.width + x).copied()
+    }
+
+    fn tile_index_at(&self, pos: Vec2) -> Option<usize> {
+        if !pos.x.is_finite() || !pos.y.is_finite() { return None; }
+        let x = (pos.x as i32 / 32).clamp(0, self.width as i32 - 1) as usize;
+        let y = (pos.y as i32 / 32).clamp(0, self.height as i32 - 1) as usize;
+        Some(y * self.width + x)
+    }
+
+    /// Return only active speedup tiles; upstream IsSpeedup checks Force > 0.
+    pub fn speedup_at(&self, pos: Vec2) -> Option<SpeedupTile> {
+        let tile = *self.speedup_tiles.as_ref()?.get(self.tile_index_at(pos)?)?;
+        (tile.force > 0).then_some(tile)
+    }
+
+    /// Server teleport destinations and DDRace restrictions are not yet
+    /// modeled. A special tile within 32px of the tee can alter a tick.
+    /// Fail closed in local prediction instead of displaying fake physics.
+    pub fn has_unsupported_physics_near(&self, pos: Vec2) -> bool {
+        let Some(center) = self.tile_index_at(pos) else { return true; };
+        let cx = center % self.width;
+        let cy = center / self.width;
+        let xmin = cx.saturating_sub(1);
+        let ymin = cy.saturating_sub(1);
+        let xmax = (cx + 1).min(self.width - 1);
+        let ymax = (cy + 1).min(self.height - 1);
+        for y in ymin..=ymax {
+            for x in xmin..=xmax {
+                let index = y * self.width + x;
+                let game_index = self.tiles[index].index;
+                // Freeze, death, stoppers and gameplay powerups alter movement
+                // or control. Pure solid/nohook/nolaser tile states are safe.
+                if !matches!(game_index, 0 | TILE_SOLID | TILE_NOHOOK | TILE_NOLASER) {
+                    return true;
+                }
+                if self.front_tiles.as_ref().is_some_and(|layer| layer[index].index != 0)
+                    || self.tele_tiles.as_ref().is_some_and(|layer| layer[index].tile_type != 0)
+                    || self.switch_tiles.as_ref().is_some_and(|layer| layer[index].tile_type != 0)
+                {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// CCollision::IsTune(GetMapIndex(pos)): nonzero type activates a zone.
