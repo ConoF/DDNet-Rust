@@ -5,11 +5,12 @@
 
 use crate::gpu_scene::{GpuBatch, GpuVertex, MAX_FRAME_VERTICES};
 use crate::graphics::{Camera, RenderError, HOOK};
-use crate::netobjects::{CharacterCoreNet, CHARACTER_TYPE};
+use crate::netobjects::{CharacterCoreNet, PickupNet, CHARACTER_TYPE};
 use crate::snapshot_delta::SnapshotState;
 use crate::sprite_render::{
     Sprite, GRID_SKIN, GRID_GAME, BODY, FOOT, HOOK_HEAD, HOOK_CHAIN,
     MAX_HOOK_DISTANCE, skin_eye, weapon_sprite, muzzle_sprite, valid_sheet,
+    pickup_art, pickup_position,
 };
 use crate::texture::Texture;
 
@@ -274,6 +275,19 @@ pub fn build_gpu_tees_into(
         scene: std::mem::take(output),
         width: viewport.0 as f32, height: viewport.1 as f32, slots,
     };
+    if game {
+        for item in &state.items {
+            if let Some(pickup) = PickupNet::from_object(item) {
+                if let Some((sprite, size)) = pickup_art(pickup) {
+                    let (x, y) = pickup_position(pickup, tick);
+                    let center = b.screen(camera, x, y);
+                    b.sprite(b.slots.game, GRID_GAME, sprite, center,
+                        (size.0 * camera.scale, size.1 * camera.scale),
+                        (0.0, false));
+                }
+            }
+        }
+    }
     for item in &state.items {
         if let Some(character) = CharacterCoreNet::from_object(item) {
             b.hook(character, camera, game);
@@ -351,6 +365,39 @@ mod tests {
             Camera { scale: f32::NAN, ..camera() }, 131,
             (400, 200), (Some(&skin), Some(&game)), slots()).is_err());
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn native_gpu_pickups_use_game_png_and_preserve_render_order() {
+        let state = SnapshotState {
+            items: vec![
+                SnapshotObject {
+                    type_id: crate::netobjects::PICKUP_TYPE,
+                    id: 1, words: vec![40, 40, 0, 0],
+                },
+                SnapshotObject {
+                    type_id: crate::netobjects::PICKUP_TYPE,
+                    id: 2, words: vec![60, 40, 2, 1],
+                },
+            ],
+        };
+        let camera = Camera {
+            center: Vec2::new(50.0, 40.0), scale: 1.0,
+        };
+        let visuals = build_gpu_tees(&state, camera, 100,
+            (200, 120), Some(&tex(80, 40)), Some(&tex(320, 160)),
+            slots()).unwrap();
+        assert_eq!(visuals.characters, 0);
+        assert_eq!(visuals.vertices.len(), 12);
+        assert_eq!(visuals.batches.len(), 1);
+        assert_eq!(visuals.batches[0].texture, slots().game);
+        assert_eq!(visuals.vertices[0].uv, [10.0 / 32.0, 2.0 / 16.0]);
+        assert_eq!(visuals.vertices[6].uv, [2.0 / 32.0, 4.0 / 16.0]);
+        let mut no_game = GpuTeeScene::default();
+        build_gpu_tees_into(&mut no_game, &state, camera, 100,
+            (200, 120), (Some(&tex(80, 40)), None),
+            slots()).unwrap();
+        assert_eq!(no_game.vertices.len(), 0);
     }
 
     #[test]

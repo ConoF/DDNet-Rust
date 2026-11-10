@@ -8,7 +8,7 @@ use crate::graphics::{Camera, Framebuffer, RenderError, HOOK};
 use crate::netobjects::{CharacterCoreNet, CHARACTER_TYPE};
 use crate::snapshot_delta::SnapshotState;
 use crate::texture::Texture;
-use crate::netobjects::CharacterHudStatus;
+use crate::netobjects::{CharacterHudStatus, PickupNet};
 
 pub(crate) const MAX_HOOK_DISTANCE: f32 = 2048.0;
 pub(crate) const GRID_SKIN: (usize, usize) = (8, 4);
@@ -124,6 +124,46 @@ pub(crate) fn muzzle_sprite(weapon: i32) -> Option<Sprite> {
         5 => Some(Sprite { x: 25, y: 0, w: 7, h: 4 }),
         _ => None,
     }
+}
+
+/// Visual mapping from DDNet 20.2.1 datasrc/content.py. These are the
+/// same atlas cells used by CItems::RenderPickup. Item sizes follow the
+/// original normalized sprite dimensions and 64/96/128-unit visual sizes.
+pub(crate) fn pickup_art(pickup: PickupNet) -> Option<(Sprite, (f32, f32))> {
+    let (sprite, visual_size) = match pickup.kind {
+        0 => (Sprite { x: 10, y: 2, w: 2, h: 2 }, 64.0),
+        1 => (Sprite { x: 12, y: 2, w: 2, h: 2 }, 64.0),
+        2 => (weapon_sprite(i32::from(pickup.subtype))?, 96.0),
+        3 => (Sprite { x: 2, y: 10, w: 8, h: 2 }, 128.0),
+        4 => (Sprite { x: 15, y: 2, w: 2, h: 2 }, 64.0),
+        5 => (Sprite { x: 17, y: 2, w: 2, h: 2 }, 64.0),
+        6 => (Sprite { x: 10, y: 10, w: 2, h: 2 }, 64.0),
+        7 => (Sprite { x: 19, y: 2, w: 2, h: 2 }, 64.0),
+        8 => (Sprite { x: 6, y: 2, w: 2, h: 2 }, 64.0),
+        _ => return None,
+    };
+    let (w, h) = (sprite.w as f32, sprite.h as f32);
+    let normal = visual_size / w.hypot(h);
+    Some((sprite, (w * normal, h * normal)))
+}
+
+/// Deterministic 50Hz equivalent of the original floating pickup motion.
+/// Rendering does not modify snapshot positions or the collision world.
+pub(crate) fn pickup_position(pickup: PickupNet, tick: u64) -> (f32, f32) {
+    let offset = (pickup.x as f32 + pickup.y as f32) / 32.0;
+    let phase = tick as f32 / 25.0 + offset;
+    (pickup.x as f32 + phase.cos() * 2.5,
+     pickup.y as f32 + phase.sin() * 2.5)
+}
+
+fn draw_pickup(
+    frame: &mut Framebuffer, pickup: PickupNet,
+    atlas: &Texture, camera: Camera, tick: u64,
+) {
+    let Some((sprite, size)) = pickup_art(pickup) else { return; };
+    let (px, py) = pickup_position(pickup, tick);
+    blit(frame, atlas, GRID_GAME, sprite, to_screen(frame, camera, px, py),
+        (size.0 * camera.scale, size.1 * camera.scale), (0.0, false));
 }
 
 pub(crate) fn skin_eye(emote: i32) -> Sprite {
@@ -350,10 +390,18 @@ pub fn render_animated_snapshot(
     {
         return Err(RenderError::InvalidCamera);
     }
+    let game = game.filter(|g| valid_sheet(g, GRID_GAME));
+    if let Some(atlas) = game {
+        // CItems is drawn behind all player hooks and tee sprites.
+        for item in &state.items {
+            if let Some(pickup) = PickupNet::from_object(item) {
+                draw_pickup(frame, pickup, atlas, camera, tick);
+            }
+        }
+    }
     let Some(skin) = skin.filter(|s| valid_sheet(s, GRID_SKIN)) else {
         return frame.render_snapshot(state, camera);
     };
-    let game = game.filter(|g| valid_sheet(g, GRID_GAME));
     for item in &state.items {
         if let Some(character) = CharacterCoreNet::from_object(item) {
             draw_hook(frame, character, camera, game);
@@ -425,6 +473,62 @@ mod tests {
 
     fn camera() -> Camera {
         Camera { center: crate::physics::Vec2::new(100.0, 100.0), scale: 1.0 }
+    }
+
+    #[test]
+    fn pickup_art_matches_original_all_nine_powerup_types_and_bobs() {
+        let pickup = |kind, subtype| PickupNet {
+            x: 64, y: 64, kind, subtype,
+        };
+        for (kind, x, y, w, h) in [
+            (0, 10, 2, 2, 2), (1, 12, 2, 2, 2),
+            (2, 2, 4, 4, 2), (3, 2, 10, 8, 2),
+            (4, 15, 2, 2, 2), (5, 17, 2, 2, 2),
+            (6, 10, 10, 2, 2), (7, 19, 2, 2, 2),
+            (8, 6, 2, 2, 2),
+        ] {
+            assert_eq!(pickup_art(pickup(kind, 1)).unwrap().0,
+                Sprite { x, y, w, h });
+        }
+        assert!(pickup_art(pickup(2, 9)).is_none());
+        assert!(pickup_art(pickup(9, 0)).is_none());
+        assert_eq!(pickup_position(pickup(0, 0), 100),
+            pickup_position(pickup(0, 0), 100));
+        let (_, size) = pickup_art(pickup(0, 0)).unwrap();
+        assert!((size.0 - 64.0 / 2.0f32.sqrt()).abs() < 0.001);
+    }
+
+    #[test]
+    fn pickup_sprites_render_before_players_and_missing_game_png_is_safe() {
+        let icon = pickup_art(PickupNet {
+            x: 0, y: 0, kind: 0, subtype: 0,
+        }).unwrap().0;
+        let game = sprite_sheet(320, 160, GRID_GAME, &[
+            (icon, [255, 0, 0, 255]),
+        ]);
+        let state = SnapshotState {
+            items: vec![SnapshotObject {
+                type_id: crate::netobjects::PICKUP_TYPE, id: 0,
+                words: vec![100, 100, 0, 0],
+            }],
+        };
+        let camera = Camera {
+            center: crate::physics::Vec2::new(100.0, 100.0), scale: 1.0,
+        };
+        let mut frame = Framebuffer::new(200, 200).unwrap();
+        frame.clear(BACKGROUND);
+        assert_eq!(render_animated_snapshot(&mut frame, &state, camera,
+            Some(&skin()), Some(&game), 0).unwrap(), 0);
+        assert!(frame.pixels.contains(&0xff0000));
+        frame.clear(BACKGROUND);
+        render_animated_snapshot(&mut frame, &state, camera,
+            None, Some(&game), 0).unwrap();
+        assert!(frame.pixels.contains(&0xff0000),
+            "pickups still render if the tee skin is missing");
+        frame.clear(BACKGROUND);
+        render_animated_snapshot(&mut frame, &state, camera,
+            Some(&skin()), None, 0).unwrap();
+        assert!(!frame.pixels.contains(&0xff0000));
     }
 
     #[test]
