@@ -150,10 +150,32 @@ pub(crate) fn pickup_art(pickup: PickupNet) -> Option<(Sprite, (f32, f32))> {
 /// Deterministic 50Hz equivalent of the original floating pickup motion.
 /// Rendering does not modify snapshot positions or the collision world.
 pub(crate) fn pickup_position(pickup: PickupNet, tick: u64) -> (f32, f32) {
+    let mut x = pickup.x as f32;
+    let mut y = pickup.y as f32;
+    if pickup.kind == 3 {
+        // Original ninja pickup shifts by ten world units in the
+        // direction corresponding to its rotation and flip flags.
+        let shift = if pickup.flags & 1 != 0 { 10.0 } else { -10.0 };
+        if pickup.flags & 4 != 0 { y += shift; } else { x += shift; }
+    }
     let offset = (pickup.x as f32 + pickup.y as f32) / 32.0;
     let phase = tick as f32 / 25.0 + offset;
-    (pickup.x as f32 + phase.cos() * 2.5,
-     pickup.y as f32 + phase.sin() * 2.5)
+    (x + phase.cos() * 2.5, y + phase.sin() * 2.5)
+}
+
+/// Convert the quarter-turn and two sprite-axis mirrors in
+/// CItems::RenderPickup into the rotation + vertical mirror representation
+/// supported by both our native GPU and software sprite rasterizers.
+pub(crate) fn pickup_orientation(flags: u8) -> (f32, bool) {
+    let rotated = flags & 4 != 0;
+    let flip_x = flags & if rotated { 2 } else { 1 } != 0;
+    let flip_y = flags & if rotated { 1 } else { 2 } != 0;
+    let angle = if rotated { std::f32::consts::FRAC_PI_2 } else { 0.0 };
+    if flip_x {
+        (angle + std::f32::consts::PI, !flip_y)
+    } else {
+        (angle, flip_y)
+    }
 }
 
 fn draw_pickup(
@@ -163,7 +185,8 @@ fn draw_pickup(
     let Some((sprite, size)) = pickup_art(pickup) else { return; };
     let (px, py) = pickup_position(pickup, tick);
     blit(frame, atlas, GRID_GAME, sprite, to_screen(frame, camera, px, py),
-        (size.0 * camera.scale, size.1 * camera.scale), (0.0, false));
+        (size.0 * camera.scale, size.1 * camera.scale),
+        pickup_orientation(pickup.flags));
 }
 
 pub(crate) fn skin_eye(emote: i32) -> Sprite {
@@ -393,8 +416,12 @@ pub fn render_animated_snapshot(
     let game = game.filter(|g| valid_sheet(g, GRID_GAME));
     if let Some(atlas) = game {
         // CItems is drawn behind all player hooks and tee sprites.
+        let ddnet_type = PickupNet::extended_type(state);
         for item in &state.items {
-            if let Some(pickup) = PickupNet::from_object(item) {
+            let pickup = PickupNet::from_object(item).or_else(|| {
+                ddnet_type.and_then(|kind| PickupNet::from_extended_object(item, kind))
+            });
+            if let Some(pickup) = pickup {
                 draw_pickup(frame, pickup, atlas, camera, tick);
             }
         }
@@ -479,6 +506,7 @@ mod tests {
     fn pickup_art_matches_original_all_nine_powerup_types_and_bobs() {
         let pickup = |kind, subtype| PickupNet {
             x: 64, y: 64, kind, subtype,
+            flags: 0, switch_number: 0,
         };
         for (kind, x, y, w, h) in [
             (0, 10, 2, 2, 2), (1, 12, 2, 2, 2),
@@ -494,6 +522,16 @@ mod tests {
         assert!(pickup_art(pickup(9, 0)).is_none());
         assert_eq!(pickup_position(pickup(0, 0), 100),
             pickup_position(pickup(0, 0), 100));
+        assert_eq!(pickup_orientation(0), (0.0, false));
+        assert_eq!(pickup_orientation(2), (0.0, true));
+        assert_eq!(pickup_orientation(4), (std::f32::consts::FRAC_PI_2, false));
+        assert_eq!(pickup_orientation(7),
+            (std::f32::consts::FRAC_PI_2 + std::f32::consts::PI, false));
+        let mut ninja = pickup(3, 0);
+        ninja.flags = 1;
+        let normal = pickup_position(ninja, 50);
+        ninja.flags = 0;
+        assert!((normal.0 - pickup_position(ninja, 50).0 - 20.0).abs() < 0.0001);
         let (_, size) = pickup_art(pickup(0, 0)).unwrap();
         assert!((size.0 - 64.0 / 2.0f32.sqrt()).abs() < 0.001);
     }
@@ -502,6 +540,7 @@ mod tests {
     fn pickup_sprites_render_before_players_and_missing_game_png_is_safe() {
         let icon = pickup_art(PickupNet {
             x: 0, y: 0, kind: 0, subtype: 0,
+            flags: 0, switch_number: 0,
         }).unwrap().0;
         let game = sprite_sheet(320, 160, GRID_GAME, &[
             (icon, [255, 0, 0, 255]),

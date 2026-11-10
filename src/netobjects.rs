@@ -68,6 +68,9 @@ pub const CLIENTINFO_TYPE: u16 = 11;
 /// big-endian signed int32s by UuidToInts (uuid_manager.cpp).
 pub const SWITCH_STATE_UUID_WORDS: [i32; 4] =
     [-334109079, -837733529, -1366378226, 1529330133];
+/// uuid3(TEEWORLDS_NAMESPACE, "pickup@netobj.ddnet.tw"), Uint32 BE.
+pub const DDNET_PICKUP_UUID_WORDS: [i32; 4] =
+    [-362919343, 1492858500, -1763385134, 1744095845];
 const OFFSET_UUID_TYPE: u16 = 0x4000;
 
 /// DDNet 0.6 stores tee names as signed characters with an offset of 128,
@@ -196,6 +199,9 @@ pub struct PickupNet {
     pub y: i32,
     pub kind: u8,
     pub subtype: u8,
+    /// PICKUPFLAG_XFLIP, YFLIP, ROTATE, NO_PREDICT (DDNet only).
+    pub flags: u8,
+    pub switch_number: i32,
 }
 
 impl PickupNet {
@@ -207,7 +213,40 @@ impl PickupNet {
         let kind = u8::try_from(w[2]).ok().filter(|&kind| kind <= 8)?;
         let subtype = u8::try_from(w[3]).ok()?;
         if kind == 2 && subtype > 5 { return None; }
-        Some(Self { x: w[0], y: w[1], kind, subtype })
+        Some(Self {
+            x: w[0], y: w[1], kind, subtype, flags: 0, switch_number: 0,
+        })
+    }
+
+    /// NETOBJTYPE_EX remaps the DDNet-specific pickup to a dynamically
+    /// assigned snapshot type. Trust it only after the 128-bit name UUID
+    /// has been independently verified from a mapping object.
+    pub fn extended_type(snapshot: &SnapshotState) -> Option<u16> {
+        let mut types = snapshot.items.iter().filter(|item| {
+            item.type_id == 0 && item.id >= OFFSET_UUID_TYPE
+                && item.words.as_slice() == DDNET_PICKUP_UUID_WORDS
+        });
+        let mapped = types.next()?.id;
+        if types.next().is_some() { return None; }
+        Some(mapped)
+    }
+
+    pub fn from_extended_object(item: &SnapshotObject, mapped: u16) -> Option<Self> {
+        if mapped < OFFSET_UUID_TYPE || item.type_id != mapped
+            || !(5..=6).contains(&item.words.len())
+        {
+            return None;
+        }
+        let w = &item.words;
+        let kind = u8::try_from(w[2]).ok().filter(|&kind| kind <= 8)?;
+        let subtype = u8::try_from(w[3]).ok()?;
+        if kind == 2 && subtype > 5 { return None; }
+        let flags = u8::try_from(*w.get(5).unwrap_or(&0)).ok()?;
+        if flags & !0x0f != 0 { return None; }
+        Some(Self {
+            x: w[0], y: w[1], kind, subtype,
+            switch_number: w[4], flags,
+        })
     }
 }
 
@@ -347,6 +386,43 @@ mod tests {
     }
 
     #[test]
+    fn ddnet_pickup_uuid_mapping_and_extended_flags_are_verified() {
+        let mut state = SnapshotState { items: vec![
+            SnapshotObject {
+                type_id: 0, id: 0x4001, words: DDNET_PICKUP_UUID_WORDS.to_vec(),
+            },
+            SnapshotObject {
+                type_id: 0x4001, id: 7, words: vec![112, 89, 2, 3, 12, 0x07],
+            },
+            SnapshotObject {
+                type_id: 0x4001, id: 8, words: vec![200, 89, 0, 0, 0],
+            },
+        ] };
+        assert_eq!(PickupNet::extended_type(&state), Some(0x4001));
+        let pickup = PickupNet::from_extended_object(
+            &state.items[1], PickupNet::extended_type(&state).unwrap(),
+        ).unwrap();
+        assert_eq!(pickup, PickupNet {
+            x: 112, y: 89, kind: 2, subtype: 3,
+            flags: 7, switch_number: 12,
+        });
+        assert_eq!(PickupNet::from_extended_object(&state.items[2], 0x4001)
+            .unwrap().flags, 0);
+        state.items[0].words[0] ^= 1;
+        assert_eq!(PickupNet::extended_type(&state), None);
+        state.items[0].words = DDNET_PICKUP_UUID_WORDS.to_vec();
+        state.items.push(state.items[0].clone());
+        assert_eq!(PickupNet::extended_type(&state), None);
+        state.items.pop();
+        state.items[1].words[5] = 16;
+        assert!(PickupNet::from_extended_object(&state.items[1], 0x4001).is_none());
+        state.items[1].words[5] = 7;
+        assert!(PickupNet::from_extended_object(&state.items[1], 4).is_none());
+        state.items[1].words.push(1);
+        assert!(PickupNet::from_extended_object(&state.items[1], 0x4001).is_none());
+    }
+
+    #[test]
     fn vanilla_pickups_match_upstream_netobject_schema_and_reject_invalid() {
         let p = |words: Vec<i32>| SnapshotObject {
             type_id: PICKUP_TYPE, id: 9, words,
@@ -355,6 +431,7 @@ mod tests {
             let mut data = p(vec![120, -64, kind, 0]);
             assert_eq!(PickupNet::from_object(&data), Some(PickupNet {
                 x: 120, y: -64, kind: kind as u8, subtype: 0,
+                flags: 0, switch_number: 0,
             }));
             if kind == 2 {
                 data.words[3] = 5;
