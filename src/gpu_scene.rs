@@ -5,7 +5,7 @@
 
 use crate::envelope::EnvelopeTimes;
 use crate::graphics::{Camera, RenderError};
-use crate::map_visual::{VisualError, VisualMap};
+use crate::map_visual::{for_each_tile_border, VisualError, VisualMap};
 use crate::quad_render::QuadLayer;
 
 pub const VERTEX_STRIDE: usize = 20;
@@ -234,46 +234,58 @@ impl Builder {
         let y0 = ((cy - radius_y) / 32.0).floor().max(0.0) as usize;
         let y1 = ((cy + radius_y) / 32.0).ceil().max(0.0) as usize;
         let clip = self.layer_clip(layer.transform, camera);
+        // The same corner/edge tiles are used by the original DDNet
+        // buffered renderer outside the stored rectangle. Stretch one quad
+        // per edge tile rather than emitting every off-map 32px cell.
+        let draw_rect = |tile: crate::map::Tile, rect: [i64; 4],
+                         this: &mut Builder| -> Result<(), VisualError> {
+            if tile.index == 0 { return Ok(()); }
+            let sx = (rect[0] as f32 * 32.0 - cx) * camera.scale + this.w / 2.0;
+            let sy = (rect[1] as f32 * 32.0 - cy) * camera.scale + this.h / 2.0;
+            let ex = (rect[2] as f32 * 32.0 - cx) * camera.scale + this.w / 2.0;
+            let ey = (rect[3] as f32 * 32.0 - cy) * camera.scale + this.h / 2.0;
+            if ex <= sx || ey <= sy { return Ok(()); }
+            let tile_u = f32::from(tile.index % 16);
+            let tile_v = f32::from(tile.index / 16);
+            let uv = |mut u: f32, mut v: f32| {
+                if tile.flags & 8 != 0 { (u, v) = (v, 1.0 - u); }
+                if tile.flags & 1 != 0 { u = 1.0 - u; }
+                if tile.flags & 2 != 0 { v = 1.0 - v; }
+                [(tile_u + u) / 16.0, (tile_v + v) / 16.0]
+            };
+            let pts = [
+                V { x: sx, y: sy, uv: uv(0.0,0.0), color },
+                V { x: ex, y: sy, uv: uv(1.0,0.0), color },
+                V { x: sx, y: ey, uv: uv(0.0,1.0), color },
+                V { x: ex, y: ey, uv: uv(1.0,1.0), color },
+            ];
+            this.add_quad(pts, layer.image, layer.foreground, clip)
+        };
         let from_x = x0.min(layer.width);
         let to_x = x1.saturating_add(1).min(layer.width);
         for y in y0.min(layer.height)..y1.saturating_add(1).min(layer.height) {
-            // Cached rows are ordered left-to-right, exactly like the original
-            // dense scan. Fall back to the dense scan for missing cache rows.
             let cached = occupied_rows.and_then(|rows| rows.get(y));
-            let draw_tile = |x: usize, this: &mut Builder| -> Result<(), VisualError> {
-                let tile = layer.tiles[y * layer.width + x];
-                if tile.index == 0 { return Ok(()); }
-                let sx = (x as f32 * 32.0 - cx) * camera.scale + this.w / 2.0;
-                let sy = (y as f32 * 32.0 - cy) * camera.scale + this.h / 2.0;
-                let size = 32.0 * camera.scale;
-                let tile_u = f32::from(tile.index % 16);
-                let tile_v = f32::from(tile.index / 16);
-                let uv = |mut u: f32, mut v: f32| {
-                    if tile.flags & 8 != 0 { (u, v) = (v, 1.0 - u); }
-                    if tile.flags & 1 != 0 { u = 1.0 - u; }
-                    if tile.flags & 2 != 0 { v = 1.0 - v; }
-                    [(tile_u + u) / 16.0, (tile_v + v) / 16.0]
-                };
-                let pts = [
-                    V { x: sx, y: sy, uv: uv(0.0,0.0), color },
-                    V { x: sx + size, y: sy, uv: uv(1.0,0.0), color },
-                    V { x: sx, y: sy + size, uv: uv(0.0,1.0), color },
-                    V { x: sx + size, y: sy + size, uv: uv(1.0,1.0), color },
-                ];
-                this.add_quad(pts, layer.image, layer.foreground, clip)
+            let draw_tile = |x: usize, this: &mut Builder| {
+                draw_rect(layer.tiles[y * layer.width + x],
+                    [x as i64, y as i64, x as i64 + 1, y as i64 + 1],
+                    this)
             };
             if let Some(columns) = cached {
                 let start = columns.partition_point(|&x| x < from_x);
                 let end = columns.partition_point(|&x| x < to_x);
-                for &x in &columns[start..end] {
-                    draw_tile(x, self)?;
-                }
+                for &x in &columns[start..end] { draw_tile(x, self)?; }
             } else {
-                for x in from_x..to_x {
-                    draw_tile(x, self)?;
-                }
+                for x in from_x..to_x { draw_tile(x, self)?; }
             }
         }
+        let border_x0 = ((cx - radius_x) / 32.0).floor() as i64;
+        let border_y0 = ((cy - radius_y) / 32.0).floor() as i64;
+        let border_x1 = ((cx + radius_x) / 32.0).ceil() as i64;
+        let border_y1 = ((cy + radius_y) / 32.0).ceil() as i64;
+        for_each_tile_border(layer,
+            border_x0, border_y0, border_x1, border_y1,
+            |tile, rect| draw_rect(tile, rect, self),
+        )?;
         Ok(())
     }
 
@@ -487,6 +499,42 @@ mod tests {
         assert!(has_time_varying_geometry(&m));
         m.quad_layers[0].quads[0].color_env = 999;
         assert!(!has_time_varying_geometry(&m), "invalid envelope uses default");
+    }
+
+    #[test]
+    fn gpu_tile_border_matches_original_stretched_corner_and_edge_geometry() {
+        let m = map();
+        let camera = Camera {
+            center: Vec2::new(16.0, 16.0), scale: 1.0,
+        };
+        let scene = build_gpu_scene(&m, camera, EnvelopeTimes::default(),
+            96, 96).unwrap();
+        // One original quad, one interior tile, plus eight outer rectangles.
+        assert_eq!(scene.vertices.len(), 60);
+        // The original quad precedes the tile and border geometry.
+        assert_eq!(scene.background[0].texture, 1);
+        assert_eq!(scene.background[1].texture, 0);
+        // Full-corner stretch occupies exactly the top-left off-map 32px,
+        // not repeated textures with one mesh per virtual tile.
+        let corner = &scene.vertices[12..18];
+        assert!((corner[0].clip[0] + 1.0).abs() < 0.0001);
+        assert!((corner[0].clip[1] - 1.0).abs() < 0.0001);
+        // The source atlas orientation and tint are unchanged for borders.
+        assert_eq!(corner[0].uv, scene.vertices[6].uv);
+        assert_eq!(corner[0].color, scene.vertices[6].color);
+        let mut cached = GpuScene::default();
+        let cache = cache_occupied_tiles(&m);
+        build_gpu_scene_into_cached(&m, camera, EnvelopeTimes::default(),
+            96, 96, &mut cached, SceneCaches {
+                occupied_tiles: Some(&cache), quad_bounds: None,
+            }).unwrap();
+        assert_eq!(cached, scene);
+        // Looking far outside must still emit a bounded set of border
+        // quads rather than one quad for every off-map coordinate.
+        let distant = build_gpu_scene(&m, Camera {
+            center: Vec2::new(-250_000.0, -250_000.0), scale: 1.0,
+        }, EnvelopeTimes::default(), 96, 96).unwrap();
+        assert!(distant.vertices.len() <= 18);
     }
 
     #[test]
