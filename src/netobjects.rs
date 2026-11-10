@@ -152,6 +152,41 @@ impl PlayerInfoNet {
     }
 }
 
+/// Vanilla 0.6 CNetObj_Character appends these values after its 15-word
+/// character core. These fields can be hidden for other players, so only
+/// the verified local character is used for the gameplay HUD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CharacterHudStatus {
+    pub health: u8,
+    pub armor: u8,
+    pub ammo: i8,
+    pub weapon: i8,
+}
+
+impl CharacterHudStatus {
+    pub fn from_object(object: &SnapshotObject) -> Option<Self> {
+        if object.type_id != CHARACTER_TYPE || object.words.len() != 22 {
+            return None;
+        }
+        let data = &object.words;
+        Some(Self {
+            health: u8::try_from(data[16]).ok().filter(|&n| n <= 10)?,
+            armor: u8::try_from(data[17]).ok().filter(|&n| n <= 10)?,
+            ammo: i8::try_from(data[18]).ok().filter(|&n| (-1..=10).contains(&n))?,
+            weapon: i8::try_from(data[19]).ok().filter(|&n| (-1..=5).contains(&n))?,
+        })
+    }
+
+    pub fn local_from_snapshot(snapshot: &SnapshotState) -> Option<Self> {
+        let id = snapshot.items.iter()
+            .filter_map(PlayerInfoNet::from_object)
+            .find(|player| player.local)?
+            .client_id;
+        let id = u16::try_from(id).ok()?;
+        Self::from_object(snapshot.find(CHARACTER_TYPE, id)?)
+    }
+}
+
 /// The server sends an extended CNetObj_SwitchState for the observed
 /// DDRace team. m_aStatus contains 256 bits (8 signed int32 words).
 /// The last eight words are optional on older servers: 4 switch numbers
@@ -285,6 +320,32 @@ mod tests {
         state.items[1].words = vec![7; 17];
         state.items.push(state.items[1].clone());
         assert!(SwitchStateNet::from_snapshot(&state).is_none());
+    }
+
+    #[test]
+    fn local_hud_status_reads_vanilla_character_fields_and_rejects_other_players() {
+        let mut words = vec![0; 22];
+        words[16] = 7; words[17] = 4; words[18] = -1; words[19] = 3;
+        let snapshot = SnapshotState { items: vec![
+            SnapshotObject { type_id: PLAYERINFO_TYPE, id: 1,
+                words: vec![1, 1, 0, 10, 40] },
+            SnapshotObject { type_id: PLAYERINFO_TYPE, id: 2,
+                words: vec![0, 2, 0, 10, 40] },
+            SnapshotObject { type_id: CHARACTER_TYPE, id: 1,
+                words: words.clone() },
+            SnapshotObject { type_id: CHARACTER_TYPE, id: 2,
+                words: vec![0; 22] },
+        ] };
+        let status = CharacterHudStatus::local_from_snapshot(&snapshot).unwrap();
+        assert_eq!(status, CharacterHudStatus {
+            health: 7, armor: 4, ammo: -1, weapon: 3,
+        });
+        let mut invalid = snapshot.clone();
+        invalid.items[2].words[16] = 11;
+        assert!(CharacterHudStatus::local_from_snapshot(&invalid).is_none());
+        invalid.items[2].words[16] = 7;
+        invalid.items[0].words[0] = 0;
+        assert!(CharacterHudStatus::local_from_snapshot(&invalid).is_none());
     }
 
     #[test]

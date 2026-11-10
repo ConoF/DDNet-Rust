@@ -8,6 +8,7 @@ use crate::graphics::{Camera, Framebuffer, RenderError, HOOK};
 use crate::netobjects::{CharacterCoreNet, CHARACTER_TYPE};
 use crate::snapshot_delta::SnapshotState;
 use crate::texture::Texture;
+use crate::netobjects::CharacterHudStatus;
 
 pub(crate) const MAX_HOOK_DISTANCE: f32 = 2048.0;
 pub(crate) const GRID_SKIN: (usize, usize) = (8, 4);
@@ -67,6 +68,52 @@ pub(crate) fn render_weapon_cursor(
     if !position.0.is_finite() || !position.1.is_finite() { return false; }
     blit(frame, atlas, GRID_GAME, sprite, position,
         (32.0, 32.0), (0.0, false));
+    true
+}
+
+pub(crate) const HEALTH_FULL: Sprite = Sprite { x: 21, y: 0, w: 2, h: 2 };
+pub(crate) const HEALTH_EMPTY: Sprite = Sprite { x: 23, y: 0, w: 2, h: 2 };
+pub(crate) const ARMOR_FULL: Sprite = Sprite { x: 21, y: 2, w: 2, h: 2 };
+pub(crate) const ARMOR_EMPTY: Sprite = Sprite { x: 23, y: 2, w: 2, h: 2 };
+
+pub(crate) fn hud_ammo_sprite(weapon: i8) -> Option<Sprite> {
+    let y = match weapon {
+        1 => 4, 2 => 6, 3 => 8, 4 => 12,
+        _ => return None,
+    };
+    let x = if weapon == 1 { 6 } else { 10 };
+    Some(Sprite { x, y, w: 2, h: 2 })
+}
+
+/// Original CHud::RenderAmmoHealthAndArmor: 10 icons, 12-pixel spacing,
+/// health row 0, armor row 12 and projectile ammo row 24.
+/// Only verified local CNetObj_Character values should be used.
+pub(crate) fn render_player_hud(
+    frame: &mut Framebuffer, game: Option<&Texture>, stats: CharacterHudStatus,
+) -> bool {
+    let Some(atlas) = game.filter(|tex| valid_sheet(tex, GRID_GAME)) else {
+        return false;
+    };
+    for i in 0..10 {
+        let center_x = 5.0 + i as f32 * 12.0;
+        let health = if i < usize::from(stats.health) { HEALTH_FULL }
+            else { HEALTH_EMPTY };
+        let armor = if i < usize::from(stats.armor) { ARMOR_FULL }
+            else { ARMOR_EMPTY };
+        blit(frame, atlas, GRID_GAME, health, (center_x, 5.0),
+            (10.0, 10.0), (0.0, false));
+        blit(frame, atlas, GRID_GAME, armor, (center_x, 17.0),
+            (10.0, 10.0), (0.0, false));
+    }
+    if stats.ammo >= 0 {
+        if let Some(projectile) = hud_ammo_sprite(stats.weapon) {
+            for i in 0..usize::from(stats.ammo as u8) {
+                blit(frame, atlas, GRID_GAME, projectile,
+                    (5.0 + i as f32 * 12.0, 29.0),
+                    (10.0, 10.0), (0.0, false));
+            }
+        }
+    }
     true
 }
 
@@ -378,6 +425,35 @@ mod tests {
 
     fn camera() -> Camera {
         Camera { center: crate::physics::Vec2::new(100.0, 100.0), scale: 1.0 }
+    }
+
+    #[test]
+    fn vanilla_hud_status_uses_original_health_armor_and_projectile_icons() {
+        let atlas = sprite_sheet(320, 160, GRID_GAME, &[
+            (HEALTH_FULL, [255, 0, 0, 255]),
+            (HEALTH_EMPTY, [64, 0, 0, 255]),
+            (ARMOR_FULL, [0, 0, 255, 255]),
+            (ARMOR_EMPTY, [0, 0, 64, 255]),
+            (hud_ammo_sprite(1).unwrap(), [0, 255, 0, 255]),
+        ]);
+        let mut frame = Framebuffer::new(160, 48).unwrap();
+        frame.clear(BACKGROUND);
+        assert!(render_player_hud(&mut frame, Some(&atlas), CharacterHudStatus {
+            health: 2, armor: 1, ammo: 3, weapon: 1,
+        }));
+        assert_eq!(frame.pixel(5, 5), Some(0xff0000));
+        assert_eq!(frame.pixel(29, 5), Some(0x400000));
+        assert_eq!(frame.pixel(5, 17), Some(0x0000ff));
+        assert_eq!(frame.pixel(29, 17), Some(0x000040));
+        assert_eq!(frame.pixel(5, 29), Some(0x00ff00));
+        assert_eq!(frame.pixel(53, 29), Some(BACKGROUND));
+        assert_eq!(hud_ammo_sprite(0), None);
+        assert_eq!(hud_ammo_sprite(5), None);
+        let before = frame.pixels.clone();
+        assert!(!render_player_hud(&mut frame, None, CharacterHudStatus {
+            health: 2, armor: 1, ammo: 3, weapon: 1,
+        }));
+        assert_eq!(frame.pixels, before);
     }
 
     #[test]
