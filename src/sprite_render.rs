@@ -360,6 +360,21 @@ fn draw_line(frame: &mut Framebuffer, from: (f32, f32), to: (f32, f32), color: u
 /// Software approximation of the original laser double-width freeform
 /// quads. Two colored strokes and a tip represent the beam without
 /// modifying collision, prediction, or network state.
+/// Original default cl_laser_* colors converted from packed HSL values
+/// in config_variables.h using base/color.h::color_cast<ColorRGBA>.
+/// Users' custom colors are not yet configurable in the Rust UI.
+pub(crate) fn laser_palette(kind: i32, subtype: i32) -> (u32, u32) {
+    // (outline, center)
+    match kind {
+        1 => (0x1f180b, 0x926a40), // shotgun
+        2 => (0x002219, 0x43c3a3), // door
+        3 => (0x221f2f, 0x7b7290), // freeze
+        4 => (0x220202, 0xdd5f5f), // dragger
+        5 | 6 if matches!(subtype, 2 | 3) => (0x221f2f, 0x7b7290),
+        _ => (0x13133f, 0x7f7fff), // rifle, gun and plasma
+    }
+}
+
 fn draw_laser(frame: &mut Framebuffer, laser: LaserNet, camera: Camera) {
     let from = to_screen(frame, camera, laser.from_x as f32, laser.from_y as f32);
     let to = to_screen(frame, camera, laser.to_x as f32, laser.to_y as f32);
@@ -370,8 +385,9 @@ fn draw_laser(frame: &mut Framebuffer, laser: LaserNet, camera: Camera) {
         return;
     }
     let normal = (-dy / length, dx / length);
+    let (outer, inner) = laser_palette(laser.kind, laser.subtype);
     for offset in -5i32..=5 {
-        let color = if offset.abs() >= 4 { 0x2c6592 } else { 0xb4ebff };
+        let color = if offset.abs() >= 4 { outer } else { inner };
         let delta = (normal.0 * offset as f32, normal.1 * offset as f32);
         draw_line(frame, (from.0 + delta.0, from.1 + delta.1),
             (to.0 + delta.0, to.1 + delta.1), color);
@@ -382,7 +398,7 @@ fn draw_laser(frame: &mut Framebuffer, laser: LaserNet, camera: Camera) {
     frame.fill_rect(
         (to.0 - 3.0).max(0.0) as usize,
         (to.1 - 3.0).max(0.0) as usize,
-        6, 6, 0xd7f6ff,
+        6, 6, inner,
     );
 }
 
@@ -626,6 +642,18 @@ mod tests {
     }
 
     #[test]
+    fn vanilla_laser_palette_matches_upstream_packed_hsl_defaults() {
+        assert_eq!(laser_palette(0, -1), (0x13133f, 0x7f7fff));
+        assert_eq!(laser_palette(1, -1), (0x1f180b, 0x926a40));
+        assert_eq!(laser_palette(2, -1), (0x002219, 0x43c3a3));
+        assert_eq!(laser_palette(3, -1), (0x221f2f, 0x7b7290));
+        assert_eq!(laser_palette(4, -1), (0x220202, 0xdd5f5f));
+        assert_eq!(laser_palette(5, 2), laser_palette(3, -1));
+        assert_eq!(laser_palette(6, 3), laser_palette(3, -1));
+        assert_eq!(laser_palette(5, 0), laser_palette(0, -1));
+    }
+
+    #[test]
     fn projectiles_follow_vanilla_calcpos_and_game_png_regions() {
         assert_eq!(projectile_sprite(1), Some(Sprite {
             x: 6, y: 4, w: 2, h: 2,
@@ -671,7 +699,7 @@ mod tests {
             None, Some(&atlas), 100).unwrap();
         assert_eq!(drawn, 0);
         assert!(screen.pixels.contains(&0x18dc64));
-        assert!(screen.pixels.contains(&0xb4ebff));
+        assert!(screen.pixels.contains(&0x7f7fff));
     }
 
     #[test]

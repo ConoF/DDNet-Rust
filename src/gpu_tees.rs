@@ -14,7 +14,7 @@ use crate::sprite_render::{
     Sprite, GRID_SKIN, GRID_GAME, BODY, FOOT, HOOK_HEAD, HOOK_CHAIN,
     MAX_HOOK_DISTANCE, skin_eye, weapon_sprite, muzzle_sprite, valid_sheet,
     pickup_art, pickup_position, pickup_orientation, pickup_visible,
-    projectile_visual,
+    projectile_visual, laser_palette,
 };
 use crate::texture::Texture;
 
@@ -295,13 +295,14 @@ pub fn build_gpu_tees_into(
             let length = dx.hypot(dy);
             if length.is_finite() && (0.1..=32_768.0).contains(&length) {
                 let normal = (-dy / length, dx / length);
+                let (outer, inner) = laser_palette(laser.kind, laser.subtype);
                 for offset in -5i32..=5 {
                     let shift = (normal.0 * offset as f32,
                         normal.1 * offset as f32);
                     let color = if offset.abs() >= 4 {
-                        0x2c6592
+                        outer
                     } else {
-                        0xb4ebff
+                        inner
                     };
                     b.line((from.0 + shift.0, from.1 + shift.1),
                         (to.0 + shift.0, to.1 + shift.1), color);
