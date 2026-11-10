@@ -7,10 +7,14 @@ use font8x8::{BASIC_FONTS, UnicodeFonts};
 
 use crate::gpu_scene::{GpuBatch, GpuVertex, MAX_FRAME_VERTICES};
 use crate::online_ui::HudCanvas;
+use crate::sprite_render::{weapon_cursor_sprite, valid_sheet, GRID_GAME};
+use crate::texture::Texture;
 use crate::ui_font;
 
 pub const HUD_SOLID_SLOT: usize = 0;
 pub const HUD_FONT_SLOT: usize = 1;
+/// Original game.png, bound after map image slots and the white/skin atlases.
+pub const HUD_GAME_CURSOR_SLOT: usize = 2;
 pub const FONT_WIDTH: u32 = ui_font::WIDTH;
 pub const FONT_HEIGHT: u32 = ui_font::HEIGHT;
 
@@ -55,6 +59,72 @@ impl GpuHudScene {
     pub fn clear(&mut self) {
         self.vertices.clear();
         self.batches.clear();
+    }
+
+    /// Render the original game.png weapon cursor at the local mouse target,
+    /// after nameplates/chat and world foreground. The cursor is screen-space
+    /// HUD geometry, not a world sprite affected by camera zoom.
+    pub fn draw_weapon_cursor(
+        &mut self, weapon: i32, position: (f32, f32),
+        game: Option<&Texture>,
+    ) {
+        let Some(sprite) = weapon_cursor_sprite(weapon) else { return; };
+        if !position.0.is_finite() || !position.1.is_finite()
+            || self.width == 0 || self.height == 0
+            || self.vertices.len() > MAX_FRAME_VERTICES - 6
+        {
+            return;
+        }
+        if game.is_none_or(|tex| !valid_sheet(tex, GRID_GAME)) {
+            let x = position.0.clamp(0.0, (self.width - 1) as f32) as usize;
+            let y = position.1.clamp(0.0, (self.height - 1) as f32) as usize;
+            self.fill_rect(x.saturating_sub(1), y.saturating_sub(5),
+                3, 11, 0xffffff);
+            self.fill_rect(x.saturating_sub(5), y.saturating_sub(1),
+                11, 3, 0xffffff);
+            return;
+        }
+        let left = (position.0.round() as i32).saturating_sub(16);
+        let top = (position.1.round() as i32).saturating_sub(16);
+        let right = left.saturating_add(32);
+        let bottom = top.saturating_add(32);
+        let w = i32::try_from(self.width).unwrap_or(i32::MAX);
+        let h = i32::try_from(self.height).unwrap_or(i32::MAX);
+        let [x0, y0, x1, y1] = [
+            left.clamp(0, w), top.clamp(0, h),
+            right.clamp(0, w), bottom.clamp(0, h),
+        ];
+        if x0 >= x1 || y0 >= y1 { return; }
+        let u = |x: i32| {
+            (sprite.x as f32
+                + (x - left) as f32 / 32.0 * sprite.w as f32)
+                / GRID_GAME.0 as f32
+        };
+        let v = |y: i32| {
+            (sprite.y as f32
+                + (y - top) as f32 / 32.0 * sprite.h as f32)
+                / GRID_GAME.1 as f32
+        };
+        let corners = [
+            (x0, y0, u(x0), v(y0)),
+            (x1, y0, u(x1), v(y0)),
+            (x0, y1, u(x0), v(y1)),
+            (x1, y1, u(x1), v(y1)),
+        ];
+        let start = self.vertices.len() as u32;
+        for index in [0, 1, 2, 1, 3, 2] {
+            let (x, y, tx, ty) = corners[index];
+            self.vertices.push(GpuVertex {
+                clip: [
+                    x as f32 * 2.0 / self.width as f32 - 1.0,
+                    1.0 - y as f32 * 2.0 / self.height as f32,
+                ],
+                uv: [tx, ty], color: [255; 4],
+            });
+        }
+        self.batches.push(GpuBatch {
+            texture: HUD_GAME_CURSOR_SLOT, start, count: 6, clip: None,
+        });
     }
 
     /// Every painted pixel is a GPU fragment, never CPU raster work.
@@ -209,6 +279,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn all_six_gpu_cursor_quads_use_game_atlas_and_clip_at_window_edge() {
+        let atlas = Texture::from_rgba(320, 160, vec![255; 320 * 160 * 4])
+            .unwrap();
+        let mut hud = GpuHudScene::new(64, 64);
+        for (weapon, start_u) in [
+            (0, 0.0), (1, 4.0 / 32.0), (2, 6.0 / 32.0),
+            (3, 8.0 / 32.0), (4, 12.0 / 32.0), (5, 10.0 / 32.0),
+        ] {
+            hud.clear();
+            hud.draw_weapon_cursor(weapon, (32.0, 32.0), Some(&atlas));
+            assert_eq!(hud.vertices.len(), 6);
+            assert_eq!(hud.batches[0].texture, HUD_GAME_CURSOR_SLOT);
+            assert!((hud.vertices[0].uv[0] - start_u).abs() < 0.0001);
+            assert_eq!(hud.vertices[0].uv[1], 2.0 / 16.0);
+        }
+        hud.clear();
+        hud.draw_weapon_cursor(1, (2.0, 3.0), Some(&atlas));
+        assert_eq!(hud.vertices.len(), 6);
+        assert!(hud.vertices.iter().all(|v|
+            v.clip.iter().all(|&n| (-1.0..=1.0).contains(&n))
+        ));
+        assert!(hud.vertices[0].uv[0] > 4.0 / 32.0,
+            "left-clipped cursor must shift its source UVs");
+        hud.clear();
+        hud.draw_weapon_cursor(1, (f32::NAN, 0.0), Some(&atlas));
+        assert!(hud.vertices.is_empty());
+        hud.draw_weapon_cursor(1, (32.0, 32.0), None);
+        assert!(!hud.vertices.is_empty(), "missing atlas uses visible fallback");
+        assert!(hud.batches.iter().all(|b| b.texture == HUD_SOLID_SLOT));
     }
 
     #[test]
