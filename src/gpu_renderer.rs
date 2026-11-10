@@ -10,7 +10,7 @@ use minifb::Window;
 use std::time::{Duration, Instant};
 
 use crate::envelope::EnvelopeTimes;
-use crate::gpu_scene::{
+use crate::gpu_scene::{has_time_varying_geometry, 
     build_gpu_scene_into_cached, cache_quad_bounds, cache_occupied_tiles,
     QuadBounds, OccupiedTileRows, SceneCaches, GpuBatch, GpuScene, GpuVertex, VERTEX_STRIDE,
 };
@@ -451,7 +451,7 @@ impl GpuRenderer {
         // the tee and HUD tail must be regenerated and transferred.
         let mut scene = std::mem::take(&mut self.scene_cache);
         let reuse_map = map.is_some_and(|map| {
-            map.envelopes.envelopes.is_empty()
+            !has_time_varying_geometry(map)
                 && self.cached_map_camera == Some(camera)
                 && self.cached_map_vertices <= scene.vertices.len()
         });
@@ -614,7 +614,7 @@ impl GpuRenderer {
         }
         self.queue.submit(Some(encoder.finish()));
         output.present();
-        self.cached_map_camera = if map.is_some_and(|m| m.envelopes.envelopes.is_empty()) {
+        self.cached_map_camera = if map.is_some_and(|m| !has_time_varying_geometry(m)) {
             Some(camera)
         } else {
             None

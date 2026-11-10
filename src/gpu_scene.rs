@@ -11,6 +11,21 @@ use crate::quad_render::QuadLayer;
 pub const VERTEX_STRIDE: usize = 20;
 pub const MAX_FRAME_VERTICES: usize = 500_000;
 
+/// A map may contain unused or one-point envelopes. Neither changes its
+/// geometry as game time advances, so the same GPU vertex prefix is reusable.
+/// Missing envelope references resolve to the fixed default value.
+pub fn has_time_varying_geometry(map: &VisualMap) -> bool {
+    let animated = |index: i32| {
+        usize::try_from(index).ok()
+            .and_then(|index| map.envelopes.envelopes.get(index))
+            .is_some_and(|env| env.points.len() > 1)
+    };
+    map.layers.iter().any(|layer| animated(layer.color_env))
+        || map.quad_layers.iter().any(|layer| layer.quads.iter().any(|quad| {
+            animated(quad.pos_env) || animated(quad.color_env)
+        }))
+}
+
 /// Cached world-space bounds for static quads, indexed by quad layer and quad.
 /// Dynamic quads keep None so their animated positions are evaluated normally.
 pub type QuadBounds = Vec<Vec<Option<[f32; 4]>>>;
@@ -444,6 +459,34 @@ mod tests {
     }
     fn camera() -> Camera {
         Camera { center: Vec2::new(16.0, 16.0), scale: 1.0 }
+    }
+
+    #[test]
+    fn map_animation_detection_skips_unused_and_constant_envelopes() {
+        let mut m = map();
+        assert!(!has_time_varying_geometry(&m));
+        let one_point = Envelope {
+            channels: 4, synchronized: true,
+            points: vec![EnvelopePoint {
+                time_ms: 0, curve: 1, values: [1024; 4], bezier: None,
+            }],
+        };
+        m.envelopes.envelopes.push(one_point.clone());
+        assert!(!has_time_varying_geometry(&m), "unused envelope is harmless");
+        m.layers[0].color_env = 0;
+        m.quad_layers[0].quads[0].pos_env = 0;
+        assert!(!has_time_varying_geometry(&m), "one-point envelope is static");
+        m.envelopes.envelopes[0].points.push(EnvelopePoint {
+            time_ms: 1000, curve: 1, values: [2048; 4], bezier: None,
+        });
+        assert!(has_time_varying_geometry(&m));
+        m.layers[0].color_env = -1;
+        m.quad_layers[0].quads[0].pos_env = -1;
+        assert!(!has_time_varying_geometry(&m));
+        m.quad_layers[0].quads[0].color_env = 0;
+        assert!(has_time_varying_geometry(&m));
+        m.quad_layers[0].quads[0].color_env = 999;
+        assert!(!has_time_varying_geometry(&m), "invalid envelope uses default");
     }
 
     #[test]
