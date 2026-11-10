@@ -263,7 +263,7 @@ impl LaserNet {
         (laser.start_tick >= 0
             && dx.abs() <= 8192 && dy.abs() <= 8192
             && [laser.to_x,laser.to_y,laser.from_x,laser.from_y]
-                .iter().all(|v| v.abs() < 1_000_000)
+                .iter().all(|v| i64::from(*v).abs() < 1_000_000)
         ).then_some(laser)
     }
 }

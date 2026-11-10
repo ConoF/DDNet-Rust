@@ -5,6 +5,7 @@
 //! this is not the original DDNet animation state machine.
 
 use crate::graphics::{Camera, Framebuffer, RenderError, HOOK};
+use crate::online_ui::HudCanvas;
 use crate::netobjects::{CharacterCoreNet, CHARACTER_TYPE};
 use crate::snapshot_delta::SnapshotState;
 use crate::texture::Texture;
