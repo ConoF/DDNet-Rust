@@ -60,6 +60,9 @@ pub const CHARACTERCORE_TYPE: u16 = 8;
 pub const CHARACTER_TYPE: u16 = 9;
 /// Standard 0.6 CNetObj_Pickup: x, y, powerup type, subtype.
 pub const PICKUP_TYPE: u16 = 4;
+/// 0.6 CNetObj_Projectile and CNetObj_Laser (datasrc/network.py).
+pub const PROJECTILE_TYPE: u16 = 2;
+pub const LASER_TYPE: u16 = 3;
 pub const PLAYERINFO_TYPE: u16 = 10;
 pub const CLIENTINFO_TYPE: u16 = 11;
 
@@ -189,6 +192,79 @@ impl CharacterHudStatus {
             .client_id;
         let id = u16::try_from(id).ok()?;
         Self::from_object(snapshot.find(CHARACTER_TYPE, id)?)
+    }
+}
+
+/// Plain Teeworlds 0.6 snapshot projectile. Unlike DDNetProjectiles,
+/// vanilla position is unscaled and velocities are fixed point /100.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProjectileNet {
+    pub x: f32,
+    pub y: f32,
+    pub vx: f32,
+    pub vy: f32,
+    pub weapon: u8,
+    pub start_tick: i32,
+}
+
+impl ProjectileNet {
+    pub fn from_object(object: &SnapshotObject) -> Option<Self> {
+        if object.type_id != PROJECTILE_TYPE || object.words.len() != 6 {
+            return None;
+        }
+        let w = &object.words;
+        // DDNet 20.2.1 uses the high bits of positive VelY for older
+        // DDRace extra info. Never interpret those as plain velocity.
+        if w[3] >= 0 && (w[3] & (1 << 9)) != 0 { return None; }
+        let weapon = u8::try_from(w[4]).ok().filter(|&id| id <= 5)?;
+        let value = Self {
+            x: w[0] as f32, y: w[1] as f32,
+            vx: w[2] as f32 / 100.0,
+            vy: w[3] as f32 / 100.0,
+            weapon, start_tick: w[5],
+        };
+        value.validated()
+    }
+
+    fn validated(self) -> Option<Self> {
+        let values = [self.x, self.y, self.vx, self.vy];
+        if self.start_tick < 0 || self.start_tick > i32::MAX - 1000
+            || values.iter().any(|v| !v.is_finite() || v.abs() > 1_000_000.0)
+            || self.vx.hypot(self.vy) > 100.0
+        { return None; }
+        Some(self)
+    }
+}
+
+/// Vanilla CNetObj_Laser is five int32s, with no type or team metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaserNet {
+    pub to_x: i32,
+    pub to_y: i32,
+    pub from_x: i32,
+    pub from_y: i32,
+    pub start_tick: i32,
+    pub kind: i32,
+}
+
+impl LaserNet {
+    pub fn from_object(object: &SnapshotObject) -> Option<Self> {
+        if object.type_id != LASER_TYPE || object.words.len() != 5 {
+            return None;
+        }
+        let w = &object.words;
+        let laser = Self {
+            to_x: w[0], to_y: w[1], from_x: w[2], from_y: w[3],
+            start_tick: w[4], kind: 0,
+        };
+        // Guard against malformed or nonsensically long beams.
+        let dx = i64::from(laser.to_x) - i64::from(laser.from_x);
+        let dy = i64::from(laser.to_y) - i64::from(laser.from_y);
+        (laser.start_tick >= 0
+            && dx.abs() <= 8192 && dy.abs() <= 8192
+            && [laser.to_x,laser.to_y,laser.from_x,laser.from_y]
+                .iter().all(|v| v.abs() < 1_000_000)
+        ).then_some(laser)
     }
 }
 
@@ -420,6 +496,33 @@ mod tests {
         assert!(PickupNet::from_extended_object(&state.items[1], 4).is_none());
         state.items[1].words.push(1);
         assert!(PickupNet::from_extended_object(&state.items[1], 0x4001).is_none());
+    }
+
+    #[test]
+    fn vanilla_projectile_and_laser_snapshots_are_strict_and_safe() {
+        let make = |type_id, words| SnapshotObject { type_id, id: 7, words };
+        let gun = make(PROJECTILE_TYPE, vec![64, 128, 100, 0, 1, 500]);
+        assert_eq!(ProjectileNet::from_object(&gun), Some(ProjectileNet {
+            x: 64.0, y: 128.0, vx: 1.0, vy: 0.0,
+            weapon: 1, start_tick: 500,
+        }));
+        assert!(ProjectileNet::from_object(&make(
+            PROJECTILE_TYPE, vec![0,0,0,0,8,500])).is_none());
+        assert!(ProjectileNet::from_object(&make(
+            PROJECTILE_TYPE, vec![0,0,0,0,1])).is_none());
+        assert!(ProjectileNet::from_object(&make(
+            PROJECTILE_TYPE, vec![0,0,0,0,1,-1])).is_none());
+        let beam = make(LASER_TYPE, vec![100, 120, 40, 120, 700]);
+        assert_eq!(LaserNet::from_object(&beam), Some(LaserNet {
+            to_x: 100, to_y: 120, from_x: 40, from_y: 120,
+            start_tick: 700, kind: 0,
+        }));
+        assert!(LaserNet::from_object(&make(
+            LASER_TYPE, vec![10000,0,0,0,1])).is_none());
+        assert!(LaserNet::from_object(&make(
+            LASER_TYPE, vec![0,0,0,0,-1])).is_none());
+        assert!(LaserNet::from_object(&make(
+            PICKUP_TYPE, vec![0,0,0,0,1])).is_none());
     }
 
     #[test]
