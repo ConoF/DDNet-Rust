@@ -7,7 +7,11 @@ use font8x8::{BASIC_FONTS, UnicodeFonts};
 
 use crate::gpu_scene::{GpuBatch, GpuVertex, MAX_FRAME_VERTICES};
 use crate::online_ui::HudCanvas;
-use crate::sprite_render::{weapon_cursor_sprite, valid_sheet, GRID_GAME};
+use crate::sprite_render::{
+    hud_ammo_sprite, weapon_cursor_sprite, valid_sheet, Sprite,
+    ARMOR_EMPTY, ARMOR_FULL, GRID_GAME, HEALTH_EMPTY, HEALTH_FULL,
+};
+use crate::netobjects::CharacterHudStatus;
 use crate::texture::Texture;
 use crate::ui_font;
 
@@ -125,6 +129,49 @@ impl GpuHudScene {
         self.batches.push(GpuBatch {
             texture: HUD_GAME_CURSOR_SLOT, start, count: 6, clip: None,
         });
+    }
+
+    /// A cropped 10px HUD glyph sourced directly from the original
+    /// game.png. Atlas addressing matches the weapon cursor renderer.
+    fn game_icon(&mut self, sprite: Sprite, x: usize, y: usize) {
+        let u0 = sprite.x as f32 / GRID_GAME.0 as f32;
+        let v0 = sprite.y as f32 / GRID_GAME.1 as f32;
+        let u1 = (sprite.x + sprite.w) as f32 / GRID_GAME.0 as f32;
+        let v1 = (sprite.y + sprite.h) as f32 / GRID_GAME.1 as f32;
+        self.quad((x, y, 10, 10),
+            [[u0, v0], [u1, v0], [u0, v1], [u1, v1]],
+            0xffffff, HUD_GAME_CURSOR_SLOT);
+    }
+
+    /// CHud::RenderAmmoHealthAndArmor: 10 health/armor icons at 12px
+    /// spacing and a separate projectile ammo row below them.
+    pub fn draw_player_status(
+        &mut self, game: Option<&Texture>, stats: CharacterHudStatus,
+    ) {
+        if !game.is_some_and(|tex| valid_sheet(tex, GRID_GAME)) {
+            // A missing game.png must not render random atlas pixels.
+            return;
+        }
+        for i in 0..10usize {
+            let x = i * 12;
+            self.game_icon(
+                if i < usize::from(stats.health) { HEALTH_FULL }
+                else { HEALTH_EMPTY },
+                x, 0,
+            );
+            self.game_icon(
+                if i < usize::from(stats.armor) { ARMOR_FULL }
+                else { ARMOR_EMPTY },
+                x, 12,
+            );
+        }
+        if let Some(ammo) = (stats.ammo >= 0)
+            .then(|| hud_ammo_sprite(stats.weapon)).flatten()
+        {
+            for i in 0..usize::from(stats.ammo as u8) {
+                self.game_icon(ammo, i * 12, 24);
+            }
+        }
     }
 
     /// Every painted pixel is a GPU fragment, never CPU raster work.
@@ -279,6 +326,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn gpu_health_armor_ammo_icons_match_source_atlas_and_skip_infinite_ammo() {
+        let game = Texture::from_rgba(320, 160, vec![255; 320 * 160 * 4]).unwrap();
+        let mut hud = GpuHudScene::new(320, 100);
+        let status = CharacterHudStatus {
+            health: 2, armor: 1, ammo: 3, weapon: 1,
+        };
+        hud.draw_player_status(Some(&game), status);
+        assert_eq!(hud.vertices.len(), (20 + 3) * 6);
+        assert_eq!(hud.batches.len(), 1);
+        assert_eq!(hud.batches[0].texture, HUD_GAME_CURSOR_SLOT);
+        assert_eq!(hud.vertices[0].uv, [21.0 / 32.0, 0.0]);
+        // Third health icon is empty and must reference separate sprite.
+        assert_eq!(hud.vertices[24].uv, [23.0 / 32.0, 0.0]);
+        assert_eq!(hud.vertices[20 * 6].uv, [6.0 / 32.0, 4.0 / 16.0]);
+        hud.clear();
+        hud.draw_player_status(Some(&game), CharacterHudStatus {
+            ammo: -1, ..status
+        });
+        assert_eq!(hud.vertices.len(), 20 * 6);
+        hud.clear();
+        hud.draw_player_status(None, status);
+        assert!(hud.vertices.is_empty());
     }
 
     #[test]
