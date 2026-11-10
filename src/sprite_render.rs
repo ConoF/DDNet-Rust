@@ -27,6 +27,12 @@ pub(crate) struct Sprite {
 
 pub(crate) const BODY: Sprite = Sprite { x: 0, y: 0, w: 3, h: 3 };
 pub(crate) const FOOT: Sprite = Sprite { x: 6, y: 1, w: 2, h: 1 };
+/// DDNet 20.2.1 sprite outlines are separate atlas regions, not outlines
+/// synthesized by scaling the opaque fill.
+pub(crate) const BODY_OUTLINE: Sprite = Sprite { x: 3, y: 0, w: 3, h: 3 };
+pub(crate) const FOOT_OUTLINE: Sprite = Sprite { x: 6, y: 2, w: 2, h: 1 };
+pub(crate) const HAND: Sprite = Sprite { x: 6, y: 0, w: 1, h: 1 };
+pub(crate) const HAND_OUTLINE: Sprite = Sprite { x: 7, y: 0, w: 1, h: 1 };
 pub(crate) const HOOK_CHAIN: Sprite = Sprite { x: 2, y: 0, w: 1, h: 1 };
 pub(crate) const HOOK_HEAD: Sprite = Sprite { x: 3, y: 0, w: 2, h: 1 };
 
@@ -253,6 +259,30 @@ fn draw_pickup(
         pickup_orientation(pickup.flags));
 }
 
+/// Port of CPlayers::RenderHand offsets. Position and orientation are
+/// shared by the CPU sprite rasterizer and native GPU tee builder.
+pub(crate) fn weapon_hand_pose(
+    weapon: i32, weapon_center: (f32, f32), aim: (f32, f32),
+    scale: f32,
+) -> Option<((f32, f32), f32)> {
+    let (angle_offset, x_offset, y_offset) = match weapon {
+        1 => (-3.0 * std::f32::consts::FRAC_PI_4, -15.0, 4.0),
+        2 => (-std::f32::consts::FRAC_PI_2, -5.0, 4.0),
+        3 => (-std::f32::consts::FRAC_PI_2, -4.0, 7.0),
+        _ => return None,
+    };
+    let handed = if aim.0 < 0.0 { -1.0 } else { 1.0 };
+    let normal = (-aim.1 * handed, aim.0 * handed);
+    let position = (
+        weapon_center.0 + aim.0 * (1.0 + x_offset) * scale
+            + normal.0 * y_offset * scale,
+        weapon_center.1 + aim.1 * (1.0 + x_offset) * scale
+            + normal.1 * y_offset * scale,
+    );
+    let angle = aim.1.atan2(aim.0) + handed * angle_offset;
+    Some((position, angle))
+}
+
 pub(crate) fn skin_eye(emote: i32) -> Sprite {
     // EMOTE_NORMAL=0, PAIN=1, HAPPY=2, SURPRISE=3, ANGRY=4, BLINK=5.
     let x = match emote {
@@ -452,17 +482,26 @@ fn draw_tee(
     {
         return;
     }
-    // Foot motion is deterministic in game ticks, independent of render FPS.
-    for (offset_x, offset_y) in [
-        (-8.0 + stride, 12.0 - stride.abs() * 0.5),
-        (8.0 - stride, 12.0 + stride.abs() * 0.5),
-    ] {
-        let foot = (center.0 + offset_x * scale, center.1 + offset_y * scale);
+    // Original RenderTee6 draws the outline and fill of each component
+    // separately. Keep both feet behind the body to avoid edge artifacts.
+    let feet = [
+        (center.0 + (-8.0 + stride) * scale,
+         center.1 + (12.0 - stride.abs() * 0.5) * scale),
+        (center.0 + (8.0 - stride) * scale,
+         center.1 + (12.0 + stride.abs() * 0.5) * scale),
+    ];
+    for &foot in &feet {
+        blit(frame, skin, GRID_SKIN, FOOT_OUTLINE, foot,
+            (15.0 * scale, 12.0 * scale), (0.0, false));
+    }
+    blit(frame, skin, GRID_SKIN, BODY_OUTLINE, center,
+        (34.0 * scale, 32.0 * scale), (0.0, false));
+    for &foot in &feet {
         blit(frame, skin, GRID_SKIN, FOOT, foot,
-             (15.0 * scale, 12.0 * scale), (0.0, false));
+            (15.0 * scale, 12.0 * scale), (0.0, false));
     }
     blit(frame, skin, GRID_SKIN, BODY, center,
-         (34.0 * scale, 32.0 * scale), (0.0, false));
+        (34.0 * scale, 32.0 * scale), (0.0, false));
     let emote = words.get(20).copied().unwrap_or(0);
     let facing = if character.direction < 0 { -1.0 } else { 1.0 };
     let blink = emote == 5 || tick % 201 < 3;
@@ -502,6 +541,15 @@ fn draw_tee(
             );
             blit(frame, game, GRID_GAME, flash, muzzle,
                  (22.0 * scale, 14.0 * scale), (angle, mirrored));
+        }
+    }
+    if let Some((hand, hand_angle)) = weapon_hand_pose(
+        weapon, weapon_center, (aim_x, aim_y), scale,
+    ) {
+        for region in [HAND_OUTLINE, HAND] {
+            blit(frame, skin, GRID_SKIN, region, hand,
+                (15.0 * scale, 15.0 * scale),
+                (hand_angle, false));
         }
     }
 }
@@ -825,6 +873,26 @@ mod tests {
             health: 2, armor: 1, ammo: 3, weapon: 1,
         }));
         assert_eq!(frame.pixels, before);
+    }
+
+    #[test]
+    fn tee_outline_and_hand_sprite_regions_match_upstream_atlas() {
+        assert_eq!(BODY_OUTLINE, Sprite { x: 3, y: 0, w: 3, h: 3 });
+        assert_eq!(FOOT_OUTLINE, Sprite { x: 6, y: 2, w: 2, h: 1 });
+        assert_eq!(HAND, Sprite { x: 6, y: 0, w: 1, h: 1 });
+        assert_eq!(HAND_OUTLINE, Sprite { x: 7, y: 0, w: 1, h: 1 });
+        for weapon in [1, 2, 3] {
+            let (position, angle) = weapon_hand_pose(
+                weapon, (100.0, 100.0), (1.0, 0.0), 1.0,
+            ).unwrap();
+            assert!(position.0.is_finite() && position.1.is_finite());
+            assert!(angle.is_finite());
+        }
+        for weapon in [0, 4, 5] {
+            assert!(weapon_hand_pose(
+                weapon, (100.0, 100.0), (1.0, 0.0), 1.0,
+            ).is_none());
+        }
     }
 
     #[test]
