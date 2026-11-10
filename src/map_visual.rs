@@ -107,6 +107,62 @@ pub struct VisualMap {
     pub envelopes: EnvelopeSet,
 }
 
+/// Match DDNet's CRenderLayerTile::RenderTileBorder. Tiles at all four
+/// edges are stretched to the visible map boundary, including the corners.
+/// Only O(visible rows + visible columns) regions are produced, irrespective
+/// of how far the camera is outside the map. Interior tiles are handled by
+/// the normal dense or cached scan.
+pub(crate) fn for_each_tile_border<E>(
+    layer: &TexturedLayer, x0: i64, y0: i64, x1: i64, y1: i64,
+    mut draw: impl FnMut(Tile, [i64; 4]) -> Result<(), E>,
+) -> Result<(), E> {
+    let w = layer.width as i64;
+    let h = layer.height as i64;
+    if w == 0 || h == 0 || x0 >= x1 || y0 >= y1 { return Ok(()); }
+    let (inner_x0, inner_x1) = (x0.max(0).min(w), x1.max(0).min(w));
+    let (inner_y0, inner_y1) = (y0.max(0).min(h), y1.max(0).min(h));
+    let mut region = |index: usize, rect: [i64; 4]| {
+        let tile = layer.tiles[index];
+        if tile.index != 0 { draw(tile, rect)?; }
+        Ok(())
+    };
+    if x0 < 0 && y0 < 0 {
+        region(0, [x0, y0, 0, 0])?;
+    }
+    if x1 > w && y0 < 0 {
+        region(layer.width - 1, [w, y0, x1, 0])?;
+    }
+    if x0 < 0 && y1 > h {
+        region((layer.height - 1) * layer.width, [x0, h, 0, y1])?;
+    }
+    if x1 > w && y1 > h {
+        region(layer.tiles.len() - 1, [w, h, x1, y1])?;
+    }
+    if x0 < 0 {
+        for y in inner_y0..inner_y1 {
+            region(y as usize * layer.width, [x0, y, 0, y + 1])?;
+        }
+    }
+    if x1 > w {
+        for y in inner_y0..inner_y1 {
+            region(y as usize * layer.width + layer.width - 1,
+                [w, y, x1, y + 1])?;
+        }
+    }
+    if y0 < 0 {
+        for x in inner_x0..inner_x1 {
+            region(x as usize, [x, y0, x + 1, 0])?;
+        }
+    }
+    if y1 > h {
+        for x in inner_x0..inner_x1 {
+            region((layer.height - 1) * layer.width + x as usize,
+                [x, h, x + 1, y1])?;
+        }
+    }
+    Ok(())
+}
+
 fn field(payload: &[u8], at: usize) -> Result<i32, VisualError> {
     let slice: [u8; 4] = payload.get(at..at + 4)
         .ok_or(VisualError::InvalidMap)?
@@ -447,6 +503,34 @@ impl VisualMap {
                     drawn += 1;
                 }
             }
+            // Original DDNet stretches edge tiles beyond map boundaries.
+            // Rendering only the stored map rectangle leaves a visible hole
+            // whenever the camera reaches the exterior of a decorative layer.
+            let bound_x0 = ((cx - visible_x) / 32.0).floor() as i64;
+            let bound_y0 = ((cy - visible_y) / 32.0).floor() as i64;
+            let bound_x1 = ((cx + visible_x) / 32.0).ceil() as i64;
+            let bound_y1 = ((cy + visible_y) / 32.0).ceil() as i64;
+            for_each_tile_border(layer, bound_x0, bound_y0, bound_x1, bound_y1,
+                |tile, [x0, y0, x1, y1]| {
+                    let bounds = [
+                        ((x0 as f32 * 32.0 - cx) * camera.scale
+                            + frame.width as f32 * 0.5).round() as i64,
+                        ((y0 as f32 * 32.0 - cy) * camera.scale
+                            + frame.height as f32 * 0.5).round() as i64,
+                        ((x1 as f32 * 32.0 - cx) * camera.scale
+                            + frame.width as f32 * 0.5).round() as i64,
+                        ((y1 as f32 * 32.0 - cy) * camera.scale
+                            + frame.height as f32 * 0.5).round() as i64,
+                    ];
+                    if bounds[2] > bounds[0] && bounds[3] > bounds[1] {
+                        blit_tile(frame, texture, tile, tint,
+                            (bounds[0], bounds[1], bounds[2], bounds[3]),
+                            (cell_w, cell_h), clip);
+                        drawn += 1;
+                    }
+                    Ok::<(), VisualError>(())
+                },
+            )?;
         Ok(drawn)
     }
 }
@@ -540,6 +624,58 @@ mod tests {
         atlas[8..12].copy_from_slice(&[0, 255, 0, 128]);
         let tile_data = vec![1, 0, 0, 0, 2, 0, 0, 0];
         (img_item, layer, atlas, tile_data)
+    }
+
+    #[test]
+    fn ddnet_edge_tiles_extend_into_all_four_borders_and_corners() {
+        let mut pixels = vec![0u8; 256 * 256 * 4];
+        let colors = [[255, 0, 0, 255], [0, 255, 0, 255],
+            [0, 0, 255, 255], [255, 255, 0, 255]];
+        for (index, color) in colors.iter().enumerate() {
+            for y in 0..16 {
+                for x in 0..16 {
+                    let at = (y * 256 + (index + 1) * 16 + x) * 4;
+                    pixels[at..at+4].copy_from_slice(color);
+                }
+            }
+        }
+        let map = VisualMap {
+            images: vec![Texture::from_rgba(256, 256, pixels).unwrap()],
+            layers: vec![TexturedLayer {
+                width: 2, height: 2, image: 0, tint: [255; 4],
+                transform: GroupTransform::default(),
+                tiles: (1..=4).map(|index| Tile {
+                    index, flags: 0, skip: 0, reserved: 0,
+                }).collect(),
+                color_env: -1, color_env_offset: 0,
+                foreground: false, order: 0,
+            }],
+            quad_layers: vec![], envelopes: EnvelopeSet::default(),
+        };
+        let camera = Camera {
+            center: Vec2::new(32.0, 32.0), scale: 1.0,
+        };
+        let mut frame = Framebuffer::new(192, 192).unwrap();
+        let drawn = map.render(&mut frame, camera).unwrap();
+        assert_eq!(drawn, 16, "4 interior + 8 edge strips + 4 corners");
+        for (x, y, expected) in [
+            (5, 5, 0xff0000), (96, 5, 0x00ff00), (185, 5, 0x00ff00),
+            (5, 96, 0x0000ff), (185, 96, 0xffff00),
+            (5, 185, 0x0000ff), (96, 185, 0xffff00),
+            (185, 185, 0xffff00), (75, 75, 0xff0000),
+            (115, 115, 0xffff00),
+        ] {
+            assert_eq!(frame.pixel(x, y), Some(expected),
+                "edge extension at {x},{y}");
+        }
+        // A clipped group must still hide its border extrapolation.
+        let mut clipped = map.clone();
+        clipped.layers[0].transform.clip = Some(GroupClip {
+            x: 64.0, y: 64.0, width: 32.0, height: 32.0,
+        });
+        let mut cut = Framebuffer::new(192, 192).unwrap();
+        clipped.render(&mut cut, camera).unwrap();
+        assert_eq!(cut.pixel(5, 5), Some(BACKGROUND));
     }
 
     #[test]
