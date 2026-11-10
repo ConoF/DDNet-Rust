@@ -105,7 +105,7 @@ fn play_offline_impl(
     let file = Datafile::parse(&bytes).map_err(|e| format!("datafile: {e:?}"))?;
     let map = GameMap::from_datafile(&file, 16_777_216)
         .map_err(|e| format!("game layer: {e:?}"))?;
-    let assets = WindowAssets::from_datafile(&file, Some(Path::new(path)));
+    let mut assets = WindowAssets::from_datafile(&file, Some(Path::new(path)));
     if (smoke_output.is_some() || gpu_smoke)
         && (assets.visual_map.is_none() || assets.default_skin.is_none()
             || assets.game_sprites.is_none())
@@ -368,6 +368,7 @@ fn play_offline_impl(
         let using_gpu = gpu.is_some();
         #[cfg(not(feature = "gpu"))]
         let using_gpu = false;
+        assets.set_high_detail(settings.high_detail);
         if !using_gpu {
             assets.draw_background_at(&mut pixels, &map, camera, animation_times)?;
         }

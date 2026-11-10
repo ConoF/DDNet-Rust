@@ -99,6 +99,7 @@ pub struct GpuRenderer {
     last_frame_profile: Option<GpuFrameProfile>,
     supported_present_modes: Vec<wgpu::PresentMode>,
     cached_map_camera: Option<Camera>,
+    cached_high_detail: bool,
     cached_map_vertices: usize,
     quad_bounds: QuadBounds,
     occupied_tiles: OccupiedTileRows,
@@ -262,7 +263,8 @@ impl GpuRenderer {
             hud_batches: Vec::new(),
             last_frame_profile: None,
             supported_present_modes: caps.present_modes,
-            cached_map_camera: None, cached_map_vertices: 0,
+            cached_map_camera: None, cached_high_detail: true,
+            cached_map_vertices: 0,
             quad_bounds: Vec::new(),
             occupied_tiles: Vec::new(),
         })
@@ -453,6 +455,7 @@ impl GpuRenderer {
         let reuse_map = map.is_some_and(|map| {
             !has_time_varying_geometry(map)
                 && self.cached_map_camera == Some(camera)
+                && self.cached_high_detail == map.high_detail
                 && self.cached_map_vertices <= scene.vertices.len()
         });
         if reuse_map {
@@ -620,6 +623,7 @@ impl GpuRenderer {
             None
         };
         self.cached_map_vertices = map_vertex_count;
+        self.cached_high_detail = map.is_none_or(|m| m.high_detail);
         self.scene_cache = scene;
         self.last_frame_profile = Some(GpuFrameProfile {
             map_build, sprites_and_hud, upload, present: present_started.elapsed(),

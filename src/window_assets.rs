@@ -108,6 +108,13 @@ impl WindowAssets {
         frame.render_map(map, camera).map_err(|e| format!("collision map: {e:?}"))
     }
 
+    /// gfx_high_detail can be toggled live; no map asset reload needed.
+    pub fn set_high_detail(&mut self, enabled: bool) {
+        if let Some(map) = self.visual_map.as_mut() {
+            map.high_detail = enabled;
+        }
+    }
+
     /// Render foreground map art after tees, matching upstream layer order.
     /// Collision fallback has no separate foreground pass.
     pub fn draw_foreground(

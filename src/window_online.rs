@@ -733,6 +733,7 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                 pixels.clear(crate::graphics::BACKGROUND);
             }
         }
+        assets.set_high_detail(connection.high_detail);
         #[cfg(feature = "gpu")]
         let native_tees = using_gpu && assets.visual_map.is_some()
             && gpu.as_ref().is_some_and(|renderer| renderer.native_tees_ready());

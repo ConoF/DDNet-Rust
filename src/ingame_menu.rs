@@ -81,7 +81,7 @@ impl SettingsTab {
     fn row_count(self) -> usize {
         match self {
             Self::General => 2, Self::Player => 1,
-            Self::Graphics => 3, Self::Sound => 2,
+            Self::Graphics => 4, Self::Sound => 2,
             Self::Controls => BIND_ACTIONS.len(),
             Self::Appearance | Self::Tee => 0,
         }
@@ -321,6 +321,10 @@ impl MenuState {
                     }
                     (SettingsTab::Graphics, 2) => {
                         settings.vsync = !settings.vsync;
+                        Some(MenuAction::SettingsChanged)
+                    }
+                    (SettingsTab::Graphics, 3) => {
+                        settings.high_detail = !settings.high_detail;
                         Some(MenuAction::SettingsChanged)
                     }
                     (SettingsTab::Sound, 0) => {
@@ -655,6 +659,7 @@ impl MenuState {
                 format!("FPS LIMIT: {}     < / >",settings.fps_limit),
                 format!("CAMERA ZOOM: {}%  < / >",settings.zoom_percent),
                 format!("VERTICAL SYNC: {}  < / >",on_off(settings.vsync)),
+                format!("HIGH DETAIL: {}  < / >",on_off(settings.high_detail)),
             ],
             SettingsTab::Sound => vec![
                 format!("ENABLE SOUND: {}",on_off(settings.sound_enabled)),
@@ -695,7 +700,7 @@ impl MenuState {
         let caption: &str = match self.settings_tab {
             SettingsTab::General => "ENTER OR CLICK TO TOGGLE",
             SettingsTab::Player => "ENTER EDITS; ENTER SAVES; ESC CANCELS",
-            SettingsTab::Graphics => "LEFT/RIGHT: FPS, ZOOM, VSYNC",
+            SettingsTab::Graphics => "LEFT/RIGHT: FPS, ZOOM, VSYNC, HIGH DETAIL",
             SettingsTab::Sound => "LEFT/RIGHT: MASTER VOLUME; ENTER: TOGGLE",
             SettingsTab::Tee => "DEFAULT TEE ATLAS; CUSTOM SKINS NOT YET PORTED",
             SettingsTab::Appearance => "NATIVE DDNET THEME / ASSETS IN PROGRESS",
@@ -755,6 +760,12 @@ mod tests {
         assert!(s.vsync);
         assert_eq!(m.key(Key::Left,&mut s),Some(MenuAction::SettingsChanged));
         assert!(!s.vsync);
+        m.key(Key::Down,&mut s);
+        assert!(s.high_detail);
+        assert_eq!(m.key(Key::Enter,&mut s),Some(MenuAction::SettingsChanged));
+        assert!(!s.high_detail);
+        assert_eq!(m.key(Key::Right,&mut s),Some(MenuAction::SettingsChanged));
+        assert!(s.high_detail);
     }
 
     #[test]

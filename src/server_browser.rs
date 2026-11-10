@@ -263,6 +263,8 @@ pub struct ClientSettings {
     /// DDNet 20.2.1 gfx_vsync defaults to 0. Actual supported presentation
     /// modes depend on the active wgpu surface/adapter.
     pub vsync: bool,
+    /// DDNet gfx_high_detail: render decorative detail layers.
+    pub high_detail: bool,
     /// Camera scale * 100 (normal gameplay is 150).
     pub zoom_percent: u16,
     pub bindings: KeyBindings,
@@ -285,6 +287,7 @@ impl Default for ClientSettings {
             sound_volume: 100,
             fps_limit: 60,
             vsync: false,
+            high_detail: true,
             zoom_percent: 150,
             bindings: KeyBindings::default(),
         }
@@ -440,6 +443,9 @@ impl ClientSettings {
         if let Some(v) = obj.get("vsync").and_then(Value::as_bool) {
             settings.vsync = v;
         }
+        if let Some(v) = obj.get("high_detail").and_then(Value::as_bool) {
+            settings.high_detail = v;
+        }
         if let Some(v) = obj.get("zoom_percent").and_then(Value::as_u64) {
             if (50..=400).contains(&v) && v.is_multiple_of(10) {
                 settings.zoom_percent = v as u16;
@@ -509,6 +515,7 @@ impl ClientSettings {
             "sound_volume": self.sound_volume,
             "fps_limit": self.fps_limit,
             "vsync": self.vsync,
+            "high_detail": self.high_detail,
             "zoom_percent": self.zoom_percent,
             "bindings": self.bindings.slots,
         });
@@ -627,6 +634,7 @@ mod tests {
         assert_eq!(loaded.nickname, "ConoF");
         assert_eq!(loaded.connect_timeout_secs, 20);
         assert_eq!(loaded.reconnect_attempts, 3);
+        assert!(loaded.high_detail, "upstream defaults gfx_high_detail to on");
         assert!(loaded.favorites.is_empty());
         assert!(!loaded.show_favorites);
         fs::write(&path, r#"{"favorites":["127.0.0.1:8303","bad","127.0.0.1:8303",
@@ -737,6 +745,20 @@ mod tests {
         assert_eq!(loaded.zoom_percent, 150);
         assert_eq!(loaded.nickname, "old");
         assert!(!loaded.sound_enabled);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn low_detail_setting_survives_save_and_invalid_types_use_upstream_default() {
+        let path = std::env::temp_dir().join(format!(
+            "ddnet-rust-high-detail-{}.json", std::process::id(),
+        ));
+        let mut prefs = ClientSettings::default();
+        prefs.high_detail = false;
+        prefs.save(&path).unwrap();
+        assert!(!ClientSettings::load(&path).unwrap().high_detail);
+        fs::write(&path, r#"{"high_detail":"disabled"}"#).unwrap();
+        assert!(ClientSettings::load(&path).unwrap().high_detail);
         fs::remove_file(path).unwrap();
     }
 
