@@ -753,8 +753,9 @@ mod tests {
         let path = std::env::temp_dir().join(format!(
             "ddnet-rust-high-detail-{}.json", std::process::id(),
         ));
-        let mut prefs = ClientSettings::default();
-        prefs.high_detail = false;
+        let prefs = ClientSettings {
+            high_detail: false, ..ClientSettings::default()
+        };
         prefs.save(&path).unwrap();
         assert!(!ClientSettings::load(&path).unwrap().high_detail);
         fs::write(&path, r#"{"high_detail":"disabled"}"#).unwrap();
