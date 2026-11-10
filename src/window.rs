@@ -392,6 +392,9 @@ fn play_offline_impl(
         entity[4] = (simulator.character.velocity.y * 256.0).round() as i32;
         entity[5] = (controls.aim.y.atan2(controls.aim.x) * 256.0).round() as i32;
         entity[6] = direction;
+        entity[16] = 10; // offline demo: full health
+        entity[17] = 0;
+        entity[18] = 10; // stable test ammo display
         entity[19] = selected_weapon;
         entity[20] = 0; // EMOTE_NORMAL
         entity[21] = attack_tick;
@@ -413,6 +416,12 @@ fn play_offline_impl(
         #[cfg(feature = "gpu")]
         if let Some(renderer) = gpu.as_mut() {
             gpu_hud.clear();
+            if !menu.is_open() {
+                gpu_hud.draw_player_status(assets.game_sprites.as_ref(),
+                    crate::netobjects::CharacterHudStatus {
+                        health: 10, armor: 0, ammo: 10, weapon: selected_weapon as i8,
+                    });
+            }
             menu.paint(&mut gpu_hud, &settings, Some(&snapshot), ServerStatus {
                 endpoint: "LOCAL", stage: "Offline sandbox",
                 map: Some(path), tick: Some(simulator.tick as i32), ack: -1,
@@ -445,6 +454,12 @@ fn play_offline_impl(
             }
             window.update();
         } else {
+            if !menu.is_open() {
+                assets.draw_player_status(&mut pixels,
+                    crate::netobjects::CharacterHudStatus {
+                        health: 10, armor: 0, ammo: 10, weapon: selected_weapon as i8,
+                    });
+            }
             menu.paint(&mut pixels, &settings, Some(&snapshot), ServerStatus {
                 endpoint: "LOCAL", stage: "Offline sandbox",
                 map: Some(path), tick: Some(simulator.tick as i32), ack: -1,
@@ -457,6 +472,12 @@ fn play_offline_impl(
         }
         #[cfg(not(feature = "gpu"))]
         {
+            if !menu.is_open() {
+                assets.draw_player_status(&mut pixels,
+                    crate::netobjects::CharacterHudStatus {
+                        health: 10, armor: 0, ammo: 10, weapon: selected_weapon as i8,
+                    });
+            }
             menu.paint(&mut pixels, &settings, Some(&snapshot), ServerStatus {
                 endpoint: "LOCAL", stage: "Offline sandbox",
                 map: Some(path), tick: Some(simulator.tick as i32), ack: -1,

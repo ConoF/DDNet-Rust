@@ -13,7 +13,8 @@ use crate::map::GameMap;
 use crate::map_visual::VisualMap;
 use crate::snapshot_delta::SnapshotState;
 use crate::online_ui::HudCanvas;
-use crate::sprite_render::render_weapon_cursor;
+use crate::sprite_render::{render_weapon_cursor, render_player_hud};
+use crate::netobjects::CharacterHudStatus;
 use crate::sprite_render::render_animated_snapshot;
 use crate::texture::Texture;
 
@@ -171,6 +172,14 @@ impl WindowAssets {
         }
         frame.render_map(map, camera)
             .map_err(|error| format!("collision map: {error:?}"))
+    }
+
+    /// Draw the upstream vanilla 0.6 health, armor and ammo HUD from
+    /// locally observed character data. No guesses about other tee health.
+    pub fn draw_player_status(
+        &self, frame: &mut Framebuffer, stats: CharacterHudStatus,
+    ) {
+        render_player_hud(frame, self.game_sprites.as_ref(), stats);
     }
 
     /// Screen-space aiming reticle from original game.png; a visible

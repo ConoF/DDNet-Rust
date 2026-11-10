@@ -764,6 +764,9 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         if !using_gpu {
             assets.draw_foreground_at(&mut pixels, camera, animation_times)?;
         }
+        let player_status = display.as_ref().and_then(
+            crate::netobjects::CharacterHudStatus::local_from_snapshot,
+        );
         let local_weapon = display.as_ref().and_then(|snapshot|
             local_character_id(snapshot).and_then(|id|
                 snapshot.find(CHARACTER_TYPE, id)
@@ -778,6 +781,13 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
         #[cfg(feature = "gpu")]
         if using_gpu {
             gpu_hud.clear();
+            if !menu.is_open() {
+                if let Some(status) = player_status {
+                    gpu_hud.draw_player_status(
+                        assets.game_sprites.as_ref(), status,
+                    );
+                }
+            }
             if connection.show_nameplates && !menu.is_open() {
                 if let Some(snapshot) = display.as_ref() {
                     hud.draw_nameplates(&mut gpu_hud, snapshot, camera);
@@ -800,6 +810,11 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
             }
         }
         if !using_gpu {
+            if !menu.is_open() {
+                if let Some(status) = player_status {
+                    assets.draw_player_status(&mut pixels, status);
+                }
+            }
             if connection.show_nameplates && !menu.is_open() {
                 if let Some(snapshot) = display.as_ref() {
                     hud.draw_nameplates(&mut pixels, snapshot, camera);
