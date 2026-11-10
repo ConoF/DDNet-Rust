@@ -38,6 +38,38 @@ pub(crate) fn weapon_sprite(weapon: i32) -> Option<Sprite> {
     }
 }
 
+/// Original datasrc/content.py game.png cursor sprites, 2x2 atlas
+/// cells for each of the six 0.6 weapons. These remain in HUD screen
+/// coordinates, independent of the camera or gameplay hook direction.
+pub(crate) fn weapon_cursor_sprite(weapon: i32) -> Option<Sprite> {
+    let x = match weapon {
+        0 => 0, // hammer
+        1 => 4, // gun
+        2 => 6, // shotgun
+        3 => 8, // grenade
+        4 => 12, // laser
+        5 => 10, // ninja
+        _ => return None,
+    };
+    Some(Sprite { x, y: 2, w: 2, h: 2 })
+}
+
+/// Overlay a cursor from game.png. Missing assets are handled by the caller,
+/// not by silently drawing the wrong atlas cells.
+pub(crate) fn render_weapon_cursor(
+    frame: &mut Framebuffer, game: Option<&Texture>,
+    weapon: i32, position: (f32, f32),
+) -> bool {
+    let Some(sprite) = weapon_cursor_sprite(weapon) else { return false; };
+    let Some(atlas) = game.filter(|tex| valid_sheet(tex, GRID_GAME)) else {
+        return false;
+    };
+    if !position.0.is_finite() || !position.1.is_finite() { return false; }
+    blit(frame, atlas, GRID_GAME, sprite, position,
+        (32.0, 32.0), (0.0, false));
+    true
+}
+
 pub(crate) fn muzzle_sprite(weapon: i32) -> Option<Sprite> {
     match weapon {
         1 => Some(Sprite { x: 8, y: 4, w: 4, h: 2 }),
@@ -346,6 +378,37 @@ mod tests {
 
     fn camera() -> Camera {
         Camera { center: crate::physics::Vec2::new(100.0, 100.0), scale: 1.0 }
+    }
+
+    #[test]
+    fn all_six_cursor_regions_match_upstream_game_png_coordinates() {
+        for (weapon, x) in [(0, 0), (1, 4), (2, 6),
+            (3, 8), (4, 12), (5, 10)]
+        {
+            assert_eq!(weapon_cursor_sprite(weapon),
+                Some(Sprite { x, y: 2, w: 2, h: 2 }));
+        }
+        assert_eq!(weapon_cursor_sprite(-1), None);
+        assert_eq!(weapon_cursor_sprite(6), None);
+    }
+
+    #[test]
+    fn cursor_blits_selected_atlas_sprite_without_touching_world_state() {
+        let game = sprite_sheet(320, 160, GRID_GAME, &[
+            (weapon_cursor_sprite(0).unwrap(), [255, 0, 0, 255]),
+            (weapon_cursor_sprite(1).unwrap(), [0, 255, 0, 255]),
+        ]);
+        let mut frame = Framebuffer::new(64, 64).unwrap();
+        frame.clear(BACKGROUND);
+        assert!(render_weapon_cursor(&mut frame, Some(&game), 0, (32.0, 32.0)));
+        assert_eq!(frame.pixel(32, 32), Some(0xff0000));
+        assert!(render_weapon_cursor(&mut frame, Some(&game), 1, (32.0, 32.0)));
+        assert_eq!(frame.pixel(32, 32), Some(0x00ff00));
+        let before = frame.pixels.clone();
+        assert!(!render_weapon_cursor(&mut frame, Some(&game), -1, (32.0, 32.0)));
+        assert!(!render_weapon_cursor(&mut frame, None, 1, (32.0, 32.0)));
+        assert!(!render_weapon_cursor(&mut frame, Some(&game), 1, (f32::NAN, 0.0)));
+        assert_eq!(frame.pixels, before);
     }
 
     #[test]
