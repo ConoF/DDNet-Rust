@@ -18,6 +18,7 @@ const MAP_GROUP: u16 = 4;
 const MAP_LAYER: u16 = 5;
 const TILEMAP: i32 = 2;
 const QUADMAP: i32 = 3;
+const LAYERFLAG_DETAIL: i32 = 1; // mapitems.h: CMapItemLayer::m_Flags
 const MAX_IMAGES: usize = 64;
 const MAX_LAYERS: usize = 1024;
 const MAX_LAYER_CELLS: usize = 2_000_000;
@@ -105,6 +106,10 @@ pub struct VisualMap {
     pub layers: Vec<TexturedLayer>,
     pub quad_layers: Vec<QuadLayer>,
     pub envelopes: EnvelopeSet,
+    /// Original ordinals of decorative layers with LAYERFLAG_DETAIL.
+    pub detail_layer_orders: Vec<usize>,
+    /// gfx_high_detail, on by default in DDNet 20.2.1.
+    pub high_detail: bool,
 }
 
 /// Match DDNet's CRenderLayerTile::RenderTileBorder. Tiles at all four
@@ -288,13 +293,19 @@ impl VisualMap {
         let mut quad_layers = Vec::new();
         let mut total = 0usize;
         let mut total_quads = 0usize;
+        let mut detail_layer_orders = Vec::new();
         let game_layer_index = layer_items.iter().position(|item| {
             field(item.payload, 4).ok() == Some(TILEMAP)
                 && field(item.payload, 24).ok()
                     .is_some_and(|flags| flags & 1 != 0)
         });
         for (ordinal, item) in layer_items.iter().enumerate() {
-            if item.payload.len() < 8 { return Err(VisualError::InvalidMap); }
+            if item.payload.len() < 12 { return Err(VisualError::InvalidMap); }
+            // Do not confuse the base layer flags (offset 8) with
+            // tilemap physics flags at offset 24.
+            if field(item.payload, 8)? & LAYERFLAG_DETAIL != 0 {
+                detail_layer_orders.push(ordinal);
+            }
             if field(item.payload, 4)? == QUADMAP {
                 // CMapItemLayerQuads: base layer (12), version (4),
                 // quad count (4), data index (4), image index (4).
@@ -366,7 +377,16 @@ impl VisualMap {
                 order: ordinal,
             });
         }
-        Ok(Self { images, layers, quad_layers, envelopes })
+        Ok(Self {
+            images, layers, quad_layers, envelopes,
+            detail_layer_orders, high_detail: true,
+        })
+    }
+
+    /// Only decorative map layers are skipped; physics layers are not
+    /// removed or modified by gfx_high_detail.
+    pub fn is_detail_layer(&self, ordinal: usize) -> bool {
+        self.detail_layer_orders.binary_search(&ordinal).is_ok()
     }
 
     /// Static frame for CLI previews. Live clients provide explicit clocks.
@@ -430,13 +450,17 @@ impl VisualMap {
             if next_tile <= next_quad {
                 let layer = &self.layers[tile_index];
                 tile_index += 1;
-                if layer.foreground == foreground {
+                if layer.foreground == foreground
+                    && (self.high_detail || !self.is_detail_layer(layer.order))
+                {
                     drawn += self.render_tile_layer(frame, camera, layer, times)?;
                 }
             } else {
                 let layer = &self.quad_layers[quad_index];
                 quad_index += 1;
-                if layer.foreground == foreground {
+                if layer.foreground == foreground
+                    && (self.high_detail || !self.is_detail_layer(layer.order))
+                {
                     drawn += crate::quad_render::draw_quads_at(
                         layer, &self.images, frame, camera, &self.envelopes, times,
                     )?;
@@ -651,6 +675,7 @@ mod tests {
                 foreground: false, order: 0,
             }],
             quad_layers: vec![], envelopes: EnvelopeSet::default(),
+            detail_layer_orders: vec![], high_detail: true,
         };
         let camera = Camera {
             center: Vec2::new(32.0, 32.0), scale: 1.0,
@@ -676,6 +701,36 @@ mod tests {
         let mut cut = Framebuffer::new(192, 192).unwrap();
         clipped.render(&mut cut, camera).unwrap();
         assert_eq!(cut.pixel(5, 5), Some(BACKGROUND));
+    }
+
+    #[test]
+    fn ddnet_base_detail_flag_changes_software_map_without_touching_tiles() {
+        let (image, mut detail_layer, atlas, tiles) = make_fixture();
+        detail_layer[8..12].copy_from_slice(&LAYERFLAG_DETAIL.to_le_bytes());
+        let file = Datafile {
+            version: 3, item_types: vec![],
+            items: vec![
+                Item { type_id: MAP_IMAGE, id: 0, payload: &image },
+                Item { type_id: MAP_LAYER, id: 0, payload: &detail_layer },
+            ],
+            raw_blocks: vec![
+                RawBlock { encoded: b"synthetic\0", uncompressed_size: None },
+                RawBlock { encoded: &atlas, uncompressed_size: None },
+                RawBlock { encoded: &tiles, uncompressed_size: None },
+            ],
+        };
+        let mut visual = VisualMap::from_datafile(&file, Path::new(".")).unwrap();
+        assert_eq!(visual.detail_layer_orders, [0]);
+        let camera = Camera { center: Vec2::new(32.0, 16.0), scale: 1.0 };
+        let mut frame = Framebuffer::new(64, 32).unwrap();
+        assert_eq!(visual.render_background(&mut frame, camera), Ok(2));
+        assert_eq!(frame.pixel(16, 16), Some(0xff0000));
+        visual.high_detail = false;
+        assert_eq!(visual.render_background(&mut frame, camera), Ok(0));
+        assert_eq!(frame.pixel(16, 16), Some(BACKGROUND));
+        visual.high_detail = true;
+        assert_eq!(visual.render_background(&mut frame, camera), Ok(2));
+        assert_eq!(frame.pixel(16, 16), Some(0xff0000));
     }
 
     #[test]
@@ -1012,6 +1067,7 @@ mod tests {
         let map = VisualMap {
             images: vec![image], layers: vec![layer(false), layer(true)],
             quad_layers: vec![], envelopes: EnvelopeSet::default(),
+            detail_layer_orders: vec![], high_detail: true,
         };
         let camera = Camera { center: Vec2::new(16.0,16.0), scale: 1.0 };
         let mut frame = Framebuffer::new(32, 32).unwrap();
@@ -1093,6 +1149,7 @@ mod tests {
         let map = VisualMap {
             images: vec![], layers: vec![], quad_layers: vec![],
             envelopes: EnvelopeSet::default(),
+            detail_layer_orders: vec![], high_detail: true,
         };
         let mut frame = Framebuffer::new(16, 16).unwrap();
         assert_eq!(map.render(&mut frame, Camera {

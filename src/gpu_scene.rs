@@ -409,7 +409,9 @@ pub fn build_gpu_scene_into_cached(
                 if next_tile <= next_quad {
                     let layer = &map.layers[tile];
                     tile += 1;
-                    if layer.foreground == foreground {
+                    if layer.foreground == foreground
+                        && (map.high_detail || !map.is_detail_layer(layer.order))
+                    {
                         builder.tile_layer(map, layer, camera, times,
                             caches.occupied_tiles.and_then(|rows| rows.get(tile - 1))
                                 .map(Vec::as_slice))?;
@@ -417,7 +419,9 @@ pub fn build_gpu_scene_into_cached(
                 } else {
                     let layer = &map.quad_layers[quad];
                     quad += 1;
-                    if layer.foreground == foreground {
+                    if layer.foreground == foreground
+                        && (map.high_detail || !map.is_detail_layer(layer.order))
+                    {
                         builder.quads(map, layer, camera, times,
                             caches.quad_bounds.and_then(|b| b.get(quad - 1)).map(Vec::as_slice))?;
                     }
@@ -467,10 +471,32 @@ mod tests {
                 transform: GroupTransform::default(), image: None, quads: vec![q],
             }],
             envelopes: EnvelopeSet::default(),
+            detail_layer_orders: vec![], high_detail: true,
         }
     }
     fn camera() -> Camera {
         Camera { center: Vec2::new(16.0, 16.0), scale: 1.0 }
+    }
+
+    #[test]
+    fn gpu_detail_filter_skips_flagged_tile_and_quad_without_reordering() {
+        let mut visual = map();
+        visual.detail_layer_orders = vec![1]; // only tile is detail
+        visual.high_detail = false;
+        let low = build_gpu_scene(&visual, camera(),
+            EnvelopeTimes::default(), 32, 32).unwrap();
+        assert_eq!(low.vertices.len(), 6);
+        assert_eq!(low.background[0].texture, 1); // unflagged quad
+        visual.detail_layer_orders = vec![0, 1];
+        let empty = build_gpu_scene(&visual, camera(),
+            EnvelopeTimes::default(), 32, 32).unwrap();
+        assert!(empty.vertices.is_empty());
+        visual.high_detail = true;
+        let full = build_gpu_scene(&visual, camera(),
+            EnvelopeTimes::default(), 32, 32).unwrap();
+        assert_eq!(full.vertices.len(), 12);
+        assert_eq!(full.background[0].texture, 1);
+        assert_eq!(full.background[1].texture, 0);
     }
 
     #[test]
