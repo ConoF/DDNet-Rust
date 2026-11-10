@@ -74,7 +74,25 @@ pub const SWITCH_STATE_UUID_WORDS: [i32; 4] =
 /// uuid3(TEEWORLDS_NAMESPACE, "pickup@netobj.ddnet.tw"), Uint32 BE.
 pub const DDNET_PICKUP_UUID_WORDS: [i32; 4] =
     [-362919343, 1492858500, -1763385134, 1744095845];
+/// UUID v3: ddnet-projectile@netobj.ddnet.tw
+pub const DDNET_PROJECTILE_UUID_WORDS: [i32; 4] =
+    [1699806158, -216581327, -1879125325, 2134553614];
+/// UUID v3: laser@netobj.ddnet.tw
+pub const DDNET_LASER_UUID_WORDS: [i32; 4] =
+    [702441634, 1764241848, -2090819024, 2114815055];
 const OFFSET_UUID_TYPE: u16 = 0x4000;
+
+/// Resolve exactly one extended network-object type by the UUID carried
+/// in NETOBJTYPE_EX. The assigned ID is not a protocol-wide constant.
+fn mapped_extension(snapshot: &SnapshotState, uuid: [i32; 4]) -> Option<u16> {
+    let mut matches = snapshot.items.iter().filter(|item| {
+        item.type_id == 0 && item.id >= OFFSET_UUID_TYPE
+            && item.words.as_slice() == uuid
+    });
+    let id = matches.next()?.id;
+    if matches.next().is_some() { return None; }
+    Some(id)
+}
 
 /// DDNet 0.6 stores tee names as signed characters with an offset of 128,
 /// four bytes per network-order i32. The last byte is reserved for a terminator.
@@ -205,6 +223,7 @@ pub struct ProjectileNet {
     pub vy: f32,
     pub weapon: u8,
     pub start_tick: i32,
+    pub tune_zone: u8,
 }
 
 impl ProjectileNet {
@@ -221,9 +240,45 @@ impl ProjectileNet {
             x: w[0] as f32, y: w[1] as f32,
             vx: w[2] as f32 / 100.0,
             vy: w[3] as f32 / 100.0,
-            weapon, start_tick: w[5],
+            weapon, start_tick: w[5], tune_zone: 0,
         };
         value.validated()
+    }
+
+    pub fn extended_type(snapshot: &SnapshotState) -> Option<u16> {
+        mapped_extension(snapshot, DDNET_PROJECTILE_UUID_WORDS)
+    }
+
+    /// DDNetProjectile uses positions scaled by 100. For an unowned
+    /// projectile velocities use 1e6 units; owned projectiles carry
+    /// native float velocities as rounded integers (projectile_data.cpp).
+    pub fn from_extended_object(object: &SnapshotObject, mapped: u16)
+        -> Option<Self>
+    {
+        if mapped < OFFSET_UUID_TYPE || object.type_id != mapped
+            || object.words.len() != 10
+        { return None; }
+        let w = &object.words;
+        let weapon = u8::try_from(w[4]).ok().filter(|&id| id <= 5)?;
+        let owner = w[6];
+        if !(-1..64).contains(&owner) { return None; }
+        let tune_zone = u8::try_from(w[8]).ok()?;
+        let flags = w[9];
+        if flags < 0 || flags & !0x1f != 0 { return None; }
+        let factor = if owner < 0 { 1e-6 } else { 1.0 };
+        let mut vx = w[2] as f32 * factor;
+        let mut vy = w[3] as f32 * factor;
+        if flags & 0x10 != 0 {
+            let norm = vx.hypot(vy);
+            if !norm.is_finite() || norm < 0.000001 { return None; }
+            vx /= norm;
+            vy /= norm;
+        }
+        Self {
+            x: w[0] as f32 / 100.0,
+            y: w[1] as f32 / 100.0,
+            vx, vy, weapon, start_tick: w[5], tune_zone,
+        }.validated()
     }
 
     fn validated(self) -> Option<Self> {
@@ -245,6 +300,7 @@ pub struct LaserNet {
     pub from_y: i32,
     pub start_tick: i32,
     pub kind: i32,
+    pub subtype: i32,
 }
 
 impl LaserNet {
@@ -255,16 +311,39 @@ impl LaserNet {
         let w = &object.words;
         let laser = Self {
             to_x: w[0], to_y: w[1], from_x: w[2], from_y: w[3],
-            start_tick: w[4], kind: 0,
+            start_tick: w[4], kind: 0, subtype: -1,
         };
-        // Guard against malformed or nonsensically long beams.
-        let dx = i64::from(laser.to_x) - i64::from(laser.from_x);
-        let dy = i64::from(laser.to_y) - i64::from(laser.from_y);
-        (laser.start_tick >= 0
-            && dx.abs() <= 8192 && dy.abs() <= 8192
-            && [laser.to_x,laser.to_y,laser.from_x,laser.from_y]
+        laser.validated()
+    }
+
+    pub fn extended_type(snapshot: &SnapshotState) -> Option<u16> {
+        mapped_extension(snapshot, DDNET_LASER_UUID_WORDS)
+    }
+
+    pub fn from_extended_object(object: &SnapshotObject, mapped: u16)
+        -> Option<Self>
+    {
+        if mapped < OFFSET_UUID_TYPE || object.type_id != mapped
+            || !(7..=10).contains(&object.words.len())
+        { return None; }
+        let w = &object.words;
+        if !(-1..64).contains(&w[5]) { return None; }
+        let laser = Self {
+            to_x: w[0], to_y: w[1], from_x: w[2], from_y: w[3],
+            start_tick: w[4], kind: w[6],
+            subtype: *w.get(8).unwrap_or(&-1),
+        };
+        if !(-1..=6).contains(&laser.kind) { return None; }
+        laser.validated()
+    }
+
+    fn validated(self) -> Option<Self> {
+        let dx = i64::from(self.to_x) - i64::from(self.from_x);
+        let dy = i64::from(self.to_y) - i64::from(self.from_y);
+        (self.start_tick >= 0 && dx.abs() <= 8192 && dy.abs() <= 8192
+            && [self.to_x,self.to_y,self.from_x,self.from_y]
                 .iter().all(|v| i64::from(*v).abs() < 1_000_000)
-        ).then_some(laser)
+        ).then_some(self)
     }
 }
 
@@ -298,13 +377,7 @@ impl PickupNet {
     /// assigned snapshot type. Trust it only after the 128-bit name UUID
     /// has been independently verified from a mapping object.
     pub fn extended_type(snapshot: &SnapshotState) -> Option<u16> {
-        let mut types = snapshot.items.iter().filter(|item| {
-            item.type_id == 0 && item.id >= OFFSET_UUID_TYPE
-                && item.words.as_slice() == DDNET_PICKUP_UUID_WORDS
-        });
-        let mapped = types.next()?.id;
-        if types.next().is_some() { return None; }
-        Some(mapped)
+        mapped_extension(snapshot, DDNET_PICKUP_UUID_WORDS)
     }
 
     pub fn from_extended_object(item: &SnapshotObject, mapped: u16) -> Option<Self> {
@@ -499,12 +572,48 @@ mod tests {
     }
 
     #[test]
+    fn ddnet_extended_projectile_and_laser_respect_uuid_and_unit_scaling() {
+        let mapping = |id, uuid: [i32; 4]| SnapshotObject {
+            type_id: 0, id, words: uuid.to_vec(),
+        };
+        let mut state = SnapshotState { items: vec![
+            mapping(0x4001, DDNET_PROJECTILE_UUID_WORDS),
+            mapping(0x4002, DDNET_LASER_UUID_WORDS),
+            SnapshotObject {
+                type_id: 0x4001, id: 2,
+                words: vec![10000, 20000, 1_000_000, 0, 3, 50, -1, 0, 7, 0],
+            },
+            SnapshotObject {
+                type_id: 0x4002, id: 3,
+                words: vec![120, 150, 60, 150, 53, -1, 3, -1, -1, 0],
+            },
+        ] };
+        let shot = ProjectileNet::from_extended_object(&state.items[2],
+            ProjectileNet::extended_type(&state).unwrap()).unwrap();
+        assert_eq!((shot.x,shot.y,shot.vx,shot.vy,shot.weapon,shot.tune_zone),
+            (100.0,200.0,1.0,0.0,3,7));
+        let laser = LaserNet::from_extended_object(&state.items[3],
+            LaserNet::extended_type(&state).unwrap()).unwrap();
+        assert_eq!((laser.kind,laser.subtype,laser.from_x,laser.to_x),
+            (3,-1,60,120));
+        state.items[2].words[9] = 0x10;
+        let normalized = ProjectileNet::from_extended_object(&state.items[2],
+            0x4001).unwrap();
+        assert_eq!(normalized.vx,1.0);
+        state.items[0].words[0] ^= 1;
+        assert!(ProjectileNet::extended_type(&state).is_none());
+        state.items[3].words[6] = i32::MAX;
+        assert!(LaserNet::from_extended_object(&state.items[3],
+            0x4002).is_none());
+    }
+
+    #[test]
     fn vanilla_projectile_and_laser_snapshots_are_strict_and_safe() {
         let make = |type_id, words| SnapshotObject { type_id, id: 7, words };
         let gun = make(PROJECTILE_TYPE, vec![64, 128, 100, 0, 1, 500]);
         assert_eq!(ProjectileNet::from_object(&gun), Some(ProjectileNet {
             x: 64.0, y: 128.0, vx: 1.0, vy: 0.0,
-            weapon: 1, start_tick: 500,
+            weapon: 1, start_tick: 500, tune_zone: 0,
         }));
         assert!(ProjectileNet::from_object(&make(
             PROJECTILE_TYPE, vec![0,0,0,0,8,500])).is_none());
@@ -515,7 +624,7 @@ mod tests {
         let beam = make(LASER_TYPE, vec![100, 120, 40, 120, 700]);
         assert_eq!(LaserNet::from_object(&beam), Some(LaserNet {
             to_x: 100, to_y: 120, from_x: 40, from_y: 120,
-            start_tick: 700, kind: 0,
+            start_tick: 700, kind: 0, subtype: -1,
         }));
         assert!(LaserNet::from_object(&make(
             LASER_TYPE, vec![10000,0,0,0,1])).is_none());
