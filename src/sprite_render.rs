@@ -8,7 +8,10 @@ use crate::graphics::{Camera, Framebuffer, RenderError, HOOK};
 use crate::netobjects::{CharacterCoreNet, CHARACTER_TYPE};
 use crate::snapshot_delta::SnapshotState;
 use crate::texture::Texture;
-use crate::netobjects::{CharacterHudStatus, PickupNet, SwitchStateNet};
+use crate::netobjects::{
+    CharacterHudStatus, LaserNet, PickupNet, ProjectileNet, SwitchStateNet,
+};
+use crate::physics::{projectile_position, Vec2};
 
 pub(crate) const MAX_HOOK_DISTANCE: f32 = 2048.0;
 pub(crate) const GRID_SKIN: (usize, usize) = (8, 4);
@@ -115,6 +118,53 @@ pub(crate) fn render_player_hud(
         }
     }
     true
+}
+
+/// Original 0.6 game.png projectile image cells. Projectiles use
+/// 32 world-unit quad dimensions in CItems::OnInit.
+pub(crate) fn projectile_sprite(weapon: u8) -> Option<Sprite> {
+    match weapon {
+        1 => Some(Sprite { x: 6, y: 4, w: 2, h: 2 }),
+        2 => Some(Sprite { x: 10, y: 6, w: 2, h: 2 }),
+        3 => Some(Sprite { x: 10, y: 8, w: 2, h: 2 }),
+        _ => None,
+    }
+}
+
+/// Original CalcPos from src/game/gamecore.h. This baseline deliberately
+/// uses the 20.2.1 default gun/shotgun/grenade tunings. Custom server tune
+/// zones require passing server tuning and are NOT claimed as exact here.
+pub(crate) fn projectile_visual(
+    p: ProjectileNet, tick: u64,
+) -> Option<((f32, f32), f32, Sprite)> {
+    let sprite = projectile_sprite(p.weapon)?;
+    let age = i64::try_from(tick).ok()? - i64::from(p.start_tick);
+    if !(0..=250).contains(&age) { return None; }
+    let t = age as f32 / 50.0;
+    let (curvature, speed) = match p.weapon {
+        1 => (1.25, 2200.0),
+        2 => (1.25, 2750.0),
+        3 => (7.0, 1000.0),
+        _ => return None,
+    };
+    let initial = Vec2::new(p.x, p.y);
+    let velocity = Vec2::new(p.vx, p.vy);
+    let pos = projectile_position(initial, velocity, curvature, speed, t);
+    let previous = projectile_position(
+        initial, velocity, curvature, speed, (t - 0.001).max(0.0),
+    );
+    let dx = pos.x - previous.x;
+    let dy = pos.y - previous.y;
+    let angle = if p.weapon == 3 {
+        (tick % 500) as f32 * std::f32::consts::TAU / 25.0
+    } else if dx.hypot(dy) > 0.00001 {
+        dy.atan2(dx)
+    } else { p.vy.atan2(p.vx) };
+    let values = [pos.x, pos.y, angle];
+    if values.iter().any(|v| !v.is_finite() || v.abs() > 2_000_000.0) {
+        return None;
+    }
+    Some(((pos.x, pos.y), angle, sprite))
 }
 
 pub(crate) fn muzzle_sprite(weapon: i32) -> Option<Sprite> {
@@ -306,6 +356,35 @@ fn draw_line(frame: &mut Framebuffer, from: (f32, f32), to: (f32, f32), color: u
     }
 }
 
+/// Software approximation of the original laser double-width freeform
+/// quads. Two colored strokes and a tip represent the beam without
+/// modifying collision, prediction, or network state.
+fn draw_laser(frame: &mut Framebuffer, laser: LaserNet, camera: Camera) {
+    let from = to_screen(frame, camera, laser.from_x as f32, laser.from_y as f32);
+    let to = to_screen(frame, camera, laser.to_x as f32, laser.to_y as f32);
+    let dx = to.0 - from.0;
+    let dy = to.1 - from.1;
+    let length = dx.hypot(dy);
+    if !length.is_finite() || !(0.1..=32_768.0).contains(&length) {
+        return;
+    }
+    let normal = (-dy / length, dx / length);
+    for offset in -5i32..=5 {
+        let color = if offset.abs() >= 4 { 0x2c6592 } else { 0xb4ebff };
+        let delta = (normal.0 * offset as f32, normal.1 * offset as f32);
+        draw_line(frame, (from.0 + delta.0, from.1 + delta.1),
+            (to.0 + delta.0, to.1 + delta.1), color);
+    }
+    // Original lasers also use animated particle sprites on their tips.
+    // A bounded colored core is preferable to a missing beam until
+    // particle sprites and the full DDNet color configuration are ported.
+    frame.fill_rect(
+        (to.0 - 3.0).max(0.0) as usize,
+        (to.1 - 3.0).max(0.0) as usize,
+        6, 6, 0xd7f6ff,
+    );
+}
+
 fn draw_hook(
     frame: &mut Framebuffer, character: CharacterCoreNet,
     camera: Camera, game: Option<&Texture>,
@@ -428,7 +507,26 @@ pub fn render_animated_snapshot(
         return Err(RenderError::InvalidCamera);
     }
     let game = game.filter(|g| valid_sheet(g, GRID_GAME));
+    // Render incoming world weapons and laser beams even when no skin atlas
+    // exists. Their absence was a prominent difference from official DDNet.
+    for item in &state.items {
+        if let Some(laser) = LaserNet::from_object(item) {
+            draw_laser(frame, laser, camera);
+        }
+    }
     if let Some(atlas) = game {
+        for item in &state.items {
+            if let Some(projectile) = ProjectileNet::from_object(item) {
+                if let Some((position, angle, sprite)) =
+                    projectile_visual(projectile, tick)
+                {
+                    blit(frame, atlas, GRID_GAME, sprite,
+                        to_screen(frame, camera, position.0, position.1),
+                        (32.0 * camera.scale, 32.0 * camera.scale),
+                        (angle, false));
+                }
+            }
+        }
         // CItems is drawn behind all player hooks and tee sprites.
         let ddnet_type = PickupNet::extended_type(state);
         let switches = SwitchStateNet::from_snapshot(state);
@@ -517,6 +615,55 @@ mod tests {
 
     fn camera() -> Camera {
         Camera { center: crate::physics::Vec2::new(100.0, 100.0), scale: 1.0 }
+    }
+
+    #[test]
+    fn projectiles_follow_vanilla_calcpos_and_game_png_regions() {
+        assert_eq!(projectile_sprite(1), Some(Sprite {
+            x: 6, y: 4, w: 2, h: 2,
+        }));
+        assert_eq!(projectile_sprite(2), Some(Sprite {
+            x: 10, y: 6, w: 2, h: 2,
+        }));
+        assert_eq!(projectile_sprite(3), Some(Sprite {
+            x: 10, y: 8, w: 2, h: 2,
+        }));
+        for unsupported in [0, 4, 5, 6] {
+            assert!(projectile_sprite(unsupported).is_none());
+        }
+        let gun = ProjectileNet {
+            x: 100.0, y: 100.0, vx: 1.0, vy: 0.0,
+            weapon: 1, start_tick: 100,
+        };
+        let (position, angle, _) = projectile_visual(gun, 101).unwrap();
+        assert!((position.0 - 144.0).abs() < 0.01);
+        assert!(position.1 > 100.0);
+        assert!(angle >= 0.0);
+        assert!(projectile_visual(gun, 99).is_none());
+        assert!(projectile_visual(gun, 351).is_none());
+    }
+
+    #[test]
+    fn projectile_and_laser_are_visible_from_snapshot_without_tee_skin() {
+        let projectile = SnapshotObject {
+            type_id: crate::netobjects::PROJECTILE_TYPE, id: 2,
+            words: vec![100, 100, 100, 0, 1, 100],
+        };
+        let laser = SnapshotObject {
+            type_id: crate::netobjects::LASER_TYPE, id: 3,
+            words: vec![140, 135, 70, 135, 100],
+        };
+        let state = SnapshotState { items: vec![projectile, laser] };
+        let atlas = sprite_sheet(320, 160, GRID_GAME, &[
+            (projectile_sprite(1).unwrap(), [24, 220, 100, 255]),
+        ]);
+        let mut screen = Framebuffer::new(200, 200).unwrap();
+        screen.clear(BACKGROUND);
+        let drawn = render_animated_snapshot(&mut screen, &state, camera(),
+            None, Some(&atlas), 100).unwrap();
+        assert_eq!(drawn, 0);
+        assert!(screen.pixels.contains(&0x18dc64));
+        assert!(screen.pixels.contains(&0xb4ebff));
     }
 
     #[test]
