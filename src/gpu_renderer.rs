@@ -17,6 +17,7 @@ use crate::gpu_scene::{has_time_varying_geometry,
 use crate::gpu_tees::{build_gpu_tees_into, GpuTeeScene, SpriteTextureSlots};
 use crate::gpu_hud::{
     font_atlas_rgba, GpuHudScene, FONT_WIDTH, FONT_HEIGHT,
+    HUD_GAME_CURSOR_SLOT,
     HUD_FONT_SLOT, HUD_SOLID_SLOT,
 };
 use crate::sprite_render::{valid_sheet, GRID_SKIN, GRID_GAME};
@@ -514,6 +515,7 @@ impl GpuRenderer {
             let index = match batch.texture {
                 HUD_SOLID_SLOT => self.map_image_count,
                 HUD_FONT_SLOT => self.map_image_count + 3,
+                HUD_GAME_CURSOR_SLOT => self.map_image_count + 2,
                 _ => return Err("unknown GPU HUD atlas slot".to_owned()),
             };
             self.hud_batches.push(GpuBatch {

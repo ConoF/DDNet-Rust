@@ -791,6 +791,13 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                     map: session.map_name(), tick: current_snapshot,
                     ack: session.snapshot_ack_tick(),
                 });
+            if !menu.is_open() && !hud.is_typing() {
+                if let Some(weapon) = local_weapon {
+                    gpu_hud.draw_weapon_cursor(
+                        weapon, mouse, assets.game_sprites.as_ref(),
+                    );
+                }
+            }
         }
         if !using_gpu {
             if connection.show_nameplates && !menu.is_open() {
@@ -806,6 +813,11 @@ pub fn play_online(endpoint: &str) -> Result<(), String> {
                     map: session.map_name(), tick: current_snapshot,
                     ack: session.snapshot_ack_tick(),
                 });
+            if !menu.is_open() && !hud.is_typing() {
+                if let Some(weapon) = local_weapon {
+                    assets.draw_weapon_cursor(&mut pixels, weapon, mouse);
+                }
+            }
         }
         #[cfg(feature = "gpu")]
         if let Some(renderer) = gpu.as_mut() {

@@ -417,6 +417,11 @@ fn play_offline_impl(
                 endpoint: "LOCAL", stage: "Offline sandbox",
                 map: Some(path), tick: Some(simulator.tick as i32), ack: -1,
             });
+            if !menu.is_open() {
+                gpu_hud.draw_weapon_cursor(
+                    selected_weapon, mouse, assets.game_sprites.as_ref(),
+                );
+            }
             if gpu_smoke {
                 gpu_hud.write_text(10, 10, "GPU HUD", 0xffffff, 7);
             }
@@ -444,6 +449,9 @@ fn play_offline_impl(
                 endpoint: "LOCAL", stage: "Offline sandbox",
                 map: Some(path), tick: Some(simulator.tick as i32), ack: -1,
             });
+            if !menu.is_open() {
+                assets.draw_weapon_cursor(&mut pixels, selected_weapon, mouse);
+            }
             window.update_with_buffer(&pixels.pixels, SCREEN_W, SCREEN_H)
                 .map_err(|e| format!("present: {e}"))?;
         }
@@ -453,6 +461,9 @@ fn play_offline_impl(
                 endpoint: "LOCAL", stage: "Offline sandbox",
                 map: Some(path), tick: Some(simulator.tick as i32), ack: -1,
             });
+            if !menu.is_open() {
+                assets.draw_weapon_cursor(&mut pixels, selected_weapon, mouse);
+            }
             window.update_with_buffer(&pixels.pixels, SCREEN_W, SCREEN_H)
                 .map_err(|e| format!("present: {e}"))?;
         }

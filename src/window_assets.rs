@@ -12,6 +12,8 @@ use crate::graphics::{Camera, Framebuffer};
 use crate::map::GameMap;
 use crate::map_visual::VisualMap;
 use crate::snapshot_delta::SnapshotState;
+use crate::online_ui::HudCanvas;
+use crate::sprite_render::render_weapon_cursor;
 use crate::sprite_render::render_animated_snapshot;
 use crate::texture::Texture;
 
@@ -170,6 +172,25 @@ impl WindowAssets {
         }
         frame.render_map(map, camera)
             .map_err(|error| format!("collision map: {error:?}"))
+    }
+
+    /// Screen-space aiming reticle from original game.png; a visible
+    /// fallback is provided when the game's atlas is unavailable.
+    pub fn draw_weapon_cursor(
+        &self, frame: &mut Framebuffer, weapon: i32, position: (f32, f32),
+    ) {
+        if render_weapon_cursor(frame, self.game_sprites.as_ref(), weapon, position) {
+            return;
+        }
+        if !position.0.is_finite() || !position.1.is_finite()
+            || frame.width == 0 || frame.height == 0
+        {
+            return;
+        }
+        let x = position.0.clamp(0.0, frame.width.saturating_sub(1) as f32) as usize;
+        let y = position.1.clamp(0.0, frame.height.saturating_sub(1) as f32) as usize;
+        frame.fill_rect(x.saturating_sub(1), y.saturating_sub(5), 3, 11, 0xffffff);
+        frame.fill_rect(x.saturating_sub(5), y.saturating_sub(1), 11, 3, 0xffffff);
     }
 
     pub fn draw_snapshot(
