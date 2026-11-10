@@ -5,7 +5,6 @@
 //! this is not the original DDNet animation state machine.
 
 use crate::graphics::{Camera, Framebuffer, RenderError, HOOK};
-use crate::online_ui::HudCanvas;
 use crate::netobjects::{CharacterCoreNet, CHARACTER_TYPE};
 use crate::snapshot_delta::SnapshotState;
 use crate::texture::Texture;
@@ -395,11 +394,10 @@ fn draw_laser(frame: &mut Framebuffer, laser: LaserNet, camera: Camera) {
     // Original lasers also use animated particle sprites on their tips.
     // A bounded colored core is preferable to a missing beam until
     // particle sprites and the full DDNet color configuration are ported.
-    frame.fill_rect(
-        (to.0 - 3.0).max(0.0) as usize,
-        (to.1 - 3.0).max(0.0) as usize,
-        6, 6, inner,
-    );
+    for offset in -2..=2 {
+        let y = to.1 + offset as f32;
+        draw_line(frame, (to.0 - 2.0, y), (to.0 + 2.0, y), inner);
+    }
 }
 
 fn draw_hook(
