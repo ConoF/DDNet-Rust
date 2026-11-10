@@ -66,8 +66,7 @@ pub fn candidate_roots(map_path: Option<&Path>) -> Vec<PathBuf> {
     for root in roots {
         if !unique.contains(&root) { unique.push(root); }
     }
-    let roots = unique;
-    roots
+    unique
 }
 
 impl WindowAssets {
