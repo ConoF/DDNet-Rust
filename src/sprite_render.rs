@@ -510,14 +510,21 @@ pub fn render_animated_snapshot(
     let game = game.filter(|g| valid_sheet(g, GRID_GAME));
     // Render incoming world weapons and laser beams even when no skin atlas
     // exists. Their absence was a prominent difference from official DDNet.
+    let ddnet_laser_type = LaserNet::extended_type(state);
     for item in &state.items {
-        if let Some(laser) = LaserNet::from_object(item) {
-            draw_laser(frame, laser, camera);
-        }
+        let laser = LaserNet::from_object(item).or_else(|| {
+            ddnet_laser_type.and_then(|kind| LaserNet::from_extended_object(item, kind))
+        });
+        if let Some(laser) = laser { draw_laser(frame, laser, camera); }
     }
     if let Some(atlas) = game {
+        let ddnet_projectile_type = ProjectileNet::extended_type(state);
         for item in &state.items {
-            if let Some(projectile) = ProjectileNet::from_object(item) {
+            let projectile = ProjectileNet::from_object(item).or_else(|| {
+                ddnet_projectile_type.and_then(|kind|
+                    ProjectileNet::from_extended_object(item, kind))
+            });
+            if let Some(projectile) = projectile {
                 if let Some((position, angle, sprite)) =
                     projectile_visual(projectile, tick)
                 {
@@ -634,7 +641,7 @@ mod tests {
         }
         let gun = ProjectileNet {
             x: 100.0, y: 100.0, vx: 1.0, vy: 0.0,
-            weapon: 1, start_tick: 100,
+            weapon: 1, start_tick: 100, tune_zone: 0,
         };
         let (position, angle, _) = projectile_visual(gun, 101).unwrap();
         assert!((position.0 - 144.0).abs() < 0.01);

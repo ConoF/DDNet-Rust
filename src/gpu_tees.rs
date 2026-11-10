@@ -282,8 +282,12 @@ pub fn build_gpu_tees_into(
     // Match software item rendering: projectiles and laser beams are
     // world-space geometry drawn behind tee hooks/skins and before HUD.
     // These shapes cost no full-screen pixel upload.
+    let ddnet_laser_type = LaserNet::extended_type(state);
     for item in &state.items {
-        if let Some(laser) = LaserNet::from_object(item) {
+        let laser = LaserNet::from_object(item).or_else(|| {
+            ddnet_laser_type.and_then(|kind| LaserNet::from_extended_object(item, kind))
+        });
+        if let Some(laser) = laser {
             let from = b.screen(camera, laser.from_x as f32, laser.from_y as f32);
             let to = b.screen(camera, laser.to_x as f32, laser.to_y as f32);
             let dx = to.0 - from.0;
@@ -306,8 +310,13 @@ pub fn build_gpu_tees_into(
         }
     }
     if game {
+        let ddnet_projectile_type = ProjectileNet::extended_type(state);
         for item in &state.items {
-            if let Some(projectile) = ProjectileNet::from_object(item) {
+            let projectile = ProjectileNet::from_object(item).or_else(|| {
+                ddnet_projectile_type.and_then(|kind|
+                    ProjectileNet::from_extended_object(item, kind))
+            });
+            if let Some(projectile) = projectile {
                 if let Some(((x, y), angle, sprite)) =
                     projectile_visual(projectile, tick)
                 {
