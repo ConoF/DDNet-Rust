@@ -11,8 +11,9 @@ use crate::netobjects::{
 };
 use crate::snapshot_delta::SnapshotState;
 use crate::sprite_render::{
-    Sprite, GRID_SKIN, GRID_GAME, BODY, FOOT, HOOK_HEAD, HOOK_CHAIN,
-    MAX_HOOK_DISTANCE, skin_eye, weapon_sprite, muzzle_sprite, valid_sheet,
+    Sprite, GRID_SKIN, GRID_GAME, BODY, FOOT, BODY_OUTLINE, FOOT_OUTLINE,
+    HAND, HAND_OUTLINE, HOOK_HEAD, HOOK_CHAIN, MAX_HOOK_DISTANCE,
+    skin_eye, weapon_sprite, weapon_hand_pose, muzzle_sprite, valid_sheet,
     pickup_art, pickup_position, pickup_orientation, pickup_visible,
     projectile_visual, laser_palette,
 };
@@ -186,11 +187,19 @@ impl TeeBuilder {
         {
             return;
         }
-        for (offset_x, offset_y) in [
-            (-8.0 + stride, 12.0 - stride.abs() * 0.5),
-            (8.0 - stride, 12.0 + stride.abs() * 0.5),
-        ] {
-            let foot = (center.0 + offset_x * scale, center.1 + offset_y * scale);
+        let feet = [
+            (center.0 + (-8.0 + stride) * scale,
+                center.1 + (12.0 - stride.abs() * 0.5) * scale),
+            (center.0 + (8.0 - stride) * scale,
+                center.1 + (12.0 + stride.abs() * 0.5) * scale),
+        ];
+        for &foot in &feet {
+            self.sprite(self.slots.skin, GRID_SKIN, FOOT_OUTLINE, foot,
+                (15.0 * scale, 12.0 * scale), (0.0, false));
+        }
+        self.sprite(self.slots.skin, GRID_SKIN, BODY_OUTLINE, center,
+            (34.0 * scale, 32.0 * scale), (0.0, false));
+        for &foot in &feet {
             self.sprite(self.slots.skin, GRID_SKIN, FOOT, foot,
                 (15.0 * scale, 12.0 * scale), (0.0, false));
         }
@@ -233,6 +242,14 @@ impl TeeBuilder {
                 );
                 self.sprite(self.slots.game, GRID_GAME, muzzle, at,
                     (22.0*scale,14.0*scale), (angle, mirrored));
+            }
+        }
+        if let Some((hand, hand_angle)) = weapon_hand_pose(
+            weapon, weapon_center, (aim_x, aim_y), scale,
+        ) {
+            for sprite in [HAND_OUTLINE, HAND] {
+                self.sprite(self.slots.skin, GRID_SKIN, sprite, hand,
+                    (15.0 * scale, 15.0 * scale), (hand_angle, false));
             }
         }
     }
@@ -484,17 +501,32 @@ mod tests {
     }
 
     #[test]
+    fn gpu_tee_outline_and_hand_uvs_match_original_sprite_atlas() {
+        let skin = tex(80, 40);
+        let game = tex(320, 160);
+        let scene = build_gpu_tees(&snap(1, false), camera(), 80,
+            (200, 200), Some(&skin), Some(&game), slots()).unwrap();
+        assert_eq!(scene.vertices.len(), 60);
+        assert_eq!(scene.vertices[0].uv, [6.0 / 8.0, 2.0 / 4.0]);
+        assert_eq!(scene.vertices[12].uv, [3.0 / 8.0, 0.0]);
+        assert_eq!(scene.vertices[48].uv, [7.0 / 8.0, 0.0]);
+        assert_eq!(scene.vertices[54].uv, [6.0 / 8.0, 0.0]);
+    }
+
+    #[test]
     fn body_feet_eye_and_weapon_are_gpu_geometry_not_cpu_pixels() {
         let skin=tex(80,40);let game=tex(320,160);
         let scene=build_gpu_tees(&snap(1,false),camera(),100,(100,100),
             Some(&skin),Some(&game),slots()).unwrap();
         assert_eq!(scene.characters,1);
-        assert_eq!(scene.vertices.len(),30); // 2 feet + body + eyes + gun
-        assert_eq!(scene.batches.len(),2); // skin batch, game batch
+        assert_eq!(scene.vertices.len(),60); // 2 outlined feet + body + eyes + gun + outlined hand
+        assert_eq!(scene.batches.len(),3); // skin, game, hand skin
         assert_eq!(scene.batches[0].texture,2);
-        assert_eq!(scene.batches[0].count,24);
+        assert_eq!(scene.batches[0].count,42);
         assert_eq!(scene.batches[1].texture,3);
         assert_eq!(scene.batches[1].count,6);
+        assert_eq!(scene.batches[2].texture,2);
+        assert_eq!(scene.batches[2].count,12);
         assert_eq!(scene.vertices[0].color,[255;4]);
     }
     #[test]
@@ -507,7 +539,7 @@ mod tests {
         assert!(active.vertices.len()>36);
         assert_eq!(active.batches[0].texture,3);
         assert_eq!(active.batches[1].texture,2);
-        assert_eq!(active.batches.last().unwrap().texture,3);
+        assert_eq!(active.batches.last().unwrap().texture,2);
         let idle=build_gpu_tees(&state,camera(),200,(400,200),
             Some(&skin),Some(&game),slots()).unwrap();
         assert_eq!(active.vertices.len(),idle.vertices.len()+6);
@@ -535,7 +567,8 @@ mod tests {
             state.items[0].words[5]=(std::f32::consts::PI*256.0) as i32;
             let scene=build_gpu_tees(&state,camera(),99,(200,200),
                 Some(&skin),Some(&game),slots()).unwrap();
-            assert_eq!(scene.vertices.len(),30);
+            assert_eq!(scene.vertices.len(),
+                if matches!(weapon, 1..=3) { 60 } else { 48 });
             assert!(scene.vertices.iter().all(|v|
                 v.uv.iter().all(|n| (0.0..=1.0).contains(n))
                 && v.clip.iter().all(|n| n.is_finite())));
