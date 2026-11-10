@@ -5,12 +5,16 @@
 
 use crate::gpu_scene::{GpuBatch, GpuVertex, MAX_FRAME_VERTICES};
 use crate::graphics::{Camera, RenderError, HOOK};
-use crate::netobjects::{CharacterCoreNet, PickupNet, SwitchStateNet, CHARACTER_TYPE};
+use crate::netobjects::{
+    CharacterCoreNet, LaserNet, PickupNet, ProjectileNet, SwitchStateNet,
+    CHARACTER_TYPE,
+};
 use crate::snapshot_delta::SnapshotState;
 use crate::sprite_render::{
     Sprite, GRID_SKIN, GRID_GAME, BODY, FOOT, HOOK_HEAD, HOOK_CHAIN,
     MAX_HOOK_DISTANCE, skin_eye, weapon_sprite, muzzle_sprite, valid_sheet,
     pickup_art, pickup_position, pickup_orientation, pickup_visible,
+    projectile_visual,
 };
 use crate::texture::Texture;
 
@@ -275,7 +279,45 @@ pub fn build_gpu_tees_into(
         scene: std::mem::take(output),
         width: viewport.0 as f32, height: viewport.1 as f32, slots,
     };
+    // Match software item rendering: projectiles and laser beams are
+    // world-space geometry drawn behind tee hooks/skins and before HUD.
+    // These shapes cost no full-screen pixel upload.
+    for item in &state.items {
+        if let Some(laser) = LaserNet::from_object(item) {
+            let from = b.screen(camera, laser.from_x as f32, laser.from_y as f32);
+            let to = b.screen(camera, laser.to_x as f32, laser.to_y as f32);
+            let dx = to.0 - from.0;
+            let dy = to.1 - from.1;
+            let length = dx.hypot(dy);
+            if length.is_finite() && (0.1..=32_768.0).contains(&length) {
+                let normal = (-dy / length, dx / length);
+                for offset in -5i32..=5 {
+                    let shift = (normal.0 * offset as f32,
+                        normal.1 * offset as f32);
+                    let color = if offset.abs() >= 4 {
+                        0x2c6592
+                    } else {
+                        0xb4ebff
+                    };
+                    b.line((from.0 + shift.0, from.1 + shift.1),
+                        (to.0 + shift.0, to.1 + shift.1), color);
+                }
+            }
+        }
+    }
     if game {
+        for item in &state.items {
+            if let Some(projectile) = ProjectileNet::from_object(item) {
+                if let Some(((x, y), angle, sprite)) =
+                    projectile_visual(projectile, tick)
+                {
+                    let center = b.screen(camera, x, y);
+                    b.sprite(b.slots.game, GRID_GAME, sprite, center,
+                        (32.0 * camera.scale, 32.0 * camera.scale),
+                        (angle, false));
+                }
+            }
+        }
         let ddnet_type = PickupNet::extended_type(state);
         let switches = SwitchStateNet::from_snapshot(state);
         for item in &state.items {
@@ -372,6 +414,30 @@ mod tests {
             Camera { scale: f32::NAN, ..camera() }, 131,
             (400, 200), (Some(&skin), Some(&game)), slots()).is_err());
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn native_gpu_renders_projectiles_and_laser_segments_behind_characters() {
+        let shot = SnapshotObject {
+            type_id: crate::netobjects::PROJECTILE_TYPE,
+            id: 4, words: vec![50, 50, 100, 0, 1, 100],
+        };
+        let beam = SnapshotObject {
+            type_id: crate::netobjects::LASER_TYPE,
+            id: 5, words: vec![110, 70, 40, 70, 100],
+        };
+        let state = SnapshotState { items: vec![shot, beam] };
+        let scene = build_gpu_tees(&state, camera(), 100, (200, 120),
+            Some(&tex(80, 40)), Some(&tex(320, 160)), slots()).unwrap();
+        assert_eq!(scene.characters, 0);
+        assert_eq!(scene.vertices.len(), 11 * 6 + 6);
+        assert_eq!(scene.batches[0].texture, slots().white);
+        assert_eq!(scene.batches[1].texture, slots().game);
+        assert_eq!(scene.vertices[66].uv, [6.0 / 32.0, 4.0 / 16.0]);
+        let empty = build_gpu_tees(&state, camera(), 100, (200, 120),
+            Some(&tex(80, 40)), None, slots()).unwrap();
+        assert_eq!(empty.vertices.len(), 11 * 6);
+        assert!(empty.batches.iter().all(|b| b.texture == slots().white));
     }
 
     #[test]
