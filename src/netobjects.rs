@@ -58,6 +58,8 @@ pub const VANILLA_OBJECT_NAMES: [&str; 21] = [
 
 pub const CHARACTERCORE_TYPE: u16 = 8;
 pub const CHARACTER_TYPE: u16 = 9;
+/// Standard 0.6 CNetObj_Pickup: x, y, powerup type, subtype.
+pub const PICKUP_TYPE: u16 = 4;
 pub const PLAYERINFO_TYPE: u16 = 10;
 pub const CLIENTINFO_TYPE: u16 = 11;
 
@@ -184,6 +186,28 @@ impl CharacterHudStatus {
             .client_id;
         let id = u16::try_from(id).ok()?;
         Self::from_object(snapshot.find(CHARACTER_TYPE, id)?)
+    }
+}
+
+/// Unmodified 0.6 CNetObj_Pickup from datasrc/network.py.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PickupNet {
+    pub x: i32,
+    pub y: i32,
+    pub kind: u8,
+    pub subtype: u8,
+}
+
+impl PickupNet {
+    pub fn from_object(object: &SnapshotObject) -> Option<Self> {
+        if object.type_id != PICKUP_TYPE || object.words.len() != 4 {
+            return None;
+        }
+        let w = &object.words;
+        let kind = u8::try_from(w[2]).ok().filter(|&kind| kind <= 8)?;
+        let subtype = u8::try_from(w[3]).ok()?;
+        if kind == 2 && subtype > 5 { return None; }
+        Some(Self { x: w[0], y: w[1], kind, subtype })
     }
 }
 
@@ -320,6 +344,32 @@ mod tests {
         state.items[1].words = vec![7; 17];
         state.items.push(state.items[1].clone());
         assert!(SwitchStateNet::from_snapshot(&state).is_none());
+    }
+
+    #[test]
+    fn vanilla_pickups_match_upstream_netobject_schema_and_reject_invalid() {
+        let p = |words: Vec<i32>| SnapshotObject {
+            type_id: PICKUP_TYPE, id: 9, words,
+        };
+        for kind in 0..=8 {
+            let mut data = p(vec![120, -64, kind, 0]);
+            assert_eq!(PickupNet::from_object(&data), Some(PickupNet {
+                x: 120, y: -64, kind: kind as u8, subtype: 0,
+            }));
+            if kind == 2 {
+                data.words[3] = 5;
+                assert!(PickupNet::from_object(&data).is_some());
+                data.words[3] = 6;
+                assert!(PickupNet::from_object(&data).is_none());
+            }
+        }
+        assert!(PickupNet::from_object(&p(vec![0, 0, 9, 0])).is_none());
+        assert!(PickupNet::from_object(&p(vec![0, 0, -1, 0])).is_none());
+        assert!(PickupNet::from_object(&p(vec![0, 0, 0, -1])).is_none());
+        assert!(PickupNet::from_object(&p(vec![0, 0, 0])).is_none());
+        let mut wrong = p(vec![0, 0, 0, 0]);
+        wrong.type_id = CHARACTER_TYPE;
+        assert!(PickupNet::from_object(&wrong).is_none());
     }
 
     #[test]
