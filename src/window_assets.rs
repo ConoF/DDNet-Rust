@@ -44,7 +44,27 @@ pub fn candidate_roots(map_path: Option<&Path>) -> Vec<PathBuf> {
     }
     roots.push(PathBuf::from("data"));
     roots.push(PathBuf::from("upstream/ddnet/data"));
-    roots.dedup();
+    // Native Linux packages do not normally place assets next to the Rust
+    // executable. The original DDNet can find these system data directories.
+    roots.push(PathBuf::from("/usr/share/ddnet/data"));
+    roots.push(PathBuf::from("/usr/local/share/ddnet/data"));
+    roots.push(PathBuf::from("/usr/share/games/ddnet/data"));
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        for steam in [
+            ".local/share/Steam/steamapps/common/DDNet/data",
+            ".steam/steam/steamapps/common/DDNet/data",
+        ] {
+            roots.push(home.join(steam));
+        }
+    }
+    // Preserve search preference while removing duplicates, including an
+    // environment override that points at the system-wide installation.
+    let mut unique = Vec::with_capacity(roots.len());
+    for root in roots {
+        if !unique.contains(&root) { unique.push(root); }
+    }
+    let roots = unique;
     roots
 }
 
@@ -159,5 +179,28 @@ impl WindowAssets {
         render_animated_snapshot(frame, snapshot, camera,
             self.default_skin.as_ref(), self.game_sprites.as_ref(), tick)
             .map_err(|e| format!("animated tee render: {e:?}"))
+    }
+}
+
+#[cfg(test)]
+mod asset_root_tests {
+    use super::*;
+
+    #[test]
+    fn linux_system_ddnet_assets_and_map_relative_priority_are_discoverable() {
+        let roots = candidate_roots(Some(Path::new(
+            "/tmp/maps/downloadedmaps/SomeMap.map",
+        )));
+        assert_eq!(roots[0], Path::new("/tmp/maps"));
+        assert!(roots.iter().any(|p| p == Path::new("/usr/share/ddnet/data")));
+        assert!(roots.iter().any(|p| p == Path::new("/usr/share/games/ddnet/data")));
+        assert!(roots.iter().any(|p| p == Path::new("/usr/local/share/ddnet/data")));
+        assert_eq!(roots.iter().collect::<std::collections::HashSet<_>>().len(),
+            roots.len(), "a repeated asset root must not cause extra PNG I/O");
+        if let Some(home) = std::env::var_os("HOME") {
+            assert!(roots.contains(&PathBuf::from(home).join(
+                ".local/share/Steam/steamapps/common/DDNet/data",
+            )));
+        }
     }
 }
