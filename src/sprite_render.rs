@@ -42,16 +42,16 @@ pub(crate) fn weapon_sprite(weapon: i32) -> Option<Sprite> {
 /// cells for each of the six 0.6 weapons. These remain in HUD screen
 /// coordinates, independent of the camera or gameplay hook direction.
 pub(crate) fn weapon_cursor_sprite(weapon: i32) -> Option<Sprite> {
-    let x = match weapon {
-        0 => 0, // hammer
-        1 => 4, // gun
-        2 => 6, // shotgun
-        3 => 8, // grenade
+    let y = match weapon {
+        0 => 0,  // hammer
+        1 => 4,  // gun
+        2 => 6,  // shotgun
+        3 => 8,  // grenade
         4 => 12, // laser
         5 => 10, // ninja
         _ => return None,
     };
-    Some(Sprite { x, y: 2, w: 2, h: 2 })
+    Some(Sprite { x: 0, y, w: 2, h: 2 })
 }
 
 /// Overlay a cursor from game.png. Missing assets are handled by the caller,
@@ -382,11 +382,11 @@ mod tests {
 
     #[test]
     fn all_six_cursor_regions_match_upstream_game_png_coordinates() {
-        for (weapon, x) in [(0, 0), (1, 4), (2, 6),
+        for (weapon, y) in [(0, 0), (1, 4), (2, 6),
             (3, 8), (4, 12), (5, 10)]
         {
             assert_eq!(weapon_cursor_sprite(weapon),
-                Some(Sprite { x, y: 2, w: 2, h: 2 }));
+                Some(Sprite { x: 0, y, w: 2, h: 2 }));
         }
         assert_eq!(weapon_cursor_sprite(-1), None);
         assert_eq!(weapon_cursor_sprite(6), None);

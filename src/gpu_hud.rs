@@ -286,16 +286,16 @@ mod tests {
         let atlas = Texture::from_rgba(320, 160, vec![255; 320 * 160 * 4])
             .unwrap();
         let mut hud = GpuHudScene::new(64, 64);
-        for (weapon, start_u) in [
-            (0, 0.0), (1, 4.0 / 32.0), (2, 6.0 / 32.0),
-            (3, 8.0 / 32.0), (4, 12.0 / 32.0), (5, 10.0 / 32.0),
+        for (weapon, row) in [
+            (0, 0.0), (1, 4.0), (2, 6.0),
+            (3, 8.0), (4, 12.0), (5, 10.0),
         ] {
             hud.clear();
             hud.draw_weapon_cursor(weapon, (32.0, 32.0), Some(&atlas));
             assert_eq!(hud.vertices.len(), 6);
             assert_eq!(hud.batches[0].texture, HUD_GAME_CURSOR_SLOT);
-            assert!((hud.vertices[0].uv[0] - start_u).abs() < 0.0001);
-            assert_eq!(hud.vertices[0].uv[1], 2.0 / 16.0);
+            assert_eq!(hud.vertices[0].uv[0], 0.0);
+            assert_eq!(hud.vertices[0].uv[1], row / 16.0);
         }
         hud.clear();
         hud.draw_weapon_cursor(1, (2.0, 3.0), Some(&atlas));
@@ -303,7 +303,7 @@ mod tests {
         assert!(hud.vertices.iter().all(|v|
             v.clip.iter().all(|&n| (-1.0..=1.0).contains(&n))
         ));
-        assert!(hud.vertices[0].uv[0] > 4.0 / 32.0,
+        assert!(hud.vertices[0].uv[0] > 0.0,
             "left-clipped cursor must shift its source UVs");
         hud.clear();
         hud.draw_weapon_cursor(1, (f32::NAN, 0.0), Some(&atlas));
