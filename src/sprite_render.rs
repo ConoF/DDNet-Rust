@@ -8,7 +8,7 @@ use crate::graphics::{Camera, Framebuffer, RenderError, HOOK};
 use crate::netobjects::{CharacterCoreNet, CHARACTER_TYPE};
 use crate::snapshot_delta::SnapshotState;
 use crate::texture::Texture;
-use crate::netobjects::{CharacterHudStatus, PickupNet};
+use crate::netobjects::{CharacterHudStatus, PickupNet, SwitchStateNet};
 
 pub(crate) const MAX_HOOK_DISTANCE: f32 = 2048.0;
 pub(crate) const GRID_SKIN: (usize, usize) = (8, 4);
@@ -166,6 +166,20 @@ pub(crate) fn pickup_position(pickup: PickupNet, tick: u64) -> (f32, f32) {
 /// Convert the quarter-turn and two sprite-axis mirrors in
 /// CItems::RenderPickup into the rotation + vertical mirror representation
 /// supported by both our native GPU and software sprite rasterizers.
+/// Inactive switch pickups are hidden for four out of every 22 game
+/// ticks, as in CItems::OnRender from DDNet 20.2.1. Unknown switch state
+/// must not incorrectly conceal a visible item.
+pub(crate) fn pickup_visible(
+    pickup: PickupNet, switches: Option<SwitchStateNet>, tick: u64,
+) -> bool {
+    let Ok(number) = u8::try_from(pickup.switch_number) else {
+        return true;
+    };
+    if number == 0 { return true; }
+    switches.and_then(|s| s.is_active(number)) != Some(false)
+        || tick % 22 >= 4
+}
+
 pub(crate) fn pickup_orientation(flags: u8) -> (f32, bool) {
     let rotated = flags & 4 != 0;
     let flip_x = flags & if rotated { 2 } else { 1 } != 0;
@@ -417,11 +431,14 @@ pub fn render_animated_snapshot(
     if let Some(atlas) = game {
         // CItems is drawn behind all player hooks and tee sprites.
         let ddnet_type = PickupNet::extended_type(state);
+        let switches = SwitchStateNet::from_snapshot(state);
         for item in &state.items {
             let pickup = PickupNet::from_object(item).or_else(|| {
                 ddnet_type.and_then(|kind| PickupNet::from_extended_object(item, kind))
             });
-            if let Some(pickup) = pickup {
+            if let Some(pickup) = pickup.filter(|&p|
+                pickup_visible(p, switches, tick))
+            {
                 draw_pickup(frame, pickup, atlas, camera, tick);
             }
         }
@@ -500,6 +517,36 @@ mod tests {
 
     fn camera() -> Camera {
         Camera { center: crate::physics::Vec2::new(100.0, 100.0), scale: 1.0 }
+    }
+
+    #[test]
+    fn inactive_switch_pickup_blinks_only_when_server_state_is_known() {
+        let state = SnapshotState { items: vec![
+            SnapshotObject {
+                type_id: 0, id: 0x4001,
+                words: crate::netobjects::SWITCH_STATE_UUID_WORDS.to_vec(),
+            },
+            SnapshotObject {
+                type_id: 0x4001, id: 0,
+                words: vec![15, 0, 0, 0, 0, 0, 0, 0, 0],
+            },
+        ] };
+        let mut pickup = PickupNet {
+            x: 0, y: 0, kind: 1, subtype: 0,
+            flags: 0, switch_number: 12,
+        };
+        let inactive = SwitchStateNet::from_snapshot(&state);
+        assert!(!pickup_visible(pickup, inactive, 0));
+        assert!(!pickup_visible(pickup, inactive, 3));
+        assert!(pickup_visible(pickup, inactive, 4));
+        assert!(pickup_visible(pickup, inactive, 21));
+        assert!(!pickup_visible(pickup, inactive, 22));
+        assert!(pickup_visible(pickup, None, 0));
+        pickup.switch_number = 0;
+        assert!(pickup_visible(pickup, inactive, 0));
+        pickup.switch_number = 255;
+        assert!(pickup_visible(pickup, inactive, 0),
+            "unknown switch numbers must remain visible");
     }
 
     #[test]

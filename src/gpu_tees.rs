@@ -5,12 +5,12 @@
 
 use crate::gpu_scene::{GpuBatch, GpuVertex, MAX_FRAME_VERTICES};
 use crate::graphics::{Camera, RenderError, HOOK};
-use crate::netobjects::{CharacterCoreNet, PickupNet, CHARACTER_TYPE};
+use crate::netobjects::{CharacterCoreNet, PickupNet, SwitchStateNet, CHARACTER_TYPE};
 use crate::snapshot_delta::SnapshotState;
 use crate::sprite_render::{
     Sprite, GRID_SKIN, GRID_GAME, BODY, FOOT, HOOK_HEAD, HOOK_CHAIN,
     MAX_HOOK_DISTANCE, skin_eye, weapon_sprite, muzzle_sprite, valid_sheet,
-    pickup_art, pickup_position, pickup_orientation,
+    pickup_art, pickup_position, pickup_orientation, pickup_visible,
 };
 use crate::texture::Texture;
 
@@ -277,11 +277,14 @@ pub fn build_gpu_tees_into(
     };
     if game {
         let ddnet_type = PickupNet::extended_type(state);
+        let switches = SwitchStateNet::from_snapshot(state);
         for item in &state.items {
             let pickup = PickupNet::from_object(item).or_else(|| {
                 ddnet_type.and_then(|kind| PickupNet::from_extended_object(item, kind))
             });
-            if let Some(pickup) = pickup {
+            if let Some(pickup) = pickup.filter(|&p|
+                pickup_visible(p, switches, tick))
+            {
                 if let Some((sprite, size)) = pickup_art(pickup) {
                     let (x, y) = pickup_position(pickup, tick);
                     let center = b.screen(camera, x, y);
